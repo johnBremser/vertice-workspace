@@ -1,0 +1,50 @@
+INSTRUÇÃO AO EXECUTOR LOCAL — VÉRTICE WORKSPACE / PLANO V6
+
+O ciclo do AI Studio está encerrado. Trabalhe diretamente em C:\llm\vertice-workspace e conclua a v1 web local conforme o plano. Não recomece a aplicação nem se limite a apresentar outro planejamento.
+
+Leia e siga:
+C:\llm\vertice-workspace\docs\implementation_plan_v6_local.md
+C:\llm\vertice-workspace\docs\revisao-local-v5-2026-11-17.md
+
+O plano v6 prevalece sobre instruções operacionais anteriores. Atualize o progresso em C:\llm\vertice-workspace\docs\v6-progress.md.
+
+IDENTIDADE E LIMITES
+
+Nome: Vértice Workspace
+Slogan: Seu time de agentes, do plano à entrega.
+Assinatura: Powered by AionCore
+
+Visual atual aprovado como base: refinar topo carregado, IDs técnicos aparentes e altura do cabeçalho/composer no mobile, preservando funcionalidade e temas. Não abrir outro redesenho.
+
+Usar Core oficial completo, separado e inicialmente sem modificações. Sem Electron, importação de monorepos, execução de CLIs pelo navegador ou redução de módulos. O minimal-core fica exclusivamente para avaliação futura.
+
+Não há Git/publicação nesta extração. Não tratar hashes do relato anterior como commits locais. Preserve baseline recuperável e prossiga; versionamento/publicação seguem o marco do plano e não bloqueiam correções independentes.
+
+PRIMEIRO: QUATRO CORREÇÕES COMPROVADAS
+
+1. Reparar package-lock para npm ci limpo Windows/Linux com opcionais nativos corretos. Suplementação manual Windows não é instalação final.
+2. Corrigir identidade do launcher: PID vivo e marcador salvo não comprovam que ainda seja a instância própria. Não encerrar processo alheio com PID reutilizado.
+3. Fazer GET /%ZZ retornar erro HTTP sem derrubar o servidor; verificar uma requisição válida em seguida.
+4. Preparar dist/ no job E2E da CI. O build de outro runner não é compartilhado automaticamente.
+
+A revisão passou tipos/build, 40/40 testes e 1/1 Playwright somente numa cópia temporária com nativos suplementados. Esse resultado não valida o lockfile original.
+
+DEPOIS: CONTINUAR ATÉ O PRODUTO
+
+Execute V6-00 a V6-10 por marcos: base corrigida; Core/proxy/autenticação reais; primeira sessão real; equipe/modelos/capacidades; coordenação única; plano/execução/auditoria; permissões e correções; contexto/retomada; acabamento; distribuição; validação integrada e versionamento/publicação.
+
+Primeiro comprove um agente real e depois amplie para a equipe. Equipe desejada: Terra 6.1 coordenador, Sol 6.1 planejador/auditor em sessão independente e Gemini Hydrogen executor via Antigravity; permitir separar planejamento e auditoria em duas sessões Sol. Nomes são preferências até confirmação dos IDs reais. Não inventar modelos/flags/endpoints/capacidades, nem substituir provedor silenciosamente.
+
+Preserve dados, backups, contratos, papéis e isolamento. Não renomear banco/protocolo pela marca. Use dados próprios para o Core do Vértice sem alterar o banco/configuração do AionUi existente. Respeite ferramentas e proteções da máquina; evite mudanças globais desnecessárias.
+
+Distinga histórico do Vértice, sessão nativa e chat visível no aplicativo do fornecedor. Comprove continuidade e retomada; não prometa sincronização universal. Com aba fechada, o navegador não coordena em segundo plano. Ao reabrir, recupere trabalho aceito pelo Core sem repetir etapas concluídas.
+
+Comprove o ciclo real num repositório de teste separado: três tarefas com dependência, alterações reais, auditoria, reprovação/correção, permissão recusada e recuperação de falhas. Evite dupla coordenação/despacho entre Core e aplicação. Resultado incerto exige reconciliação antes de reenviar.
+
+Mantenha políticas de autorização. Mock não produz prova de autenticação, execução, teste aprovado, contexto aplicado ou conclusão real. Operação enviada não é operação confirmada. Exponha honestamente capacidades indisponíveis.
+
+Trabalhe autonomamente no escopo. Para login interativo ou informação externa indispensável, peça exatamente o necessário e continue o trabalho independente. Não pedir autorização novamente para rotinas cobertas pelo plano. GitHub depende de conta/nome/visibilidade informados; não presumir publicação pública.
+
+ENTREGA
+
+Registre evidências por marco. Entregue código/testes, screenshots, comandos reproduzíveis, compatibilidade observada, evidência da colaboração real e limitações. Diferencie implementado, fixtures, navegador, runtime real e publicação. Só declare o produto concluído quando os critérios essenciais do plano v6 forem atendidos.

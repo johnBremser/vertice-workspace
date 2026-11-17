@@ -1,0 +1,52 @@
+INSTRUÇÃO FINAL AO HYDROGEN — VÉRTICE WORKSPACE / PLANO V5
+
+Continue o projeto existente em C:\llm\aion-desk, aberto no Antigravity, e execute o plano até entregar a v1 web local utilizável com agentes reais. Não recomece a aplicação nem se limite a apresentar outro plano. Inspecione o estado atual, implemente, teste e registre as evidências por marco.
+
+IDENTIDADE APROVADA
+
+Nome: Vértice Workspace
+Slogan: Seu time de agentes, do plano à entrega.
+Assinatura técnica: Powered by AionCore
+
+Aplique a identidade em src/config/brand.ts, título da página, interface, README e documentação vigente. A assinatura técnica fica discreta em Sobre/Configurações e na documentação. Não apresentar o produto como desenvolvido oficialmente pela equipe do Aion.
+
+Não renomear o diretório C:\llm\aion-desk, o banco IndexedDB, IDs, schemas de backup ou o protocolo interno aion-desk/v1 e o bloco aion-desk-json por causa da marca. Preserve compatibilidade e histórico.
+
+ARQUIVOS QUE GUIAM A EXECUÇÃO
+
+1. C:\llm\aion-desk\docs\implementation_plan_v5.md — escopo completo, sequência V5-00 a V5-08 e critérios de aceite.
+2. C:\llm\aion-desk\docs\design\visual-refresh-v1.md — direção visual e limites da alteração.
+3. C:\llm\aion-desk\docs\design\workspace-reference.html — referência visual navegável, com dados ilustrativos; não substituir o React por essa maquete.
+4. C:\llm\aion-desk\docs\future-minimal-core.md — avaliação futura, explicitamente fora desta execução.
+
+Leia também docs/architecture.md, docs/aioncore-integration.md e docs/local-handoff.md. A referência externa é AionCore v0.2.2, commit 503a87199eb978790ca77675b39c84b241535bf3. Verifique a procedência e o hash do binário efetivamente utilizado.
+
+ORDEM DO TRABALHO
+
+1. Preserve um baseline recuperável e organize Git local antes de alterações relevantes. Corrija a portabilidade Windows do teste do proxy com pathToFileURL, caso ainda pendente. Reproduza tipos, testes e build.
+2. Faça primeiro a atualização visual, incluindo a marca aprovada. Simplifique o topo, melhore tipografia e hierarquia, diferencie mensagens de eventos, organize abas de participantes e painel lateral de trabalho/contexto. Preserve temas claro/escuro, mobile, teclado e todos os fluxos existentes. Entregue screenshots antes/depois como um marco separado, sem misturar alterações no adaptador ou no domínio.
+3. Prossiga para Core real e primeiro agente; depois valide catálogo, modelos, capacidades e equipe com sessões independentes. Não implemente todas as integrações sem primeiro comprovar uma sessão real mínima.
+4. Valide o fluxo completo: objetivo, plano, tarefas e dependências, execução, entrega, auditoria, reprovação/correção e conclusão. Use um pequeno repositório de teste separado; comprove alterações reais, diff e resultados dos testes. Evite despacho duplicado entre a coordenação do Core e o pipeline da aplicação.
+5. Valide permissões, interrupção/cancelamento, falhas, expiração de sessão, reconexão, reload e recuperação sem perda ou duplicação. Defina honestamente o comportamento com a aba fechada; não prometer coordenação contínua sem suporte persistente no backend.
+6. Conclua primeiro uso, diagnóstico e operação diária. Prepare o build web local com origem estável, proxy HTTP/WS e scripts de início/encerramento, sem depender de Vite dev ou Electron.
+7. Após comprovar o primeiro fluxo real, prepare a publicação no GitHub e o restante de V5-08. Use conta, nome e visibilidade definidos pelo usuário; se faltarem, solicite somente esses dados e continue os trabalhos independentes. Não presumir repositório público. Feche CI, documentação, instalação reproduzível e critérios de release.
+
+BASE TÉCNICA E LIMITES
+
+Use o AionCore oficial completo, como processo separado e inicialmente sem modificações. Não incorporar o monorepo, recriar o backend ou criar lançador de CLIs no navegador. O executável não representa sozinho todo o ambiente: documente runtime gerenciado, CLIs, autenticação e diretórios de dados necessários; não versionar caches, credenciais ou binários desnecessários no Git.
+
+O minimal-core foi apenas registrado como possibilidade futura. Não iniciar esse estudo, remover módulos ou criar fork nesta execução.
+
+Preserve React, TypeScript, Tailwind, componentes e contratos existentes, persistência/migração, backups, isolamento por conversa, contexto versionado, permissões e rastreabilidade. Não acrescentar SaaS, cobrança, acesso público, marketplace ou um IDE completo.
+
+A equipe desejada é Terra 6.1 na coordenação, Sol 6.1 no planejamento/auditoria e Gemini Hydrogen na execução via Antigravity, permitindo também planejamento e auditoria em sessões separadas. Esses nomes são preferências até os IDs e capacidades reais serem confirmados. Dois participantes pelo mesmo CLI devem ter sessões e históricos independentes. Não inventar modelos, flags, endpoints ou capacidades. Se uma integração não funcionar no Core, registre a incompatibilidade e proponha uma alternativa concreta sem substituir silenciosamente o provedor.
+
+Modo demonstração deve continuar identificado. Nenhum mock pode produzir evidência de execução real, aprovação, autenticação, teste aprovado ou conclusão. Preserve aprovação humana onde a política exigir; não flexibilizar permissões para fazer o teste passar.
+
+FORMA DE ENTREGA
+
+Execute por marcos e continue as etapas seguintes sem pedir nova autorização para o trabalho já coberto pelo plano. Separar marcos significa preservar evidências e histórico, não parar após o visual. Quando houver dependência real de informação externa, descreva precisamente o que falta e avance no que for independente.
+
+Atualize docs/v5-progress.md a cada marco com mudanças, arquivos, comandos/resultados e pendências. Distinga implementado, testado com fixtures, observado no navegador e comprovado com Core/CLIs reais. Use testes relevantes; não remover ou enfraquecer verificações para obter resultado verde.
+
+No encerramento, entregue: resumo por marco, screenshots, instruções reproduzíveis de instalação/início, versões e compatibilidade observadas, resultados dos testes, evidência do ciclo colaborativo real e limitações remanescentes. Só declarar a v1 concluída quando os critérios de docs/implementation_plan_v5.md estiverem cumpridos; qualquer impedimento deve permanecer explícito.

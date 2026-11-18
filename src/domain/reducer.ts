@@ -1,15 +1,69 @@
+import { areTaskDependenciesSatisfied } from './taskRules';
 import { getParticipantRoles, getPrimaryRole, hasRole } from './teamValidation';
 import type {
   ConfigChangeRecord,
+  ContextReceiptStatus,
   ConversationProjection,
+  EscalationDecision,
   ExecutionEvent,
   GeneralFeedItem,
   Message,
   Participant,
   ParticipantRole,
   PlanRevision,
+  Task,
   WorkspaceConversation,
 } from './types';
+
+const RECEIPT_STATUS_RANK: Record<Exclude<ContextReceiptStatus, 'failed_needs_action'>, number> = {
+  pending_send: 0,
+  sent: 1,
+  received: 2,
+  applied: 3,
+};
+
+/**
+ * Imposes monotonic receipt ordering at the reducer layer; preventing `pending_send -> received`
+ * without prior `sent` evidence and validating turn order remain the adapter's responsibility
+ * (`finalizeCoreAgentMessage()`).
+ */
+function shouldAcceptReceiptTransition(
+  current: ContextReceiptStatus | undefined,
+  next: ContextReceiptStatus,
+): boolean {
+  if (!current) return true;
+  if (current === 'applied') return next === 'applied';
+  if (next === 'failed_needs_action') {
+    return current === 'pending_send' || current === 'sent' || current === 'failed_needs_action';
+  }
+  if (current === 'failed_needs_action') {
+    return next !== 'pending_send';
+  }
+  return RECEIPT_STATUS_RANK[next] >= RECEIPT_STATUS_RANK[current];
+}
+
+function hasExecutableOrActiveWork(
+  tasks: Task[],
+  escalations: EscalationDecision[],
+): boolean {
+  return tasks.some((t) => {
+    if (t.status === 'running' || t.status === 'awaiting_review') {
+      return true;
+    }
+    if (
+      t.status === 'queued' ||
+      t.status === 'planned' ||
+      t.status === 'changes_requested'
+    ) {
+      const hasPendingEscalation = escalations.some(
+        (e) => e.taskId === t.id && e.status === 'suggested',
+      );
+      if (hasPendingEscalation) return false;
+      return areTaskDependenciesSatisfied(t, tasks).satisfied;
+    }
+    return false;
+  });
+}
 
 export type IngestResultStatus =
   | 'applied'
@@ -500,6 +554,40 @@ export function applyEventIncrementally(
             : p,
         );
       }
+      if (
+        event.payload.patch.status &&
+        conversation.executionStatus !== 'paused_queue' &&
+        conversation.executionStatus !== 'paused_demo'
+      ) {
+        if (tasks.length > 0 && tasks.every((t) => t.status === 'completed')) {
+          conversation = {
+            ...conversation,
+            executionStatus: 'completed',
+          };
+        } else if (
+          (event.payload.patch.status === 'blocked' ||
+            event.payload.patch.status === 'failed' ||
+            event.payload.patch.status === 'cancelled') &&
+          !hasExecutableOrActiveWork(tasks, escalations)
+        ) {
+          const hasBlockedOrStuck = tasks.some(
+            (t) =>
+              t.status === 'blocked' ||
+              t.status === 'queued' ||
+              t.status === 'planned' ||
+              t.status === 'changes_requested',
+          );
+          conversation = {
+            ...conversation,
+            executionStatus:
+              event.payload.patch.status === 'failed'
+                ? 'failed'
+                : event.payload.patch.status === 'blocked' || hasBlockedOrStuck
+                  ? 'blocked'
+                  : 'idle',
+          };
+        }
+      }
       generalFeed = appendGeneralItem(generalFeed, {
         id: `gf_${event.id}`,
         conversationId: event.conversationId,
@@ -551,6 +639,27 @@ export function applyEventIncrementally(
               }
             : p,
         );
+      }
+      if (
+        event.payload.nextStatus === 'blocked' ||
+        event.payload.nextStatus === 'cancelled'
+      ) {
+        if (!hasExecutableOrActiveWork(tasks, escalations)) {
+          const hasBlockedOrStalledTask = tasks.some(
+            (t) =>
+              t.status === 'blocked' ||
+              t.status === 'queued' ||
+              t.status === 'planned' ||
+              t.status === 'changes_requested',
+          );
+          conversation = {
+            ...conversation,
+            executionStatus:
+              event.payload.nextStatus === 'blocked' || hasBlockedOrStalledTask
+                ? 'blocked'
+                : 'idle',
+          };
+        }
       }
       if (event.payload.projectToGeneral && event.payload.generalSummary) {
         generalFeed = appendGeneralItem(generalFeed, {
@@ -731,6 +840,12 @@ export function applyEventIncrementally(
           activeTabId,
         );
       }
+      if (!hasExecutableOrActiveWork(tasks, escalations)) {
+        conversation = {
+          ...conversation,
+          executionStatus: 'failed',
+        };
+      }
       generalFeed = appendGeneralItem(generalFeed, {
         id: `gf_${event.id}`,
         conversationId: event.conversationId,
@@ -851,17 +966,25 @@ export function applyEventIncrementally(
     }
 
     case 'context_receipt_updated': {
-      contextRevisions = contextRevisions.map((rev) =>
-        rev.id === event.payload.revisionId
-          ? {
-              ...rev,
-              receipts: {
-                ...rev.receipts,
-                [event.payload.participantId]: event.payload.receipt,
-              },
-            }
-          : rev,
-      );
+      contextRevisions = contextRevisions.map((rev) => {
+        if (rev.id !== event.payload.revisionId) return rev;
+        const existingReceipt = rev.receipts[event.payload.participantId];
+        if (
+          !shouldAcceptReceiptTransition(
+            existingReceipt?.status,
+            event.payload.receipt.status,
+          )
+        ) {
+          return rev;
+        }
+        return {
+          ...rev,
+          receipts: {
+            ...rev.receipts,
+            [event.payload.participantId]: event.payload.receipt,
+          },
+        };
+      });
       if (event.payload.projectToGeneral && event.payload.generalSummary) {
         const participant = participants.find(
           (p) => p.id === event.payload.participantId,

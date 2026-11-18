@@ -1,0 +1,28 @@
+RETORNO DO AUDITOR — V6-05
+
+Manter a pausa antes do V6-06. A suíte atual passou aqui (53/53) e TypeScript também, mas reproduzi dois grupos de falhas adicionais, sem qualquer chamada a Core/CLI/modelo.
+
+Leia docs/auditoria-v6-05-2026-11-17.md e faça somente estas correções:
+
+1. P1 — Correlação estrita de entrega/parecer
+
+Em aionCoreAdapter.ts, applyStructuredDeliveryReport e applyStructuredReviewDecision usam fallback quando taskId/attemptId não existem.
+
+Reproduções pelo processamento normal de envelopes válidos:
+- Entrega com tarefa ou tentativa inexistente foi aplicada à tarefa atual, que virou awaiting_review.
+- Parecer approved com tarefa ou tentativa inexistente concluiu a tarefa atual.
+- Parecer da tentativa antiga concluiu a tarefa mesmo com uma tentativa nova ainda running.
+
+Não substituir IDs explícitos incorretos por outra tarefa/tentativa. Verificar autoria, papel, identidade, tentativa esperada e estado elegível antes de alterar negócio. Preservar saída incompatível e exigir revisão manual, sem conclusão, reprovação, criação implícita de tentativa ou novo despacho automático. Se attemptId omitido continuar permitido, exigir correlação inequívoca; não escolher a última tentativa em caso ambíguo.
+
+Adicionar regressões para IDs inexistentes, resposta antiga após nova tentativa/cancelamento e reentrega duplicada. Manter positivo o fluxo válido.
+
+2. P2 — Conversa continua running no teto com tarefa dependente queued
+
+No reducer.ts, hasActiveWork considera qualquer queued como trabalho ativo. Com A blocked por teto e B queued dependendo de A, a conversa permanece running sem trabalho executável.
+
+Considerar dependências e trabalho efetivamente executável ao agregar o estado. Sinalizar bloqueio quando não houver caminho de avanço; preservar running quando houver trabalho independente ativo/apto. Cobrir o caso dependente, o independente e a tarefa isolada. Conferir o caminho semelhante de cancelamento.
+
+Não iniciar V6-06 nem repetir rodadas pagas para esses dois grupos. Corrigir com fixtures, executar tipos/testes/build e verificações pertinentes, atualizar docs/v6-progress.md e apresentar evidências para nova análise do auditor.
+
+As limitações transparentes de Allow always, promoção de modelo não repetida ao vivo e variante invalid coberta por fixtures não exigem, nesta revisão, repetição paga dos cenários já registrados.

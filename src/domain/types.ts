@@ -118,6 +118,7 @@ export interface ConnectionAdapterConfig {
   coreReachability: 'unknown' | 'reachable' | 'unreachable';
   catalogLoaded: boolean;
   executableStatus: 'unknown_in_browser' | 'verified' | 'missing' | 'unknown';
+  coreAgentStatus?: string;
   authStatus:
     | 'simulated'
     | 'authenticated'
@@ -161,6 +162,13 @@ export interface SessionRef {
   externalTeamId?: string;
   externalSlotId?: string;
   externalConversationId?: string;
+  nativeSessionId?: string;
+  importedExternalRef?: {
+    externalTeamId?: string;
+    externalSlotId?: string;
+    externalConversationId?: string;
+    nativeSessionId?: string;
+  };
   status: 'inactive' | 'active' | 'disconnected' | 'terminated' | 'unknown';
   createdAt: string;
 }
@@ -462,6 +470,7 @@ export interface WorkspaceConversation {
   executionMode: ExecutionMode;
   teamPresetId?: string;
   externalTeamId?: string;
+  importedExternalTeamId?: string;
   status: 'active' | 'archived';
   executionStatus: ConversationExecutionStatus;
   coordinatorParticipantId: string;
@@ -751,6 +760,7 @@ export interface ConversationSnapshot {
 export interface WorkspaceStoreState {
   schemaVersion: number;
   executionMode: ExecutionMode;
+  coreSessionAuthenticated?: boolean;
   coreSettings: CoreRuntimeSettings;
   projects: Project[];
   connections: ConnectionAdapterConfig[];

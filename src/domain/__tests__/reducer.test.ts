@@ -600,4 +600,481 @@ describe('Domain incremental reducer & reconciliation', () => {
       }
     }
   });
+
+  it('aggregates conversation executionStatus honestly across blocked, cancelled, and failed tasks with dependent vs independent work (V6-05 P2)', () => {
+    const createTask = (
+      id: string,
+      title: string,
+      status: 'queued' | 'planned' | 'running',
+      dependencyTaskIds: string[] = [],
+    ) => ({
+      id,
+      conversationId: 'conv_p2',
+      sourceRequestEventId: 'evt_req',
+      title,
+      description: title,
+      assigneeParticipantId: 'part_claude',
+      reviewerParticipantId: 'part_antigravity',
+      dependencyTaskIds,
+      acceptanceCriteria: ['OK'],
+      status,
+      attempts: [],
+      reviews: [],
+      operationalFailureCount: 0,
+      qualityRejectionCount: 0,
+    });
+
+    const startAttempt = (proj: ReturnType<typeof makeBase>, seq: number, taskId: string, attId: string) =>
+      ingestEvent(proj, {
+        id: `evt_att_${seq}`,
+        seq,
+        conversationId: 'conv_p2',
+        timestamp: '2026-11-18T10:00:00.000Z',
+        origin: 'executor',
+        participantId: 'part_claude',
+        taskId,
+        attemptId: attId,
+        type: 'attempt_started',
+        payload: {
+          taskId,
+          attempt: {
+            id: attId,
+            taskId,
+            attemptNumber: 1,
+            executorParticipantId: 'part_claude',
+            modelTierUsed: 'fast',
+            rolesSnapshot: ['executor'],
+            instructionsSnapshot: 'Exec',
+            contextRevisionId: 'ctx_1',
+            contextRevisionNumber: 1,
+            status: 'running',
+            evidenceNotes: [],
+            startedAt: '2026-11-18T10:00:00.000Z',
+            sourceEventIds: [`evt_att_${seq}`],
+          },
+          participantStatus: 'running',
+          projectToGeneral: false,
+        },
+      }).projection;
+
+    // 1. Dependent case: A blocked by cap, B queued depending on A, C planned depending on B -> conversation MUST be 'blocked'
+    let depProj = makeBase('conv_p2');
+    depProj = ingestEvent(depProj, {
+      id: 'evt_a',
+      seq: 1,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:00:01.000Z',
+      origin: 'coordinator',
+      taskId: 't_a',
+      type: 'task_created',
+      payload: { task: createTask('t_a', 'Tarefa A', 'queued'), generalSummary: 'A' },
+    }).projection;
+    depProj = ingestEvent(depProj, {
+      id: 'evt_b',
+      seq: 2,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:00:02.000Z',
+      origin: 'coordinator',
+      taskId: 't_b',
+      type: 'task_created',
+      payload: { task: createTask('t_b', 'Tarefa B', 'queued', ['t_a']), generalSummary: 'B' },
+    }).projection;
+    depProj = ingestEvent(depProj, {
+      id: 'evt_c',
+      seq: 3,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:00:03.000Z',
+      origin: 'coordinator',
+      taskId: 't_c',
+      type: 'task_created',
+      payload: { task: createTask('t_c', 'Tarefa C', 'planned', ['t_b']), generalSummary: 'C' },
+    }).projection;
+    depProj = startAttempt(depProj, 4, 't_a', 'att_a_1');
+    expect(depProj.conversation.executionStatus).toBe('running');
+
+    depProj = ingestEvent(depProj, {
+      id: 'evt_a_blocked',
+      seq: 5,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:00:05.000Z',
+      origin: 'system',
+      participantId: 'part_claude',
+      taskId: 't_a',
+      type: 'task_status_changed',
+      payload: {
+        taskId: 't_a',
+        nextStatus: 'blocked',
+        participantStatus: 'blocked',
+        projectToGeneral: true,
+        generalSummary: 'Teto atingido em A',
+      },
+    }).projection;
+    expect(depProj.tasks.find((t) => t.id === 't_a')?.status).toBe('blocked');
+    expect(depProj.tasks.find((t) => t.id === 't_b')?.status).toBe('queued');
+    expect(depProj.conversation.executionStatus).toBe('blocked');
+
+    // 2. Independent case: A blocked, B queued with NO dependencies -> conversation MUST remain 'running'
+    let indepProj = makeBase('conv_p2');
+    indepProj = ingestEvent(indepProj, {
+      id: 'evt_ia',
+      seq: 1,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:01:01.000Z',
+      origin: 'coordinator',
+      taskId: 't_a',
+      type: 'task_created',
+      payload: { task: createTask('t_a', 'Tarefa A', 'queued'), generalSummary: 'A' },
+    }).projection;
+    indepProj = ingestEvent(indepProj, {
+      id: 'evt_ib',
+      seq: 2,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:01:02.000Z',
+      origin: 'coordinator',
+      taskId: 't_b',
+      type: 'task_created',
+      payload: { task: createTask('t_b', 'Tarefa B independente', 'queued', []), generalSummary: 'B' },
+    }).projection;
+    indepProj = startAttempt(indepProj, 3, 't_a', 'att_ia_1');
+    indepProj = ingestEvent(indepProj, {
+      id: 'evt_ia_blocked',
+      seq: 4,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:01:04.000Z',
+      origin: 'system',
+      participantId: 'part_claude',
+      taskId: 't_a',
+      type: 'task_status_changed',
+      payload: {
+        taskId: 't_a',
+        nextStatus: 'blocked',
+        participantStatus: 'blocked',
+        projectToGeneral: true,
+        generalSummary: 'Teto atingido em A',
+      },
+    }).projection;
+    expect(indepProj.conversation.executionStatus).toBe('running');
+
+    // 3. Isolated task blocked -> 'blocked'
+    let isoProj = makeBase('conv_p2');
+    isoProj = ingestEvent(isoProj, {
+      id: 'evt_iso_a',
+      seq: 1,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:02:01.000Z',
+      origin: 'coordinator',
+      taskId: 't_a',
+      type: 'task_created',
+      payload: { task: createTask('t_a', 'Isolada', 'queued'), generalSummary: 'A' },
+    }).projection;
+    isoProj = startAttempt(isoProj, 2, 't_a', 'att_iso_1');
+    isoProj = ingestEvent(isoProj, {
+      id: 'evt_iso_blocked',
+      seq: 3,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:02:03.000Z',
+      origin: 'system',
+      participantId: 'part_claude',
+      taskId: 't_a',
+      type: 'task_status_changed',
+      payload: { taskId: 't_a', nextStatus: 'blocked', participantStatus: 'blocked' },
+    }).projection;
+    expect(isoProj.conversation.executionStatus).toBe('blocked');
+
+    // 4. Cancellation paths: isolated -> 'idle'; with dependent queued -> 'blocked'; with independent queued -> 'running'
+    let cancelIso = makeBase('conv_p2');
+    cancelIso = ingestEvent(cancelIso, {
+      id: 'evt_ca',
+      seq: 1,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:03:01.000Z',
+      origin: 'coordinator',
+      taskId: 't_a',
+      type: 'task_created',
+      payload: { task: createTask('t_a', 'Cancelável', 'queued'), generalSummary: 'A' },
+    }).projection;
+    cancelIso = startAttempt(cancelIso, 2, 't_a', 'att_ca_1');
+    cancelIso = ingestEvent(cancelIso, {
+      id: 'evt_ca_cancel',
+      seq: 3,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:03:03.000Z',
+      origin: 'gateway',
+      participantId: 'part_claude',
+      taskId: 't_a',
+      type: 'task_status_changed',
+      payload: { taskId: 't_a', nextStatus: 'cancelled', participantStatus: 'idle' },
+    }).projection;
+    expect(cancelIso.conversation.executionStatus).toBe('idle');
+
+    let cancelDep = makeBase('conv_p2');
+    cancelDep = ingestEvent(cancelDep, {
+      id: 'evt_cd_a',
+      seq: 1,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:04:01.000Z',
+      origin: 'coordinator',
+      taskId: 't_a',
+      type: 'task_created',
+      payload: { task: createTask('t_a', 'A', 'queued'), generalSummary: 'A' },
+    }).projection;
+    cancelDep = ingestEvent(cancelDep, {
+      id: 'evt_cd_b',
+      seq: 2,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:04:02.000Z',
+      origin: 'coordinator',
+      taskId: 't_b',
+      type: 'task_created',
+      payload: { task: createTask('t_b', 'B dep A', 'queued', ['t_a']), generalSummary: 'B' },
+    }).projection;
+    cancelDep = startAttempt(cancelDep, 3, 't_a', 'att_cd_1');
+    cancelDep = ingestEvent(cancelDep, {
+      id: 'evt_cd_cancel',
+      seq: 4,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:04:04.000Z',
+      origin: 'gateway',
+      participantId: 'part_claude',
+      taskId: 't_a',
+      type: 'task_status_changed',
+      payload: { taskId: 't_a', nextStatus: 'cancelled', participantStatus: 'idle' },
+    }).projection;
+    expect(cancelDep.conversation.executionStatus).toBe('blocked');
+
+    let cancelIndep = makeBase('conv_p2');
+    cancelIndep = ingestEvent(cancelIndep, {
+      id: 'evt_ci_a',
+      seq: 1,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:05:01.000Z',
+      origin: 'coordinator',
+      taskId: 't_a',
+      type: 'task_created',
+      payload: { task: createTask('t_a', 'A', 'queued'), generalSummary: 'A' },
+    }).projection;
+    cancelIndep = ingestEvent(cancelIndep, {
+      id: 'evt_ci_b',
+      seq: 2,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:05:02.000Z',
+      origin: 'coordinator',
+      taskId: 't_b',
+      type: 'task_created',
+      payload: { task: createTask('t_b', 'B indep', 'queued', []), generalSummary: 'B' },
+    }).projection;
+    cancelIndep = startAttempt(cancelIndep, 3, 't_a', 'att_ci_1');
+    cancelIndep = ingestEvent(cancelIndep, {
+      id: 'evt_ci_cancel',
+      seq: 4,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:05:04.000Z',
+      origin: 'gateway',
+      participantId: 'part_claude',
+      taskId: 't_a',
+      type: 'task_status_changed',
+      payload: { taskId: 't_a', nextStatus: 'cancelled', participantStatus: 'idle' },
+    }).projection;
+    expect(cancelIndep.conversation.executionStatus).toBe('running');
+
+    // 5. Operational failure with dependent queued -> 'failed'; with independent queued -> 'running'
+    let failDep = makeBase('conv_p2');
+    failDep = ingestEvent(failDep, {
+      id: 'evt_fd_a',
+      seq: 1,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:06:01.000Z',
+      origin: 'coordinator',
+      taskId: 't_a',
+      type: 'task_created',
+      payload: { task: createTask('t_a', 'A', 'queued'), generalSummary: 'A' },
+    }).projection;
+    failDep = ingestEvent(failDep, {
+      id: 'evt_fd_b',
+      seq: 2,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:06:02.000Z',
+      origin: 'coordinator',
+      taskId: 't_b',
+      type: 'task_created',
+      payload: { task: createTask('t_b', 'B dep A', 'queued', ['t_a']), generalSummary: 'B' },
+    }).projection;
+    failDep = startAttempt(failDep, 3, 't_a', 'att_fd_1');
+    failDep = ingestEvent(failDep, {
+      id: 'evt_fd_fail',
+      seq: 4,
+      conversationId: 'conv_p2',
+      timestamp: '2026-11-18T10:06:04.000Z',
+      origin: 'gateway',
+      participantId: 'part_claude',
+      taskId: 't_a',
+      attemptId: 'att_fd_1',
+      type: 'operational_failure_recorded',
+      payload: {
+        taskId: 't_a',
+        attemptId: 'att_fd_1',
+        reason: 'CLI exit 1',
+        participantStatus: 'failed',
+        generalSummary: 'Falha operacional em A',
+      },
+    }).projection;
+    expect(failDep.conversation.executionStatus).toBe('failed');
+  });
+
+  it('enforces monotonic context receipt transitions without downgrades and syncs executionStatus on task_updated (V6-06)', () => {
+    let proj = makeBase('conv_v606_rcpt');
+
+    proj = ingestEvent(proj, {
+      id: 'evt_ctx_pub_1',
+      seq: 1,
+      conversationId: 'conv_v606_rcpt',
+      timestamp: '2026-11-18T11:00:00.000Z',
+      origin: 'user',
+      type: 'context_revision_published',
+      payload: {
+        revision: {
+          id: 'ctx_v1',
+          conversationId: 'conv_v606_rcpt',
+          versionNumber: 1,
+          authorLabel: 'Você',
+          createdAt: '2026-11-18T11:00:00.000Z',
+          summaryOfChange: 'Base v1',
+          objective: 'Entregar V6-06',
+          permanentInstructions: [],
+          constraints: [],
+          acceptanceCriteria: [],
+          confirmedDecisions: [],
+          receipts: {
+            part_claude: {
+              participantId: 'part_claude',
+              revisionId: 'ctx_v1',
+              status: 'pending_send',
+              policyApplied: 'next_turn',
+              updatedAt: '2026-11-18T11:00:00.000Z',
+              mechanismNote: 'Aguardando envio.',
+            },
+          },
+        },
+        generalSummary: 'Contexto v1 publicado.',
+      },
+    }).projection;
+
+    const pushReceipt = (
+      seq: number,
+      status: 'pending_send' | 'sent' | 'received' | 'applied' | 'failed_needs_action',
+      note: string,
+    ) => {
+      proj = ingestEvent(proj, {
+        id: `evt_rcpt_${seq}`,
+        seq,
+        conversationId: 'conv_v606_rcpt',
+        timestamp: `2026-11-18T11:00:0${seq}.000Z`,
+        origin: 'gateway',
+        participantId: 'part_claude',
+        type: 'context_receipt_updated',
+        payload: {
+          revisionId: 'ctx_v1',
+          versionNumber: 1,
+          participantId: 'part_claude',
+          receipt: {
+            participantId: 'part_claude',
+            revisionId: 'ctx_v1',
+            status,
+            policyApplied: 'next_turn',
+            updatedAt: `2026-11-18T11:00:0${seq}.000Z`,
+            mechanismNote: note,
+          },
+          projectToGeneral: false,
+        },
+      }).projection;
+    };
+
+    // pending_send -> failed_needs_action -> sent -> received -> applied
+    pushReceipt(2, 'failed_needs_action', 'Falha HTTP 500');
+    expect(proj.contextRevisions[0].receipts.part_claude.status).toBe('failed_needs_action');
+
+    pushReceipt(3, 'sent', 'Reenviado');
+    expect(proj.contextRevisions[0].receipts.part_claude.status).toBe('sent');
+
+    pushReceipt(4, 'pending_send', 'Tentativa de downgrade para pending_send');
+    expect(proj.contextRevisions[0].receipts.part_claude.status).toBe('sent');
+
+    pushReceipt(5, 'received', 'Resposta recebida');
+    expect(proj.contextRevisions[0].receipts.part_claude.status).toBe('received');
+
+    pushReceipt(6, 'sent', 'Tentativa de downgrade para sent');
+    expect(proj.contextRevisions[0].receipts.part_claude.status).toBe('received');
+
+    pushReceipt(7, 'applied', 'Aplicado na entrega da Tentativa #1');
+    expect(proj.contextRevisions[0].receipts.part_claude.status).toBe('applied');
+
+    pushReceipt(8, 'received', 'Tentativa de downgrade de applied para received');
+    pushReceipt(9, 'failed_needs_action', 'Tentativa de downgrade de applied para failed');
+    expect(proj.contextRevisions[0].receipts.part_claude.status).toBe('applied');
+
+    // task_updated syncing executionStatus when active, and preserving paused_queue when paused
+    proj = ingestEvent(proj, {
+      id: 'evt_tu_create',
+      seq: 10,
+      conversationId: 'conv_v606_rcpt',
+      timestamp: '2026-11-18T11:01:00.000Z',
+      origin: 'gateway',
+      taskId: 't_sync_1',
+      type: 'task_created',
+      payload: {
+        task: {
+          id: 't_sync_1',
+          conversationId: 'conv_v606_rcpt',
+          sourceRequestEventId: 'evt_req',
+          title: 'Tarefa sincronizada',
+          description: 'Desc',
+          assigneeParticipantId: 'part_claude',
+          dependencyTaskIds: [],
+          acceptanceCriteria: ['OK'],
+          status: 'running',
+          attempts: [],
+          reviews: [],
+          operationalFailureCount: 0,
+          qualityRejectionCount: 0,
+        },
+        generalSummary: 'Criada',
+      },
+    }).projection;
+    proj = ingestEvent(proj, {
+      id: 'evt_tu_done',
+      seq: 11,
+      conversationId: 'conv_v606_rcpt',
+      timestamp: '2026-11-18T11:01:05.000Z',
+      origin: 'gateway',
+      taskId: 't_sync_1',
+      type: 'task_updated',
+      payload: {
+        taskId: 't_sync_1',
+        patch: { status: 'completed' },
+        generalSummary: 'Concluída via catch-up',
+      },
+    }).projection;
+    expect(proj.conversation.executionStatus).toBe('completed');
+
+    // When conversation is paused_queue, task_updated MUST preserve paused_queue
+    const pausedProj = {
+      ...proj,
+      conversation: { ...proj.conversation, executionStatus: 'paused_queue' as const },
+    };
+    const afterPausedUpdate = ingestEvent(pausedProj, {
+      id: 'evt_tu_paused_check',
+      seq: 12,
+      conversationId: 'conv_v606_rcpt',
+      timestamp: '2026-11-18T11:01:10.000Z',
+      origin: 'gateway',
+      taskId: 't_sync_1',
+      type: 'task_updated',
+      payload: {
+        taskId: 't_sync_1',
+        patch: { status: 'completed', description: 'Atualizada pausada' },
+        generalSummary: 'Atualizada',
+      },
+    }).projection;
+    expect(afterPausedUpdate.conversation.executionStatus).toBe('paused_queue');
+  });
 });

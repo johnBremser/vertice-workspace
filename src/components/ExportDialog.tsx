@@ -220,6 +220,10 @@ export function ExportDialog({
               aria-hidden="true"
             />
           </button>
+
+          <p className="rounded-md bg-[var(--bg-elevated)] px-3 py-2 text-[11px] leading-relaxed text-[var(--text-muted)]">
+            Antes de alterar origem ou porta (<code>host:porta</code>), exporte um backup JSON completo. O armazenamento local (IndexedDB) é isolado por origem no navegador — não copie arquivos internos do banco manualmente como substituto de migração.
+          </p>
         </div>
 
         {onImportState && (
@@ -266,6 +270,17 @@ export function ExportDialog({
                     {validation.preview.executionModes.join(', ') || 'demo'}
                   </li>
                 </ul>
+                <p className="rounded bg-[var(--bg-canvas)] px-2.5 py-2 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+                  Importar não inicia execução nem presume autenticação.
+                  {(validation.preview.externalTeamRefsCount > 0 ||
+                    validation.preview.externalSessionRefsCount > 0) && (
+                    <>
+                      {' '}
+                      Detectado(s) {validation.preview.externalTeamRefsCount} vínculo(s) de equipe e{' '}
+                      {validation.preview.externalSessionRefsCount} referência(s) de sessão Core: os vínculos ativos serão desconectados (mantidos apenas como referência histórica) e exigirão vinculação explícita no ambiente atual.
+                    </>
+                  )}
+                </p>
                 <div className="flex flex-wrap gap-2 pt-1">
                   <button
                     type="button"

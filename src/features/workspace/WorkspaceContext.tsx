@@ -897,10 +897,25 @@ export function WorkspaceProvider({
       }),
     importWorkspaceState: async (nextState) =>
       runAction(async () => {
-        await gatewayRef.current!.importWorkspaceState(nextState);
+        const currentGw = gatewayRef.current!;
+        if (nextState.executionMode !== currentGw.kind) {
+          currentGw.dispose();
+          const nextGw = gatewayFactory(
+            nextState.executionMode,
+            persistenceRef.current!,
+          );
+          bindGateway(nextGw);
+          await nextGw.importWorkspaceState(nextState);
+        } else {
+          await currentGw.importWorkspaceState(nextState);
+        }
+        setActiveTabByConv({});
+        draftsRef.current = {};
+        setDraftVersion((v) => v + 1);
         setActionBanner({
           tone: 'success',
-          message: 'Backup importado e persistido com sucesso.',
+          message:
+            'Backup importado e persistido com sucesso (nenhuma execução foi iniciada; vínculos Core externos foram desconectados).',
         });
       }),
 

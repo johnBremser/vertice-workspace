@@ -71,9 +71,11 @@ export function SettingsView() {
     {
       id: 'auth',
       label: '2. Autenticar sessão local',
-      done: (store?.connections ?? []).some(
-        (c) => c.authStatus === 'authenticated',
-      ),
+      done:
+        Boolean(store?.coreSessionAuthenticated) ||
+        (store?.connections ?? []).some(
+          (c) => c.authStatus === 'authenticated',
+        ),
       detail: 'Sessão mantida apenas no navegador via cookie/token da origem.',
     },
     {

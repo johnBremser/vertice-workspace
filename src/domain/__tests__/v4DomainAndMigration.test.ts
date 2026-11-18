@@ -686,4 +686,139 @@ describe('V4 Domain, Migration, Configurable Teams, Protocol & Backup', () => {
 
     gateway.dispose();
   });
+
+  it('detaches live Core external bindings on backup import (copy & replace), preserves historical provenance, never assumes login or auto-starts execution (V6-06)', async () => {
+    const persistence = new WorkspacePersistenceManager(new MemoryOnlyStorageDriver());
+    const gateway = new MockWorkspaceGateway(persistence);
+    const initial = await gateway.loadWorkspace();
+    const convId = Object.keys(initial.conversations)[0];
+    const baseProj = initial.conversations[convId];
+
+    const coreRichState: WorkspaceStoreState = {
+      ...structuredClone(initial),
+      executionMode: 'aion_core',
+      coreSessionAuthenticated: true,
+      connections: initial.connections.map((c, idx) =>
+        idx === 0
+          ? {
+              ...c,
+              mode: 'aion_core',
+              coreAgentId: 'agent_remote_1',
+              coreAssistantId: 'asst_remote_1',
+              authStatus: 'authenticated',
+              coreAgentStatus: 'online',
+              sessionStatus: 'active',
+              coreReachability: 'reachable',
+              catalogLoaded: true,
+            }
+          : c,
+      ),
+      conversations: {
+        [convId]: {
+          ...structuredClone(baseProj),
+          conversation: {
+            ...baseProj.conversation,
+            executionMode: 'aion_core',
+            executionStatus: 'running',
+            autoPlayWasRunning: true,
+            externalTeamId: 'team_remote_env_123',
+          },
+          participants: baseProj.participants.map((p, idx) => ({
+            ...p,
+            status: idx === 0 ? 'running' : 'idle',
+            sessionRef: {
+              ...p.sessionRef,
+              externalTeamId: 'team_remote_env_123',
+              externalSlotId: `slot_remote_${idx}`,
+              externalConversationId: `ext_conv_remote_${idx}`,
+              nativeSessionId: `cli_sess_remote_${idx}`,
+              status: 'active',
+            },
+          })),
+          contextRevisions: [
+            {
+              id: 'ctx_backup_v1',
+              conversationId: convId,
+              versionNumber: 1,
+              authorLabel: 'Você',
+              createdAt: '2026-11-18T10:00:00.000Z',
+              summaryOfChange: 'Contexto real exportado',
+              objective: 'Validar backup V6-06',
+              permanentInstructions: ['Sem credenciais'],
+              constraints: [],
+              acceptanceCriteria: ['Desvincular referências externas'],
+              confirmedDecisions: [],
+              receipts: {
+                [baseProj.participants[0].id]: {
+                  participantId: baseProj.participants[0].id,
+                  revisionId: 'ctx_backup_v1',
+                  status: 'applied',
+                  policyApplied: 'next_turn',
+                  updatedAt: '2026-11-18T10:01:00.000Z',
+                  mechanismNote: 'Aplicado na Tentativa #1.',
+                },
+              },
+            },
+          ],
+        },
+      },
+    };
+
+    const jsonText = buildWorkspaceJsonExport(coreRichState);
+    expect(jsonText).not.toContain('coreSessionAuthenticated');
+    expect(jsonText).not.toContain('aionui-session');
+    expect(jsonText).not.toContain('aionui-csrf-token');
+
+    const validation = parseAndValidateWorkspaceBackup(jsonText);
+    expect(validation.valid).toBe(true);
+    if (!validation.valid) return;
+
+    expect(validation.preview.externalTeamRefsCount).toBe(1);
+    expect(validation.preview.externalSessionRefsCount).toBe(baseProj.participants.length);
+
+    // 1. Replace mode: detaches live Core refs, clears login & Core connection bindings, pauses execution
+    const replaced = applyImportedWorkspaceBackup(initial, validation.migratedState, 'replace');
+    expect(replaced.coreSessionAuthenticated).toBe(false);
+    expect(replaced.connections[0].authStatus).toBe('unknown');
+    expect(replaced.connections[0].catalogLoaded).toBe(false);
+    expect(replaced.connections[0].coreAgentId).toBeUndefined();
+    expect(replaced.connections[0].coreAssistantId).toBeUndefined();
+    expect(replaced.connections[0].sessionStatus).toBe('inactive');
+
+    const repConv = replaced.conversations[convId];
+    expect(repConv.conversation.executionStatus).toBe('paused_queue');
+    expect(repConv.conversation.autoPlayWasRunning).toBe(false);
+    expect(repConv.conversation.externalTeamId).toBeUndefined();
+    expect(repConv.conversation.importedExternalTeamId).toBe('team_remote_env_123');
+    expect(repConv.participants[0].status).toBe('idle');
+    expect(repConv.participants[0].sessionRef.externalTeamId).toBeUndefined();
+    expect(repConv.participants[0].sessionRef.externalSlotId).toBeUndefined();
+    expect(repConv.participants[0].sessionRef.externalConversationId).toBeUndefined();
+    expect(repConv.participants[0].sessionRef.nativeSessionId).toBeUndefined();
+    expect(repConv.participants[0].sessionRef.status).toBe('inactive');
+    expect(repConv.participants[0].sessionRef.importedExternalRef).toEqual({
+      externalTeamId: 'team_remote_env_123',
+      externalSlotId: 'slot_remote_0',
+      externalConversationId: 'ext_conv_remote_0',
+      nativeSessionId: 'cli_sess_remote_0',
+    });
+    expect(repConv.contextRevisions).toHaveLength(1);
+    expect(repConv.contextRevisions[0].receipts[repConv.participants[0].id]?.status).toBe('applied');
+
+    // 2. Copy mode: remaps IDs, detaches live Core refs so two conversations never share a live Core team/slot
+    const copied = applyImportedWorkspaceBackup(coreRichState, validation.migratedState, 'copy');
+    const copiedConvIds = Object.keys(copied.conversations).filter((id) => id !== convId);
+    expect(copiedConvIds).toHaveLength(1);
+    const copiedProj = copied.conversations[copiedConvIds[0]];
+    expect(copiedProj.conversation.executionStatus).toBe('paused_queue');
+    expect(copiedProj.conversation.externalTeamId).toBeUndefined();
+    expect(copiedProj.conversation.importedExternalTeamId).toBe('team_remote_env_123');
+    expect(copiedProj.participants[0].sessionRef.externalSlotId).toBeUndefined();
+    expect(copiedProj.participants[0].sessionRef.importedExternalRef?.externalSlotId).toBe('slot_remote_0');
+    expect(copiedProj.participants[0].sessionRef.status).toBe('inactive');
+    // Original conversation kept untouched
+    expect(copied.conversations[convId].conversation.externalTeamId).toBe('team_remote_env_123');
+
+    gateway.dispose();
+  });
 });

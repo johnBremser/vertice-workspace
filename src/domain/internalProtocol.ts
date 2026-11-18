@@ -86,6 +86,19 @@ export function buildRoleInstructionPrompt(input: {
     baseLines.push(
       `Quando finalizar, inclua um bloco JSON delimitado por \`\`\`aion-desk-json ... \`\`\` com kind="${input.expectedKind}", protocol="${INTERNAL_PROTOCOL_VERSION}", conversationId="${input.conversationId}"${input.taskId ? `, taskId="${input.taskId}"` : ''}${input.attemptId ? `, attemptId="${input.attemptId}"` : ''}.`,
     );
+    if (input.expectedKind === 'plan_proposal') {
+      baseLines.push(
+        `Estrutura obrigatória do JSON plan_proposal: { "protocol": "${INTERNAL_PROTOCOL_VERSION}", "kind": "plan_proposal", "conversationId": "${input.conversationId}", "summary": "...", "tasks": [{ "title": "...", "description": "...", "assigneeRole": "executor", "dependencies": [], "acceptanceCriteria": ["..."] }] } (dependencies pode usar títulos exatos ou "task_1", "task_2"...).`,
+      );
+    } else if (input.expectedKind === 'delivery_report') {
+      baseLines.push(
+        `Estrutura obrigatória do JSON delivery_report: { "protocol": "${INTERNAL_PROTOCOL_VERSION}", "kind": "delivery_report", "conversationId": "${input.conversationId}", "taskId": "${input.taskId ?? ''}", "attemptId": "${input.attemptId ?? ''}", "deliverySummary": "...", "evidenceNotes": ["..."] }.`,
+      );
+    } else if (input.expectedKind === 'review_decision') {
+      baseLines.push(
+        `Estrutura obrigatória do JSON review_decision: { "protocol": "${INTERNAL_PROTOCOL_VERSION}", "kind": "review_decision", "conversationId": "${input.conversationId}", "taskId": "${input.taskId ?? ''}", "attemptId": "${input.attemptId ?? ''}", "decision": "approved" | "rejected", "rationale": "...", "unmetCriteria": [] }.`,
+      );
+    }
   }
   return baseLines.join('\n');
 }
@@ -215,6 +228,20 @@ export function parseStructuredAgentOutput(
 
   if (obj.kind === 'delivery_report') {
     if (
+      Object.prototype.hasOwnProperty.call(obj, 'attemptId') &&
+      obj.attemptId !== undefined &&
+      (typeof obj.attemptId !== 'string' || !obj.attemptId.trim())
+    ) {
+      return {
+        valid: false,
+        parseStatus: 'invalid',
+        rawBody,
+        errorReason:
+          'Campo attemptId inválido em delivery_report: quando presente, deve ser uma string não vazia.',
+        requiresManualReview: true,
+      };
+    }
+    if (
       typeof obj.taskId !== 'string' ||
       !obj.taskId.trim() ||
       typeof obj.deliverySummary !== 'string' ||
@@ -240,6 +267,20 @@ export function parseStructuredAgentOutput(
   }
 
   if (obj.kind === 'review_decision') {
+    if (
+      Object.prototype.hasOwnProperty.call(obj, 'attemptId') &&
+      obj.attemptId !== undefined &&
+      (typeof obj.attemptId !== 'string' || !obj.attemptId.trim())
+    ) {
+      return {
+        valid: false,
+        parseStatus: 'invalid',
+        rawBody,
+        errorReason:
+          'Campo attemptId inválido em review_decision: quando presente, deve ser uma string não vazia.',
+        requiresManualReview: true,
+      };
+    }
     if (
       typeof obj.taskId !== 'string' ||
       !obj.taskId.trim() ||

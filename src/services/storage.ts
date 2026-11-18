@@ -224,7 +224,12 @@ export class WorkspacePersistenceManager {
         const migrated = migrateWorkspaceState(loaded);
         const sanitized = sanitizeLoadedStateAfterReload(migrated);
         this.memoryFallbackState = sanitized;
-        if (previousSchema < APP_BRAND.storageSchemaVersion) {
+        const reloadPausedAny = Object.keys(sanitized.conversations).some(
+          (cid) =>
+            sanitized.conversations[cid]?.conversation.executionStatus !==
+            migrated.conversations[cid]?.conversation.executionStatus,
+        );
+        if (previousSchema < APP_BRAND.storageSchemaVersion || reloadPausedAny) {
           await this.driver.save(sanitized);
         }
         this.emit('saved');
@@ -285,6 +290,9 @@ export class WorkspacePersistenceManager {
     }
     if (this.activeWritePromise) {
       await this.activeWritePromise;
+      if (this.queuedWrite && this.status !== 'session_only') {
+        await this.flushSave();
+      }
       return;
     }
     if (!this.queuedWrite || this.status === 'session_only') {

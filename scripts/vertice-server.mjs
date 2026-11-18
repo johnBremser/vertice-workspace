@@ -239,21 +239,33 @@ function forwardWebSocketUpgrade(req, clientSocket, head, targetUrl) {
     ? tls.connect({ host: target.hostname, port, servername: target.hostname })
     : net.connect({ host: target.hostname, port });
 
+  clientSocket.setTimeout(0);
+  clientSocket.setNoDelay(true);
+  clientSocket.setKeepAlive(true, 15000);
+
+  let cleaned = false;
   const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
     if (!clientSocket.destroyed) clientSocket.destroy();
     if (!upstreamSocket.destroyed) upstreamSocket.destroy();
   };
 
   upstreamSocket.on('error', () => {
-    if (!clientSocket.destroyed) {
+    if (!clientSocket.destroyed && clientSocket.writable) {
       clientSocket.write('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n');
     }
     cleanup();
   });
 
   clientSocket.on('error', cleanup);
+  clientSocket.on('close', cleanup);
+  upstreamSocket.on('close', cleanup);
 
   upstreamSocket.on('connect', () => {
+    upstreamSocket.setTimeout(0);
+    upstreamSocket.setNoDelay(true);
+    upstreamSocket.setKeepAlive(true, 15000);
     const rawHeaders = [];
     for (let i = 0; i < req.rawHeaders.length; i += 2) {
       rawHeaders.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
@@ -278,19 +290,19 @@ export async function startVerticeServer(options = {}) {
 
   const host = String(
     options.host ??
-      process.env.VERTICE_HOST ??
-      process.env.HOST ??
-      fileEnv.VERTICE_HOST ??
-      fileEnv.HOST ??
-      '127.0.0.1',
+    process.env.VERTICE_HOST ??
+    process.env.HOST ??
+    fileEnv.VERTICE_HOST ??
+    fileEnv.HOST ??
+    '127.0.0.1',
   ).trim();
   const port = Number(
     options.port ??
-      process.env.VERTICE_PORT ??
-      process.env.PORT ??
-      fileEnv.VERTICE_PORT ??
-      fileEnv.PORT ??
-      4173,
+    process.env.VERTICE_PORT ??
+    process.env.PORT ??
+    fileEnv.VERTICE_PORT ??
+    fileEnv.PORT ??
+    4173,
   );
   const allowNonLoopback =
     options.allowNonLoopback ??
@@ -299,9 +311,9 @@ export async function startVerticeServer(options = {}) {
   const distDir = options.distDir ?? path.join(rootDir, 'dist');
   const proxyTarget = String(
     options.proxyTarget ??
-      process.env.VITE_AIONCORE_PROXY_TARGET ??
-      fileEnv.VITE_AIONCORE_PROXY_TARGET ??
-      '',
+    process.env.VITE_AIONCORE_PROXY_TARGET ??
+    fileEnv.VITE_AIONCORE_PROXY_TARGET ??
+    '',
   ).trim();
   const instanceId = String(
     options.instanceId ?? process.env.VERTICE_INSTANCE_ID ?? '',
@@ -311,8 +323,8 @@ export async function startVerticeServer(options = {}) {
   ).trim();
   const startedAt = String(
     options.startedAt ??
-      process.env.VERTICE_STARTED_AT ??
-      new Date().toISOString(),
+    process.env.VERTICE_STARTED_AT ??
+    new Date().toISOString(),
   ).trim();
   const onControlShutdown =
     typeof options.onControlShutdown === 'function'

@@ -1,0 +1,91 @@
+{
+  "startedAt": "2026-11-18T13:03:57.573Z",
+  "checks": {
+    "indexedDbFailure": {
+      "ok": true,
+      "exportNowVisible": true,
+      "warningText": "Armazenamento local indisponível (QuotaExceededError: armazenamento simulado indisponível). Dados mantidos apenas nesta sessão.\nExportar agora",
+      "pageErrors": []
+    },
+    "contextAndReceipts": {
+      "ok": false,
+      "receiptsBeforeSend": {
+        "Terra 6.1": "pending_send",
+        "Sol 6.1": "pending_send",
+        "Sol Executor": "pending_send"
+      },
+      "receiptsAtDispatch": {
+        "Terra 6.1": "sent",
+        "Sol 6.1": "pending_send",
+        "Sol Executor": "sent"
+      },
+      "receiptsAfterReconcile": {
+        "Terra 6.1": "sent",
+        "Sol 6.1": "pending_send",
+        "Sol Executor": "applied"
+      },
+      "receiptsFinal": {
+        "Terra 6.1": "received",
+        "Sol 6.1": "received",
+        "Sol Executor": "applied"
+      },
+      "ctxDiskContent": "V606_CTX_OK"
+    },
+    "reloadReconcileResume": {
+      "ok": true,
+      "teamId": "01a1eec1-f666-7462-95f6-9e74b81ec562",
+      "statusRightAfterReload": "paused_queue",
+      "postsDeltaOnReload": 0,
+      "afterReconcileTaskStatus": "awaiting_review",
+      "afterReconcileExecStatus": "paused_queue",
+      "afterReconcilePostsDelta": 0,
+      "postsDuringResume": [
+        {
+          "ts": 1795007132332,
+          "url": "/api/teams/01a1eec1-f666-7462-95f6-9e74b81ec562/agents/01a1eec1-f726-7c81-9dfd-82834eb9b687/messages"
+        }
+      ],
+      "attemptsCount": 1,
+      "reviewsCount": 1,
+      "sessionChain": [
+        {
+          "name": "Terra 6.1",
+          "team": "01a1eec1-f666-7462-95f6-9e74b81ec562",
+          "slot": "01a1eec1-f666-7462-95f6-9e86a478fde4",
+          "extConv": "619640a3",
+          "cliSession": "01a1eec2-047f-76f0-ab60-764abea10fcc"
+        },
+        {
+          "name": "Sol 6.1",
+          "team": "01a1eec1-f666-7462-95f6-9e74b81ec562",
+          "slot": "01a1eec1-f726-7c81-9dfd-82834eb9b687",
+          "extConv": "11dea282",
+          "cliSession": "01a1eec3-34ff-7b93-af5a-8e9a708c4407"
+        },
+        {
+          "name": "Sol Executor",
+          "team": "01a1eec1-f666-7462-95f6-9e74b81ec562",
+          "slot": "01a1eec1-f78a-7503-aa0e-2921a52177df",
+          "extConv": "c6ed5379"
+        }
+      ]
+    },
+    "backupExportImport": {
+      "ok": true,
+      "noSecretsInBackup": true,
+      "previewHasDetachWarning": true,
+      "copiedHasNoLiveTeamId": true,
+      "copiedImportedTeamId": "01a1eec1-f666-7462-95f6-9e74b81ec562",
+      "postsDeltaOnImport": 0
+    },
+    "coreRestartAndPersistence": {
+      "ok": true,
+      "stayedCoreModeWhenDown": true,
+      "teamPersistedAfterRestart": true,
+      "slotMessagesPersistedCount": 14
+    }
+  },
+  "pageErrors": [],
+  "allOk": false,
+  "finishedAt": "2026-11-18T13:06:37.286Z"
+}

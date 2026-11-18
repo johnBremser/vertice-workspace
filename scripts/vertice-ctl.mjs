@@ -197,22 +197,22 @@ function getRuntimeConfig(rootDir = defaultRootDir) {
   const fileEnv = loadEnvFiles(rootDir);
   const host = String(
     process.env.VERTICE_HOST ??
-      process.env.HOST ??
-      fileEnv.VERTICE_HOST ??
-      fileEnv.HOST ??
-      '127.0.0.1',
+    process.env.HOST ??
+    fileEnv.VERTICE_HOST ??
+    fileEnv.HOST ??
+    '127.0.0.1',
   ).trim();
   const port = Number(
     process.env.VERTICE_PORT ??
-      process.env.PORT ??
-      fileEnv.VERTICE_PORT ??
-      fileEnv.PORT ??
-      4173,
+    process.env.PORT ??
+    fileEnv.VERTICE_PORT ??
+    fileEnv.PORT ??
+    4173,
   );
   const proxyTarget = String(
     process.env.VITE_AIONCORE_PROXY_TARGET ??
-      fileEnv.VITE_AIONCORE_PROXY_TARGET ??
-      '',
+    fileEnv.VITE_AIONCORE_PROXY_TARGET ??
+    '',
   ).trim();
   return { host, port, proxyTarget };
 }
@@ -272,12 +272,11 @@ async function cmdDoctor(rootDir = defaultRootDir) {
   );
   console.log(`- Instância registrada: ${instanceSummary}`);
   console.log(
-    `- Porta ${port}: ${
-      portOccupied
-        ? verifiedOwnsConfiguredPort
-          ? `em uso pela instância verificada do Vértice (PID ${inspection.tracked.pid})`
-          : 'ocupada por outro processo não comprovado como instância deste launcher'
-        : 'livre'
+    `- Porta ${port}: ${portOccupied
+      ? verifiedOwnsConfiguredPort
+        ? `em uso pela instância verificada do Vértice (PID ${inspection.tracked.pid})`
+        : 'ocupada por outro processo não comprovado como instância deste launcher'
+      : 'livre'
     }`,
   );
 }

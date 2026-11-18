@@ -36,6 +36,7 @@ function WorkspaceShell() {
     actionBanner,
     dismissBanner,
     reconcileConversation,
+    controlExecution,
     resumePausedDemo,
     importWorkspaceState,
   } = useWorkspace();
@@ -46,6 +47,9 @@ function WorkspaceShell() {
   const hasGap =
     conv?.syncState === 'gap_detected' || conv?.syncState === 'incomplete';
   const isPausedDemo = conv?.executionStatus === 'paused_demo';
+  const isPausedCoreQueue =
+    conv?.executionMode === 'aion_core' &&
+    conv?.executionStatus === 'paused_queue';
   const needsCoreTeamSetup =
     store?.executionMode === 'aion_core' &&
     conv &&
@@ -126,6 +130,42 @@ function WorkspaceShell() {
               <RefreshCw className="h-3 w-3" aria-hidden="true" />
               <span>{PT_BR.reconcileAction}</span>
             </button>
+          </div>
+        )}
+
+        {/* Paused After Reload Banner (Core) */}
+        {isPausedCoreQueue && (
+          <div
+            role="status"
+            className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-hairline)] bg-[var(--bg-elevated)] px-4 py-2 text-xs text-[var(--text-primary)] sm:px-6"
+          >
+            <span>{PT_BR.pausedCoreAfterReloadLabel}</span>
+            <div className="flex flex-wrap items-center gap-2">
+              {conv?.externalTeamId && (
+                <button
+                  type="button"
+                  onClick={() => void reconcileConversation()}
+                  className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-[var(--border-strong)] bg-[var(--bg-surface)] px-3 py-1.5 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]"
+                >
+                  <RefreshCw className="h-3 w-3" aria-hidden="true" />
+                  <span>{PT_BR.reconcileAction}</span>
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={!conv?.externalTeamId}
+                title={
+                  !conv?.externalTeamId
+                    ? 'Vincule ou crie uma equipe no Core antes de retomar o fluxo.'
+                    : 'Reconcilia com o Core e retoma apenas as próximas etapas pendentes, sem repetir o pedido original.'
+                }
+                onClick={() => void controlExecution('resume_queue')}
+                className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50"
+              >
+                <Play className="h-3 w-3" aria-hidden="true" />
+                <span>{PT_BR.resumeCoreQueueAction}</span>
+              </button>
+            </div>
           </div>
         )}
 

@@ -55,7 +55,17 @@ describe('Vite .env.local proxy configuration (Fix 6)', () => {
       res.end(JSON.stringify({ success: false }));
     });
 
+    const upstreamSockets = new Set<import('node:stream').Duplex>();
+    upstreamServer.on('connection', (socket) => {
+      upstreamSockets.add(socket);
+      socket.on('error', () => {});
+      socket.once('close', () => upstreamSockets.delete(socket));
+    });
+
     upstreamServer.on('upgrade', (req, socket) => {
+      upstreamSockets.add(socket);
+      socket.on('error', () => {});
+      socket.once('close', () => upstreamSockets.delete(socket));
       if (!req.url?.startsWith('/ws')) {
         socket.destroy();
         return;
@@ -274,15 +284,32 @@ describe('Vite .env.local proxy configuration (Fix 6)', () => {
       expect(wsResult).toContain('proxy.ws.ok');
       expect(wsUpgrades).toBe(1);
     } finally {
-      if (childProc && !childProc.killed) {
-        childProc.kill('SIGKILL');
+      for (const sock of upstreamSockets) {
+        sock.destroy();
       }
       upstreamServer.closeAllConnections?.();
+      if (childProc && childProc.exitCode === null) {
+        const exited = new Promise<void>((resolve) => {
+          childProc!.once('exit', () => resolve());
+        });
+        childProc.kill('SIGKILL');
+        await Promise.race([
+          exited,
+          new Promise<void>((resolve) => setTimeout(resolve, 1500)),
+        ]);
+      }
       await Promise.race([
         new Promise<void>((resolve) => upstreamServer.close(() => resolve())),
         new Promise<void>((resolve) => setTimeout(resolve, 500)),
       ]);
-      await fs.rm(tempEnvDir, { recursive: true, force: true });
+      await fs
+        .rm(tempEnvDir, {
+          recursive: true,
+          force: true,
+          maxRetries: 5,
+          retryDelay: 50,
+        })
+        .catch(() => {});
     }
   }, 20_000);
 });

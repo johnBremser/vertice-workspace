@@ -51,6 +51,7 @@ import type {
   TaskReview,
   TeamPreset,
   TeamPresetMember,
+  WorkspaceConversation,
   WorkspaceStoreState,
 } from '../domain/types';
 import { PT_BR } from '../i18n/ptBR';
@@ -58,6 +59,7 @@ import {
   assertHealthResponse,
   CORE_WS_EVENTS,
   extractAvailableModelOptions,
+  extractModelsFromConfigOptions,
   unwrapApiResponse,
   type AgentManagementRow,
   type AssistantResponse,
@@ -173,6 +175,164 @@ function mapCoreTaskStatus(rawStatus: string): Task['status'] | null {
   }
 }
 
+function mapCoreAgentStatusToAuthStatus(
+  status: string | undefined,
+): ConnectionAdapterConfig['authStatus'] {
+  if (status === 'ready') return 'authenticated';
+  if (status === 'unauthenticated') return 'unauthenticated';
+  return 'unknown';
+}
+
+const MAX_CORE_TASK_ATTEMPTS = 3;
+
+function resolveCoreEscalationModelRef(
+  conn: ConnectionAdapterConfig | undefined,
+  currentRef: ModelRef,
+  targetTier: DemoModelTier,
+): ModelRef {
+  const currentId = currentRef.externalId?.trim() || currentRef.displayName.trim();
+  const confirmed = (conn?.availableModels ?? []).filter((m) => m.confirmed);
+  const candidate =
+    confirmed.find((m) => m.externalId !== currentId && /pro|terra|sol|high/i.test(m.externalId)) ??
+    confirmed.find((m) => m.externalId !== currentId) ??
+    confirmed.find((m) => m.externalId === currentId);
+  if (candidate) {
+    return {
+      externalId: candidate.externalId,
+      displayName: candidate.displayName,
+      source: candidate.source === 'core_session' ? 'core_session' : 'core_catalog',
+      tier: targetTier,
+      confirmation: 'confirmed',
+    };
+  }
+  return {
+    ...currentRef,
+    tier: targetTier,
+  };
+}
+
+function extractUserMarkdownFromCoreMailbox(rawContent: string): string {
+  if (!rawContent.startsWith('[Contrato interno ')) {
+    return rawContent;
+  }
+  const marker = '\n\n[Pedido / Orientação]\n';
+  const idx = rawContent.lastIndexOf(marker);
+  if (idx >= 0) {
+    return rawContent.slice(idx + marker.length).trim() || rawContent;
+  }
+  return rawContent;
+}
+
+const CORE_VERIFIED_CAPABILITIES: ConnectionAdapterConfig['capabilities'] = {
+  supportsInterrupt: true,
+  supportsMidRunContextInjection: false,
+  supportsModelSwitchInSession: true,
+  supportsPauseQueue: false,
+  supportsSessionTerminate: false,
+};
+
+const CORE_PREFERENCE_MODEL_HINTS: Array<{
+  pattern: RegExp;
+  preferredIds: string[];
+}> = [
+    { pattern: /terra\s*6\.?1/i, preferredIds: ['gpt-6.1-terra'] },
+    { pattern: /sol\s*6\.?1/i, preferredIds: ['gpt-6.1-sol'] },
+    {
+      pattern: /gemini\s*hydrogen/i,
+      preferredIds: ['gemini-4-hydrogen-xhigh', 'gemini-4-hydrogen-high'],
+    },
+  ];
+
+function resolvePresetMembersForCore(
+  state: WorkspaceStoreState,
+  members: TeamPresetMember[],
+): TeamPresetMember[] {
+  const coreConns = state.connections.filter(
+    (c) => c.mode === 'aion_core' && Boolean(c.coreAssistantId),
+  );
+  if (coreConns.length === 0) {
+    return members;
+  }
+
+  return members.map((member) => {
+    const existingConn = state.connections.find(
+      (c) => c.id === member.connectionId,
+    );
+    if (existingConn?.mode === 'aion_core' && existingConn.coreAssistantId) {
+      return member;
+    }
+
+    const desiredBackend =
+      existingConn?.backendId ??
+      (member.connectionId.includes('antigravity')
+        ? 'antigravity'
+        : member.connectionId.includes('codex')
+          ? 'codex'
+          : '');
+    const coreConn =
+      coreConns.find((c) => c.backendId === desiredBackend) ??
+      coreConns.find((c) => c.id === member.connectionId);
+    if (!coreConn) {
+      return member;
+    }
+
+    let resolvedModelRef = member.modelRef;
+    const hint = CORE_PREFERENCE_MODEL_HINTS.find((h) =>
+      h.pattern.test(member.modelRef.displayName),
+    );
+    const matchedModel =
+      (hint
+        ? coreConn.availableModels.find((m) =>
+          hint.preferredIds.includes(m.externalId),
+        )
+        : undefined) ??
+      coreConn.availableModels.find(
+        (m) =>
+          m.externalId === member.modelRef.externalId ||
+          m.displayName === member.modelRef.displayName,
+      );
+    if (matchedModel) {
+      resolvedModelRef = {
+        externalId: matchedModel.externalId,
+        displayName: matchedModel.displayName,
+        source: matchedModel.source,
+        tier: member.modelRef.tier,
+        confirmation: matchedModel.confirmed ? 'confirmed' : 'simulated',
+      };
+    }
+
+    return {
+      ...member,
+      connectionId: coreConn.id,
+      modelRef: resolvedModelRef,
+    };
+  });
+}
+
+function mergeConfirmedModels(
+  existing: ConnectionAdapterConfig['availableModels'],
+  incoming: Array<{ externalId: string; displayName: string }>,
+  source: 'core_catalog' | 'core_session' = 'core_catalog',
+): ConnectionAdapterConfig['availableModels'] {
+  const byId = new Map<
+    string,
+    ConnectionAdapterConfig['availableModels'][number]
+  >();
+  for (const m of existing) {
+    byId.set(m.externalId, m);
+  }
+  for (const m of incoming) {
+    const prev = byId.get(m.externalId);
+    byId.set(m.externalId, {
+      externalId: m.externalId,
+      displayName: m.displayName || prev?.displayName || m.externalId,
+      source: prev?.source === 'core_catalog' ? prev.source : source,
+      confirmed: true,
+    });
+  }
+  return Array.from(byId.values());
+}
+
 interface StreamBufferEntry {
   key: string;
   conversationId: string;
@@ -211,10 +371,10 @@ export class AionCoreAdapterSkeleton implements AgentWorkspaceGateway {
     return this.notConnected('getStateSnapshot');
   }
   subscribeState(): () => void {
-    return () => {};
+    return () => { };
   }
   subscribeEvents(): () => void {
-    return () => {};
+    return () => { };
   }
   dispose(): void {
     // No-op
@@ -320,8 +480,7 @@ export class AionCoreAdapterSkeleton implements AgentWorkspaceGateway {
 }
 
 export class AionCoreAdapter
-  implements AgentWorkspaceGateway, CoreGatewayOperations
-{
+  implements AgentWorkspaceGateway, CoreGatewayOperations {
   readonly kind = 'aion_core' as const;
   readonly core: CoreGatewayOperations = this;
 
@@ -338,11 +497,53 @@ export class AionCoreAdapter
   private lastSlotWorkSignature = new Map<string, string>();
   private turnParticipantMap = new Map<string, string>();
   private expectedKindByParticipant = new Map<string, StructuredEnvelopeKind>();
+  private expectedDispatchByParticipant = new Map<
+    string,
+    {
+      kind: 'delivery_report' | 'review_decision';
+      taskId: string;
+      attemptId: string;
+      turnId?: string;
+      contextRevisionId?: string;
+    }
+  >();
+  private consumedTurnBindings = new Map<
+    string,
+    {
+      kind: 'delivery_report' | 'review_decision';
+      taskId: string;
+      attemptId: string;
+      decision?: 'approved' | 'rejected';
+    }
+  >();
+  private lastSentContextByParticipant = new Map<
+    string,
+    {
+      revisionId: string;
+      sentAtMs: number;
+      sendInitiatedEventIndex?: number;
+      messageId?: string;
+    }
+  >();
+  private lastReconciledSlotWorkByConv = new Map<string, Map<string, string>>();
   private wsTaskMutationSeq = new Map<string, number>();
   private wsSlotMutationSeq = new Map<string, number>();
   private wsWasConnectedBefore = false;
   private wsDisconnectedSinceLastConnect = false;
+  private inFlightSlotDispatches = new Set<string>();
   private backgroundDispatchChain: Promise<void> = Promise.resolve();
+  private pendingCoreConfirmations = new Map<
+    string,
+    {
+      convId: string;
+      participantId: string;
+      extConvId: string;
+      callId: string;
+      msgId: string;
+      allowData: unknown;
+      denyData: unknown;
+    }
+  >();
 
   constructor(
     persistence: WorkspacePersistenceManager,
@@ -427,8 +628,221 @@ export class AionCoreAdapter
     };
   }
 
+  private clearRuntimeCaches(): void {
+    this.streamBuffers.clear();
+    this.lastSlotWorkSignature.clear();
+    this.turnParticipantMap.clear();
+    this.expectedKindByParticipant.clear();
+    this.expectedDispatchByParticipant.clear();
+    this.consumedTurnBindings.clear();
+    this.lastSentContextByParticipant.clear();
+    this.lastReconciledSlotWorkByConv.clear();
+    this.wsTaskMutationSeq.clear();
+    this.wsSlotMutationSeq.clear();
+    this.inFlightSlotDispatches.clear();
+    this.pendingCoreConfirmations.clear();
+  }
+
+  private recordConsumedTurnBinding(
+    key: string,
+    binding: {
+      kind: 'delivery_report' | 'review_decision';
+      taskId: string;
+      attemptId: string;
+      decision?: 'approved' | 'rejected';
+    },
+  ): void {
+    this.consumedTurnBindings.set(key, binding);
+    const MAX_CONSUMED_TURN_BINDINGS = 500;
+    while (this.consumedTurnBindings.size > MAX_CONSUMED_TURN_BINDINGS) {
+      const oldestKey = this.consumedTurnBindings.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.consumedTurnBindings.delete(oldestKey);
+    }
+  }
+
+  private markCoreSessionExpired(detail?: string): void {
+    if (!this.state) return;
+    const nextConnections = this.state.connections.map((c) =>
+      c.mode === 'aion_core'
+        ? {
+          ...c,
+          authStatus: 'expired' as const,
+          sessionStatus: 'disconnected' as const,
+          lastConnectionTestResult:
+            detail ?? 'Sessão expirada no AionCore. Faça login novamente.',
+        }
+        : c,
+    );
+    this.state = {
+      ...this.state,
+      coreSessionAuthenticated: false,
+      connections: nextConnections,
+      agentProfiles: connectionsToAgentProfiles(nextConnections),
+    };
+    this.notifyState();
+  }
+
+  private emitContextReceiptSent(input: {
+    convId: string;
+    participant: Participant;
+    revision: SharedContextRevision;
+    messageId: string;
+    mechanismNote: string;
+    sendInitiatedEventIndex?: number;
+    taskId?: string;
+    attemptId?: string;
+  }): void {
+    if (!this.state) return;
+    const proj = this.state.conversations[input.convId];
+    if (!proj) return;
+    const rev = proj.contextRevisions.find((r) => r.id === input.revision.id);
+    if (!rev) return;
+    const now = new Date().toISOString();
+    const sentAtMs = Date.now();
+    this.lastSentContextByParticipant.set(
+      `${input.convId}:${input.participant.id}`,
+      {
+        revisionId: rev.id,
+        sentAtMs,
+        sendInitiatedEventIndex: input.sendInitiatedEventIndex,
+        messageId: input.messageId,
+      },
+    );
+    const currentRcpt = rev.receipts[input.participant.id];
+    if (
+      currentRcpt &&
+      currentRcpt.status !== 'pending_send' &&
+      currentRcpt.status !== 'failed_needs_action'
+    ) {
+      return;
+    }
+    this.emitAndIngest(input.convId, {
+      id: `evt_core_rcpt_sent_${rev.id}_${input.participant.id}_${input.messageId}`,
+      seq: this.nextLocalSeq(proj),
+      conversationId: input.convId,
+      timestamp: now,
+      origin: 'gateway',
+      originSource: 'aion_core',
+      participantId: input.participant.id,
+      taskId: input.taskId,
+      attemptId: input.attemptId,
+      type: 'context_receipt_updated',
+      payload: {
+        revisionId: rev.id,
+        versionNumber: rev.versionNumber,
+        participantId: input.participant.id,
+        receipt: {
+          participantId: input.participant.id,
+          revisionId: rev.id,
+          status: 'sent',
+          policyApplied: 'next_turn',
+          updatedAt: now,
+          mechanismNote: input.mechanismNote,
+        },
+        projectToGeneral: false,
+      },
+    });
+  }
+
+  private emitContextReceiptFailed(input: {
+    convId: string;
+    participant: Participant;
+    revision: SharedContextRevision;
+    reason: string;
+    taskId?: string;
+    attemptId?: string;
+  }): void {
+    if (!this.state) return;
+    const proj = this.state.conversations[input.convId];
+    if (!proj) return;
+    const rev = proj.contextRevisions.find((r) => r.id === input.revision.id);
+    if (!rev) return;
+    const currentRcpt = rev.receipts[input.participant.id];
+    if (
+      currentRcpt &&
+      currentRcpt.status !== 'pending_send' &&
+      currentRcpt.status !== 'sent' &&
+      currentRcpt.status !== 'failed_needs_action'
+    ) {
+      return;
+    }
+    const now = new Date().toISOString();
+    this.emitAndIngest(input.convId, {
+      id: this.nextId(`evt_core_rcpt_fail_${rev.id}_${input.participant.id}`),
+      seq: this.nextLocalSeq(proj),
+      conversationId: input.convId,
+      timestamp: now,
+      origin: 'gateway',
+      originSource: 'aion_core',
+      participantId: input.participant.id,
+      taskId: input.taskId,
+      attemptId: input.attemptId,
+      type: 'context_receipt_updated',
+      payload: {
+        revisionId: rev.id,
+        versionNumber: rev.versionNumber,
+        participantId: input.participant.id,
+        receipt: {
+          participantId: input.participant.id,
+          revisionId: rev.id,
+          status: 'failed_needs_action',
+          policyApplied: 'next_turn',
+          updatedAt: now,
+          mechanismNote: `Falha ao enviar Contexto v${rev.versionNumber} para ${input.participant.displayName}: ${input.reason}`,
+        },
+        projectToGeneral: false,
+      },
+    });
+  }
+
+  private emitContextReceiptApplied(input: {
+    convId: string;
+    participant: Participant;
+    revisionId: string;
+    origin: 'coordinator' | 'executor' | 'reviewer';
+    mechanismNote: string;
+    taskId?: string;
+    attemptId?: string;
+    eventSuffix: string;
+  }): void {
+    if (!this.state) return;
+    const proj = this.state.conversations[input.convId];
+    if (!proj) return;
+    const rev = proj.contextRevisions.find((r) => r.id === input.revisionId);
+    if (!rev) return;
+    const now = new Date().toISOString();
+    this.emitAndIngest(input.convId, {
+      id: `evt_core_rcpt_app_${rev.id}_${input.participant.id}_${input.eventSuffix}`,
+      seq: this.nextLocalSeq(proj),
+      conversationId: input.convId,
+      timestamp: now,
+      origin: input.origin,
+      originSource: 'aion_core',
+      participantId: input.participant.id,
+      taskId: input.taskId,
+      attemptId: input.attemptId,
+      type: 'context_receipt_updated',
+      payload: {
+        revisionId: rev.id,
+        versionNumber: rev.versionNumber,
+        participantId: input.participant.id,
+        receipt: {
+          participantId: input.participant.id,
+          revisionId: rev.id,
+          status: 'applied',
+          policyApplied: 'next_turn',
+          updatedAt: now,
+          mechanismNote: input.mechanismNote,
+        },
+        projectToGeneral: false,
+      },
+    });
+  }
+
   dispose(): void {
     this.wsClient.disconnect();
+    this.clearRuntimeCaches();
   }
 
   async loadWorkspace(): Promise<WorkspaceStoreState> {
@@ -529,11 +943,11 @@ export class AionCoreAdapter
         const nextConnections = state.connections.map((c) =>
           c.mode === 'aion_core'
             ? {
-                ...c,
-                coreReachability: 'reachable' as const,
-                lastConnectionTestAt: new Date().toISOString(),
-                lastConnectionTestResult: `Core alcançável (v${health.version}) — autenticação e CLIs requerem verificação separada.`,
-              }
+              ...c,
+              coreReachability: 'reachable' as const,
+              lastConnectionTestAt: new Date().toISOString(),
+              lastConnectionTestResult: `Core alcançável (v${health.version}) — autenticação e CLIs requerem verificação separada.`,
+            }
             : c,
         );
         this.state = {
@@ -555,12 +969,12 @@ export class AionCoreAdapter
         const nextConnections = state.connections.map((c) =>
           c.mode === 'aion_core'
             ? {
-                ...c,
-                coreReachability: 'unreachable' as const,
-                lastConnectionTestAt: new Date().toISOString(),
-                lastConnectionTestResult:
-                  err instanceof Error ? err.message : 'Core inacessível.',
-              }
+              ...c,
+              coreReachability: 'unreachable' as const,
+              lastConnectionTestAt: new Date().toISOString(),
+              lastConnectionTestResult:
+                err instanceof Error ? err.message : 'Core inacessível.',
+            }
             : c,
         );
         this.state = {
@@ -597,16 +1011,21 @@ export class AionCoreAdapter
       const nextConnections = state.connections.map((c) =>
         c.mode === 'aion_core'
           ? {
-              ...c,
-              coreReachability: 'reachable' as const,
-              authStatus: status.is_authenticated
-                ? ('authenticated' as const)
-                : ('unauthenticated' as const),
-            }
+            ...c,
+            coreReachability: 'reachable' as const,
+            authStatus: status.is_authenticated
+              ? c.authStatus === 'unauthenticated'
+                ? ('unauthenticated' as const)
+                : c.coreAgentStatus && c.coreAgentStatus !== 'ready'
+                  ? c.authStatus
+                  : ('authenticated' as const)
+              : ('unauthenticated' as const),
+          }
           : c,
       );
       this.state = {
         ...state,
+        coreSessionAuthenticated: Boolean(status.is_authenticated),
         connections: nextConnections,
         agentProfiles: connectionsToAgentProfiles(nextConnections),
       };
@@ -648,14 +1067,18 @@ export class AionCoreAdapter
       const nextConnections = state.connections.map((c) =>
         c.mode === 'aion_core'
           ? {
-              ...c,
-              coreReachability: 'reachable' as const,
-              authStatus: 'authenticated' as const,
-            }
+            ...c,
+            coreReachability: 'reachable' as const,
+            authStatus:
+              c.coreAgentStatus && c.coreAgentStatus !== 'ready'
+                ? c.authStatus
+                : ('authenticated' as const),
+          }
           : c,
       );
       this.state = {
         ...state,
+        coreSessionAuthenticated: true,
         connections: nextConnections,
         agentProfiles: connectionsToAgentProfiles(nextConnections),
       };
@@ -682,14 +1105,15 @@ export class AionCoreAdapter
         const nextConnections = this.state.connections.map((c) =>
           c.mode === 'aion_core'
             ? {
-                ...c,
-                authStatus: 'unauthenticated' as const,
-                sessionStatus: 'inactive' as const,
-              }
+              ...c,
+              authStatus: 'unauthenticated' as const,
+              sessionStatus: 'inactive' as const,
+            }
             : c,
         );
         this.state = {
           ...this.state,
+          coreSessionAuthenticated: false,
           connections: nextConnections,
           agentProfiles: connectionsToAgentProfiles(nextConnections),
         };
@@ -730,9 +1154,6 @@ export class AionCoreAdapter
     );
 
     const agentsById = new Map(agents.map((a) => [a.id, a]));
-    const keptDemoConnections = state.connections.filter(
-      (c) => c.mode !== 'aion_core',
-    );
     const derivedCoreConnections: ConnectionAdapterConfig[] = [];
 
     if (assistants.length > 0) {
@@ -742,21 +1163,17 @@ export class AionCoreAdapter
         const agentModels = extractAvailableModelOptions(
           linkedAgent?.available_models,
         );
+        const configModels = extractModelsFromConfigOptions(
+          linkedAgent?.config_options,
+        );
         const assistantModels = (assistant.models ?? []).map((m) => ({
           externalId: m,
           displayName: m,
         }));
-        const mergedMap = new Map<string, string>();
-        for (const m of [...agentModels, ...assistantModels]) {
-          mergedMap.set(m.externalId, m.displayName);
-        }
-        const availableModels = Array.from(mergedMap.entries()).map(
-          ([externalId, displayName]) => ({
-            externalId,
-            displayName,
-            source: 'core_catalog' as const,
-            confirmed: true,
-          }),
+        const availableModels = mergeConfirmedModels(
+          [],
+          [...agentModels, ...configModels, ...assistantModels],
+          'core_catalog',
         );
 
         const executableStatus = linkedAgent
@@ -765,13 +1182,14 @@ export class AionCoreAdapter
             : 'missing'
           : 'unknown';
 
-        const authStatus =
-          assistant.agent_status === 'ready' || linkedAgent?.status === 'ready'
-            ? 'authenticated'
-            : assistant.agent_status === 'unauthenticated' ||
-                linkedAgent?.status === 'unauthenticated'
-              ? 'unauthenticated'
-              : 'unknown';
+        const coreAgentStatus = linkedAgent?.status ?? assistant.agent_status;
+        const authStatus = mapCoreAgentStatusToAuthStatus(coreAgentStatus);
+        const statusSummary =
+          coreAgentStatus === 'online'
+            ? `Catálogo carregado (${availableModels.length} modelo(s) exposto(s)); CLI online no Core.`
+            : coreAgentStatus === 'unchecked'
+              ? `Catálogo carregado (${availableModels.length} modelo(s) exposto(s)); CLI ainda não testada (unchecked).`
+              : `Catálogo carregado (${availableModels.length} modelo(s) exposto(s)); estado CLI: ${coreAgentStatus}.`;
 
         derivedCoreConnections.push({
           id: `conn_core_${assistant.id}`,
@@ -786,33 +1204,28 @@ export class AionCoreAdapter
           coreReachability: 'reachable',
           catalogLoaded: true,
           executableStatus,
+          coreAgentStatus,
           authStatus,
           sessionStatus: 'inactive',
           availableModels,
           lastConnectionTestAt: new Date().toISOString(),
           lastConnectionTestResult: assistant.team_selectable
-            ? `Catálogo carregado (${availableModels.length} modelo(s) exposto(s)).`
+            ? statusSummary
             : `Indisponível para equipe: ${assistant.team_block_reason ?? assistant.agent_status}.`,
-          capabilities: {
-            supportsInterrupt: 'unknown',
-            supportsMidRunContextInjection: 'unknown',
-            supportsModelSwitchInSession: 'unknown',
-            supportsPauseQueue: 'unknown',
-            supportsSessionTerminate: 'unknown',
-          },
+          capabilities: { ...CORE_VERIFIED_CAPABILITIES },
           isSimulated: false,
         });
       }
     } else {
       for (const agent of agents) {
-        const availableModels = extractAvailableModelOptions(
-          agent.available_models,
-        ).map((m) => ({
-          externalId: m.externalId,
-          displayName: m.displayName,
-          source: 'core_catalog' as const,
-          confirmed: true,
-        }));
+        const availableModels = mergeConfirmedModels(
+          [],
+          [
+            ...extractAvailableModelOptions(agent.available_models),
+            ...extractModelsFromConfigOptions(agent.config_options),
+          ],
+          'core_catalog',
+        );
         derivedCoreConnections.push({
           id: `conn_core_agent_${agent.id}`,
           displayName: `${agent.name} (Core sem assistant_id)`,
@@ -825,32 +1238,27 @@ export class AionCoreAdapter
           coreReachability: 'reachable',
           catalogLoaded: true,
           executableStatus: agent.installed ? 'verified' : 'missing',
-          authStatus:
-            agent.status === 'ready'
-              ? 'authenticated'
-              : agent.status === 'unauthenticated'
-                ? 'unauthenticated'
-                : 'unknown',
+          coreAgentStatus: agent.status,
+          authStatus: mapCoreAgentStatusToAuthStatus(agent.status),
           sessionStatus: 'inactive',
           availableModels,
           lastConnectionTestAt: new Date().toISOString(),
           lastConnectionTestResult:
             'Agente listado sem assistant_id associado no catálogo /api/assistants.',
-          capabilities: {
-            supportsInterrupt: 'unknown',
-            supportsMidRunContextInjection: 'unknown',
-            supportsModelSwitchInSession: 'unknown',
-            supportsPauseQueue: 'unknown',
-            supportsSessionTerminate: 'unknown',
-          },
+          capabilities: { ...CORE_VERIFIED_CAPABILITIES },
           isSimulated: false,
         });
       }
     }
 
-    const nextConnections = [...keptDemoConnections, ...derivedCoreConnections];
+    const latestState = this.state ?? state;
+    const keptDemoConnectionsNow = latestState.connections.filter(
+      (c) => c.mode !== 'aion_core',
+    );
+    const nextConnections = [...keptDemoConnectionsNow, ...derivedCoreConnections];
     this.state = {
-      ...state,
+      ...latestState,
+      coreSessionAuthenticated: latestState.coreSessionAuthenticated ?? true,
       connections: nextConnections,
       agentProfiles: connectionsToAgentProfiles(nextConnections),
     };
@@ -878,7 +1286,8 @@ export class AionCoreAdapter
       Array.isArray,
     );
 
-    const nextConversations = { ...state.conversations };
+    const latestState = this.state ?? state;
+    const nextConversations = { ...latestState.conversations };
     let updated = 0;
 
     for (const team of teams) {
@@ -924,7 +1333,7 @@ export class AionCoreAdapter
 
     if (updated > 0) {
       this.state = {
-        ...state,
+        ...latestState,
         conversations: nextConversations,
       };
       this.notifyState();
@@ -1014,15 +1423,17 @@ export class AionCoreAdapter
         Array.isArray((d as TeamResponse).assistants),
     );
 
-    const mappedParticipants = proj.participants.map((p) => {
+    const latestState = this.state ?? state;
+    const latestProj = latestState.conversations[conversationId] ?? proj;
+    const mappedParticipants = latestProj.participants.map((p) => {
       const matched =
         team.assistants.find(
           (a) => a.name.toLowerCase() === p.displayName.toLowerCase(),
         ) ??
         (hasRole(p, 'coordinator')
           ? team.assistants.find(
-              (a) => a.role === 'lead' || a.role === 'leader',
-            )
+            (a) => a.role === 'lead' || a.role === 'leader',
+          )
           : undefined);
       if (!matched) return p;
       return {
@@ -1038,14 +1449,14 @@ export class AionCoreAdapter
     });
 
     this.state = {
-      ...state,
+      ...latestState,
       conversations: {
-        ...state.conversations,
+        ...latestState.conversations,
         [conversationId]: {
-          ...proj,
+          ...latestProj,
           participants: mappedParticipants,
           conversation: {
-            ...proj.conversation,
+            ...latestProj.conversation,
             externalTeamId: team.id,
           },
         },
@@ -1072,6 +1483,13 @@ export class AionCoreAdapter
         if (status === 'disconnected' || status === 'error') {
           if (this.wsWasConnectedBefore) {
             this.wsDisconnectedSinceLastConnect = true;
+          }
+          if (
+            status === 'error' &&
+            detail &&
+            (detail.includes('1008') || detail.toLowerCase().includes('expirada'))
+          ) {
+            this.markCoreSessionExpired(detail);
           }
         } else if (status === 'connected') {
           const isReconnect =
@@ -1132,9 +1550,9 @@ export class AionCoreAdapter
     const ordered =
       preferredConversationId && boundIds.includes(preferredConversationId)
         ? [
-            preferredConversationId,
-            ...boundIds.filter((id) => id !== preferredConversationId),
-          ]
+          preferredConversationId,
+          ...boundIds.filter((id) => id !== preferredConversationId),
+        ]
         : boundIds;
 
     for (const cid of ordered) {
@@ -1249,6 +1667,12 @@ export class AionCoreAdapter
         }
       }
       blocks.push(taskLines.join('\n'));
+    }
+
+    if (proj.participants.filter((p) => !p.archived).length > 1) {
+      blocks.push(
+        '[Regra estrita de orquestração do Aion Desk — NÃO usar ferramentas MCP de equipe]\nEste fluxo é orquestrado exclusivamente pelo Vértice Workspace (aion-desk/v1). NÃO chame team_send_message, team_task_create, team_task_update, team_spawn_agent nem team_interrupt_agent via MCP durante este fluxo. Nunca delegue diretamente por MCP; responda com seu parecer/trabalho e o bloco JSON aion-desk-json solicitado. Se posteriormente você receber idle_notification ou avisos internos do scheduler sem novo pedido explícito do usuário, NÃO reemita plan_proposal nem repita blocos aion-desk-json — responda apenas "OK".',
+      );
     }
 
     blocks.push(`[Pedido / Orientação]\n${userMarkdown}`);
@@ -1398,6 +1822,7 @@ export class AionCoreAdapter
     const timestamp = toIsoTimestamp(msg.created_at);
 
     if (senderRes.isUser) {
+      const cleanUserContent = extractUserMarkdownFromCoreMailbox(content);
       const recipientRes = this.resolveParticipantByCoreAgentRef(
         proj,
         msg.to_agent_id,
@@ -1411,8 +1836,11 @@ export class AionCoreAdapter
       const coordinator = proj.participants.find(
         (p) => p.id === proj.conversation.coordinatorParticipantId,
       );
+      const isCoordRecipient =
+        Boolean(recipientRes.participant) &&
+        recipientRes.participant!.id === coordinator?.id;
       const targetTab =
-        recipientRes.participant && !recipientRes.isBroadcast
+        recipientRes.participant && !recipientRes.isBroadcast && !isCoordRecipient
           ? recipientRes.participant.id
           : 'general';
       const targetParticipant = recipientRes.participant ?? coordinator;
@@ -1433,11 +1861,11 @@ export class AionCoreAdapter
           externalMessageId: extMsgId,
           targetTab,
           targetParticipantId: targetParticipant.id,
-          bodyMarkdown: content,
+          bodyMarkdown: cleanUserContent,
           deliveryStatus: 'enqueued_core',
           generalSummary:
             targetTab === 'general'
-              ? `Mensagem recuperada para ${targetParticipant.displayName}.`
+              ? cleanUserContent
               : `Mensagem direta recuperada para ${targetParticipant.displayName}.`,
         },
       };
@@ -1507,8 +1935,8 @@ export class AionCoreAdapter
         : undefined;
     const incomingDeps = Array.isArray(rawTask.blocked_by)
       ? rawTask.blocked_by.filter(
-          (d): d is string => typeof d === 'string' && d.trim().length > 0,
-        )
+        (d): d is string => typeof d === 'string' && d.trim().length > 0,
+      )
       : [];
 
     const hasExplicitOwner = asNonEmptyString(rawTask.owner) !== undefined;
@@ -1814,14 +2242,14 @@ export class AionCoreAdapter
       const participant =
         (rawSlotId
           ? proj.participants.find(
-              (p) => p.sessionRef.externalSlotId === rawSlotId,
-            )
+            (p) => p.sessionRef.externalSlotId === rawSlotId,
+          )
           : undefined) ??
         (rawTurnId
           ? proj.participants.find(
-              (p) =>
-                p.id === this.turnParticipantMap.get(`${cid}:${rawTurnId}`),
-            )
+            (p) =>
+              p.id === this.turnParticipantMap.get(`${cid}:${rawTurnId}`),
+          )
           : undefined);
       return { convId: cid, proj, participant };
     }
@@ -1848,12 +2276,12 @@ export class AionCoreAdapter
       const participant =
         (rawTurnId
           ? proj.participants.find(
-              (p) =>
-                p.id ===
-                this.turnParticipantMap.get(
-                  `${preferredConversationId}:${rawTurnId}`,
-                ),
-            )
+            (p) =>
+              p.id ===
+              this.turnParticipantMap.get(
+                `${preferredConversationId}:${rawTurnId}`,
+              ),
+          )
           : undefined) ??
         proj.participants.find(
           (p) => p.id === proj.conversation.coordinatorParticipantId,
@@ -1909,6 +2337,7 @@ export class AionCoreAdapter
     // Close any open stream buffer WITHOUT finalizing/publishing it as a completed delivery
     this.closeUnfinishedStreamBuffersForTurn(convId, participant.id, turnId);
     this.expectedKindByParticipant.delete(`${convId}:${participant.id}`);
+    this.expectedDispatchByParticipant.delete(`${convId}:${participant.id}`);
     this.markWsSlotMutation(convId, participant.sessionRef.externalSlotId);
 
     const now = new Date().toISOString();
@@ -2001,6 +2430,10 @@ export class AionCoreAdapter
 
     // 2. Core `message.stream` (forward_to_websocket_with_msg_id)
     if (wsMsg.name === CORE_WS_EVENTS.MESSAGE_STREAM) {
+      if (data.position === 'right' || data.hidden === true) {
+        return;
+      }
+
       const participant =
         resolved.participant ??
         proj.participants.find(
@@ -2017,6 +2450,8 @@ export class AionCoreAdapter
       const turnId = asNonEmptyString(data.turn_id);
       const msgType = asNonEmptyString(data.type) ?? '';
       const inner = isRecord(data.data) ? data.data : undefined;
+      const streamSessionId =
+        asNonEmptyString(inner?.session_id) ?? asNonEmptyString(data.session_id);
       const chunkContent =
         typeof inner?.content === 'string'
           ? inner.content
@@ -2031,15 +2466,261 @@ export class AionCoreAdapter
         asNonEmptyString(data.error) ??
         chunkContent;
 
+      // Capture native CLI session_id from `start`/`finish` frames into SessionRef
+      if (
+        streamSessionId &&
+        participant.sessionRef.nativeSessionId !== streamSessionId
+      ) {
+        const curProj = this.state.conversations[convId];
+        if (curProj) {
+          this.state = {
+            ...this.state,
+            conversations: {
+              ...this.state.conversations,
+              [convId]: {
+                ...curProj,
+                participants: curProj.participants.map((p) =>
+                  p.id === participant.id
+                    ? {
+                      ...p,
+                      sessionRef: {
+                        ...p.sessionRef,
+                        nativeSessionId: streamSessionId,
+                        status: 'active',
+                      },
+                    }
+                    : p,
+                ),
+              },
+            },
+          };
+          this.notifyState();
+        }
+      }
+
+      // Live ACP model/config options reported on session start
+      if (msgType === 'acp_config_option') {
+        const discovered = extractModelsFromConfigOptions(data.data);
+        if (discovered.length > 0 && this.state) {
+          const targetConn = this.state.connections.find(
+            (c) => c.id === participant.connectionId,
+          );
+          if (targetConn) {
+            const nextConnections = this.state.connections.map((c) =>
+              c.id === targetConn.id
+                ? {
+                  ...c,
+                  availableModels: mergeConfirmedModels(
+                    c.availableModels,
+                    discovered,
+                    'core_session',
+                  ),
+                }
+                : c,
+            );
+            this.state = {
+              ...this.state,
+              connections: nextConnections,
+              agentProfiles: connectionsToAgentProfiles(nextConnections),
+            };
+            this.notifyState();
+          }
+        }
+        return;
+      }
+
+      if (msgType === 'acp_permission' || msgType === 'permission') {
+        const permInner = inner ?? (isRecord(data.data) ? data.data : undefined);
+        const toolCall = permInner && isRecord(permInner.tool_call) ? permInner.tool_call : undefined;
+        const rawCallId =
+          asNonEmptyString(toolCall?.tool_call_id) ??
+          asNonEmptyString(permInner?.call_id) ??
+          asNonEmptyString(permInner?.id) ??
+          msgId;
+        if (rawCallId) {
+          const reqId = `perm_core_${convId}_${rawCallId}`;
+          const latestProj = this.state.conversations[convId];
+          if (latestProj && !latestProj.permissions.some((p) => p.id === reqId)) {
+            const rawOptions = Array.isArray(permInner?.options)
+              ? permInner.options.filter(isRecord)
+              : [];
+            let allowData: unknown = 'allow';
+            let denyData: unknown = 'reject';
+            for (const opt of rawOptions) {
+              const kindStr = String(opt.kind ?? '').toLowerCase();
+              const optVal = opt.option_id ?? opt.value ?? opt.label;
+              if ((kindStr === 'allow_once' || kindStr === 'allow_always') && optVal !== undefined) {
+                if (kindStr === 'allow_once' || allowData === 'allow') {
+                  allowData = optVal;
+                }
+              }
+              if ((kindStr === 'reject_once' || kindStr === 'reject_always') && optVal !== undefined) {
+                if (kindStr === 'reject_once' || denyData === 'reject') {
+                  denyData = optVal;
+                }
+              }
+            }
+
+            const title =
+              asNonEmptyString(toolCall?.title) ??
+              asNonEmptyString(permInner?.title) ??
+              asNonEmptyString(permInner?.action) ??
+              'Permissão solicitada pelo agente no Core';
+            const kindLabel =
+              asNonEmptyString(toolCall?.kind) ??
+              asNonEmptyString(permInner?.command_type) ??
+              'execute';
+            const rawInput = toolCall?.raw_input;
+            const rawCmd =
+              isRecord(rawInput) && typeof rawInput.command === 'string'
+                ? rawInput.command
+                : typeof permInner?.description === 'string' && permInner.description
+                  ? permInner.description
+                  : rawInput !== undefined
+                    ? JSON.stringify(rawInput).slice(0, 180)
+                    : title;
+            const activeTask = latestProj.tasks.find((t) =>
+              t.attempts.some(
+                (a) => a.executorParticipantId === participant.id && a.status === 'running',
+              ),
+            );
+            const activeAttempt = activeTask?.attempts[activeTask.attempts.length - 1];
+            const reqEvtId = `evt_ws_perm_req_${convId}_${rawCallId}`;
+
+            this.pendingCoreConfirmations.set(reqId, {
+              convId,
+              participantId: participant.id,
+              extConvId,
+              callId: rawCallId,
+              msgId: msgId ?? rawCallId,
+              allowData,
+              denyData,
+            });
+
+            if (!latestProj.seenEventIds.includes(reqEvtId)) {
+              this.emitAndIngest(convId, {
+                id: reqEvtId,
+                seq: this.nextLocalSeq(latestProj),
+                conversationId: convId,
+                timestamp: now,
+                origin: 'gateway',
+                originSource: 'aion_core',
+                externalEventName: wsMsg.name,
+                correlationId: turnId,
+                participantId: participant.id,
+                taskId: activeTask?.id,
+                attemptId: activeAttempt?.id,
+                type: 'permission_requested',
+                payload: {
+                  request: {
+                    id: reqId,
+                    conversationId: convId,
+                    participantId: participant.id,
+                    taskId: activeTask?.id,
+                    attemptId: activeAttempt?.id,
+                    actionKey: kindLabel,
+                    scopeKey: `${extConvId}:${rawCallId}`,
+                    actionTitle: title,
+                    commandSimulated: rawCmd,
+                    scopeDescription: `Solicitação real do Core (${extConvId}, call=${rawCallId}).`,
+                    status: 'pending',
+                    createdAt: now,
+                    sourceEventId: reqEvtId,
+                    isSimulated: false,
+                  },
+                  generalSummary: `${participant.displayName} aguarda confirmação do usuário para "${title}".`,
+                },
+              });
+            }
+          }
+        }
+        return;
+      }
+
+      if (
+        msgType === 'start' ||
+        msgType === 'available_commands' ||
+        msgType === 'acp_context_usage' ||
+        msgType === 'acp_session_info' ||
+        msgType === 'thought' ||
+        msgType === 'thinking' ||
+        msgType === 'tool_call' ||
+        msgType === 'tool_group'
+      ) {
+        return;
+      }
+
+      if (msgType === 'tips') {
+        const tipCode =
+          asNonEmptyString(inner?.code) ?? asNonEmptyString(inner?.type) ?? '';
+        const tipMessage =
+          asNonEmptyString(inner?.content) ?? asNonEmptyString(chunkContent) ?? tipCode;
+        const needsAuth = /ACP_EMPTY_TURN_NEEDS_AUTH|unauthenticated/i.test(
+          `${tipCode} ${tipMessage}`,
+        );
+        this.diagnostics.record({
+          operation: 'ws.message_stream.tips',
+          status: needsAuth ? 'error' : 'ok',
+          code: tipCode || undefined,
+          detail: tipMessage || 'Dica recebida no stream do Core.',
+        });
+        if (needsAuth && this.state) {
+          const nextConnections = this.state.connections.map((c) =>
+            c.id === participant.connectionId
+              ? {
+                ...c,
+                authStatus: 'unauthenticated' as const,
+                lastConnectionTestResult:
+                  tipMessage || 'CLI local requer login antes de responder.',
+              }
+              : c,
+          );
+          this.state = {
+            ...this.state,
+            connections: nextConnections,
+            agentProfiles: connectionsToAgentProfiles(nextConnections),
+          };
+          this.notifyState();
+          this.handleCoreParticipantFailure(
+            convId,
+            participant,
+            tipMessage || 'CLI local sem autenticação válida no provedor.',
+            wsMsg.name,
+            {
+              deterministicEventId: msgId
+                ? `evt_ws_stream_tip_auth_${convId}_${msgId}`
+                : undefined,
+            },
+          );
+        }
+        return;
+      }
+
       if (turnId) {
         this.turnParticipantMap.set(`${convId}:${turnId}`, participant.id);
       }
 
-      const effectiveMsgKey = msgId ?? turnId;
+      const effectiveMsgKey = turnId ?? msgId;
       if (!effectiveMsgKey) return;
 
       const bufferKey = `${convId}:${participant.id}:${effectiveMsgKey}`;
       let buffer = this.streamBuffers.get(bufferKey);
+      if (!buffer) {
+        // Frames of the same logical turn may arrive with turn_id only on some frames
+        // (e.g. `finish` without turn_id): resolve by msg_id or turn_id before opening a new buffer.
+        const candidates = Array.from(this.streamBuffers.values()).filter(
+          (b) => b.conversationId === convId && b.participantId === participant.id,
+        );
+        buffer =
+          candidates.find((b) => !b.finished && msgId !== undefined && b.msgId === msgId) ??
+          candidates.find((b) => !b.finished && turnId !== undefined && b.turnId === turnId) ??
+          (msgType === 'finish' ||
+            msgType === 'end' ||
+            msgType === 'done' ||
+            msgType === 'completed'
+            ? candidates.filter((b) => !b.finished && b.text.length > 0).slice(-1)[0]
+            : undefined);
+      }
 
       if (
         !buffer &&
@@ -2104,10 +2785,16 @@ export class AionCoreAdapter
       if (
         msgType === 'content' ||
         msgType === 'text' ||
-        msgType === 'delta' ||
-        (!isFinishType && chunkContent)
+        msgType === 'delta'
       ) {
         if (!chunkContent) return;
+        if (
+          buffer.text &&
+          !buffer.text.endsWith('\n') &&
+          chunkContent.startsWith('```')
+        ) {
+          buffer.text += '\n\n';
+        }
         buffer.text += chunkContent;
         const latestProj = this.state.conversations[convId];
         if (!latestProj) return;
@@ -2160,6 +2847,55 @@ export class AionCoreAdapter
       return;
     }
 
+    if (wsMsg.name === CORE_WS_EVENTS.CONFIRMATION_REMOVE) {
+      const removedId = asNonEmptyString(data.id);
+      const removedExtConvId = asNonEmptyString(data.conversation_id);
+      if (removedId) {
+        for (const [reqId, pending] of this.pendingCoreConfirmations.entries()) {
+          if (
+            pending.convId === convId &&
+            (pending.callId === removedId ||
+              (removedExtConvId && pending.extConvId === removedExtConvId && pending.callId === removedId))
+          ) {
+            this.pendingCoreConfirmations.delete(reqId);
+            const curProj = this.state.conversations[convId];
+            const existingPerm = curProj?.permissions.find((p) => p.id === reqId);
+            const remEvtId = `evt_ws_perm_rem_${convId}_${removedId}`;
+            if (
+              curProj &&
+              existingPerm &&
+              existingPerm.status === 'pending' &&
+              !curProj.seenEventIds.includes(remEvtId)
+            ) {
+              this.emitAndIngest(convId, {
+                id: remEvtId,
+                seq: this.nextLocalSeq(curProj),
+                conversationId: convId,
+                timestamp: now,
+                origin: 'gateway',
+                originSource: 'aion_core',
+                externalEventName: wsMsg.name,
+                participantId: pending.participantId,
+                taskId: existingPerm.taskId,
+                type: 'permission_decided',
+                payload: {
+                  decision: {
+                    requestId: reqId,
+                    decision: 'approved',
+                    decidedBy: 'AionCore',
+                    note: 'Confirmação encerrada/removida no AionCore.',
+                    decidedAt: now,
+                  },
+                  generalSummary: `Confirmação "${existingPerm.actionTitle}" finalizada no AionCore.`,
+                },
+              });
+            }
+          }
+        }
+      }
+      return;
+    }
+
     // 3. Core `team.childTurnStarted`
     if (wsMsg.name === CORE_WS_EVENTS.TEAM_CHILD_TURN_STARTED) {
       const turnId = asNonEmptyString(data.turn_id);
@@ -2173,6 +2909,15 @@ export class AionCoreAdapter
 
       if (turnId) {
         this.turnParticipantMap.set(`${convId}:${turnId}`, participant.id);
+        const dispatchKey = `${convId}:${participant.id}`;
+        const pendingDispatch = this.expectedDispatchByParticipant.get(dispatchKey);
+        if (
+          pendingDispatch &&
+          !pendingDispatch.turnId &&
+          !this.consumedTurnBindings.has(`${dispatchKey}:${turnId}`)
+        ) {
+          pendingDispatch.turnId = turnId;
+        }
       }
       this.markWsSlotMutation(convId, participant.sessionRef.externalSlotId);
 
@@ -2210,11 +2955,11 @@ export class AionCoreAdapter
         resolved.participant ??
         (explicitSlotId
           ? proj.participants.find(
-              (p) => p.sessionRef.externalSlotId === explicitSlotId,
-            )
+            (p) => p.sessionRef.externalSlotId === explicitSlotId,
+          )
           : proj.participants.find(
-              (p) => p.id === proj.conversation.coordinatorParticipantId,
-            ));
+            (p) => p.id === proj.conversation.coordinatorParticipantId,
+          ));
       if (!participant) return;
 
       const turnId = asNonEmptyString(data.turn_id);
@@ -2242,6 +2987,7 @@ export class AionCoreAdapter
           `Turno do participante ${participant.displayName} falhou em team.childTurnCompleted (turn ${turnId ?? 'desconhecido'}).`;
         this.closeUnfinishedStreamBuffersForTurn(convId, participant.id, turnId);
         this.expectedKindByParticipant.delete(`${convId}:${participant.id}`);
+        this.expectedDispatchByParticipant.delete(`${convId}:${participant.id}`);
         this.markWsSlotMutation(convId, participant.sessionRef.externalSlotId);
         this.handleCoreParticipantFailure(
           convId,
@@ -2313,11 +3059,11 @@ export class AionCoreAdapter
         resolved.participant ??
         (explicitSlotId
           ? proj.participants.find(
-              (p) => p.sessionRef.externalSlotId === explicitSlotId,
-            )
+            (p) => p.sessionRef.externalSlotId === explicitSlotId,
+          )
           : proj.participants.find(
-              (p) => p.id === proj.conversation.coordinatorParticipantId,
-            ));
+            (p) => p.id === proj.conversation.coordinatorParticipantId,
+          ));
       if (!participant) return;
 
       this.handleCoreChildTurnCancelled(
@@ -2342,8 +3088,8 @@ export class AionCoreAdapter
         resolved.participant ??
         (targetSlotId
           ? proj.participants.find(
-              (p) => p.sessionRef.externalSlotId === targetSlotId,
-            )
+            (p) => p.sessionRef.externalSlotId === targetSlotId,
+          )
           : undefined) ??
         proj.participants.find(
           (p) => p.id === proj.conversation.coordinatorParticipantId,
@@ -2359,6 +3105,7 @@ export class AionCoreAdapter
       if (participant) {
         this.closeUnfinishedStreamBuffersForTurn(convId, participant.id);
         this.expectedKindByParticipant.delete(`${convId}:${participant.id}`);
+        this.expectedDispatchByParticipant.delete(`${convId}:${participant.id}`);
         this.markWsSlotMutation(convId, participant.sessionRef.externalSlotId);
       }
 
@@ -2371,12 +3118,12 @@ export class AionCoreAdapter
 
       const runningTask = participant
         ? latestProj.tasks.find((t) =>
-            t.attempts.some(
-              (a) =>
-                a.executorParticipantId === participant.id &&
-                a.status === 'running',
-            ),
-          )
+          t.attempts.some(
+            (a) =>
+              a.executorParticipantId === participant.id &&
+              a.status === 'running',
+          ),
+        )
         : undefined;
       if (participant && runningTask) {
         this.handleCoreParticipantFailure(
@@ -2440,12 +3187,13 @@ export class AionCoreAdapter
           resolved.participant ??
           (targetSlotId
             ? latestProj.participants.find(
-                (p) => p.sessionRef.externalSlotId === targetSlotId,
-              )
+              (p) => p.sessionRef.externalSlotId === targetSlotId,
+            )
             : undefined);
         if (participant) {
           this.closeUnfinishedStreamBuffersForTurn(convId, participant.id);
           this.expectedKindByParticipant.delete(`${convId}:${participant.id}`);
+          this.expectedDispatchByParticipant.delete(`${convId}:${participant.id}`);
           this.markWsSlotMutation(convId, participant.sessionRef.externalSlotId);
         }
         this.emitAndIngest(convId, {
@@ -2622,16 +3370,19 @@ export class AionCoreAdapter
       ? parseStructuredAgentOutput(trimmed, undefined)
       : undefined;
 
-    // Validate expectedKind mismatch OR conversationId mismatch cleanly
+    // Validate expectedKind mismatch, conversationId mismatch, and strict task/attempt correlation
     let finalParseStatus = parsedOutput?.parseStatus;
     let finalParseReason = parsedOutput?.errorReason;
     let validEnvelope = parsedOutput?.valid ? parsedOutput.parsed : undefined;
+    let correlatedDelivery: { task: Task; attempt: TaskAttempt } | undefined;
+    let correlatedReview: { task: Task; attempt: TaskAttempt } | undefined;
+    let duplicateStructuredReason: string | undefined;
 
     if (
       validEnvelope &&
       validEnvelope.conversationId !== input.convId &&
       validEnvelope.conversationId !==
-        input.participant.sessionRef.externalConversationId
+      input.participant.sessionRef.externalConversationId
     ) {
       validEnvelope = undefined;
       finalParseStatus = 'invalid';
@@ -2652,6 +3403,40 @@ export class AionCoreAdapter
         validEnvelope = undefined;
         finalParseStatus = 'invalid';
         finalParseReason = `Tipo de resposta "${parsedOutput?.parsed?.kind}" incompatível com o esperado ("${expectedKind}").`;
+      }
+    }
+
+    if (validEnvelope?.kind === 'delivery_report') {
+      const corr = this.correlateDeliveryReport(
+        proj,
+        input.participant,
+        validEnvelope,
+        input.turnId,
+      );
+      if (corr.status === 'matched') {
+        correlatedDelivery = { task: corr.task, attempt: corr.attempt };
+      } else if (corr.status === 'duplicate') {
+        duplicateStructuredReason = corr.reason;
+      } else {
+        validEnvelope = undefined;
+        finalParseStatus = 'invalid';
+        finalParseReason = corr.reason;
+      }
+    } else if (validEnvelope?.kind === 'review_decision') {
+      const corr = this.correlateReviewDecision(
+        proj,
+        input.participant,
+        validEnvelope,
+        input.turnId,
+      );
+      if (corr.status === 'matched') {
+        correlatedReview = { task: corr.task, attempt: corr.attempt };
+      } else if (corr.status === 'duplicate') {
+        duplicateStructuredReason = corr.reason;
+      } else {
+        validEnvelope = undefined;
+        finalParseStatus = 'invalid';
+        finalParseReason = corr.reason;
       }
     }
 
@@ -2691,46 +3476,83 @@ export class AionCoreAdapter
         projectToGeneral: !validEnvelope,
         generalKind: 'delivery_summary',
         generalSummary: !validEnvelope
-          ? `${input.participant.displayName} (${input.externalEventName}): ${trimmed.slice(0, 120)}`
+          ? finalParseStatus === 'invalid' && finalParseReason
+            ? `${input.participant.displayName}: revisão manual necessária — ${finalParseReason}`
+            : `${input.participant.displayName} (${input.externalEventName}): ${trimmed.slice(0, 120)}`
           : undefined,
         detailLinkLabel: 'Ver execução',
       },
     });
 
-    // Receipt update: response received from participant -> mark `'received'` if previously `'pending_send'` or `'sent'`
+    // Receipt update: response received from participant -> mark `'received'` ONLY when
+    // there is prior evidence that this revision was actually `'sent'` to the participant
+    // (never infer `'received'` from `'pending_send'` or from a turn that started before send).
     const postMsgProj = this.state.conversations[input.convId];
-    const latestCtx = postMsgProj ? getLatestContextRevision(postMsgProj) : undefined;
-    if (latestCtx) {
-      const existingReceipt = latestCtx.receipts[input.participant.id];
-      if (
-        !existingReceipt ||
-        existingReceipt.status === 'pending_send' ||
-        existingReceipt.status === 'sent'
-      ) {
-        this.emitAndIngest(input.convId, {
-          id: `evt_core_rcpt_recv_${latestCtx.id}_${input.participant.id}_${input.extMsgId}`,
-          seq: this.nextLocalSeq(postMsgProj),
-          conversationId: input.convId,
-          timestamp: now,
-          origin: 'gateway',
-          originSource: 'aion_core',
-          participantId: input.participant.id,
-          type: 'context_receipt_updated',
-          payload: {
-            revisionId: latestCtx.id,
-            versionNumber: latestCtx.versionNumber,
-            participantId: input.participant.id,
-            receipt: {
+    if (postMsgProj) {
+      const sentMeta = this.lastSentContextByParticipant.get(expectedKey);
+      const latestCtx = getLatestContextRevision(postMsgProj);
+      const targetCtx =
+        (sentMeta
+          ? postMsgProj.contextRevisions.find((r) => r.id === sentMeta.revisionId)
+          : undefined) ?? latestCtx;
+      if (targetCtx) {
+        const existingReceipt = targetCtx.receipts[input.participant.id];
+        if (existingReceipt && existingReceipt.status === 'sent') {
+          const normalizedTurnId = asNonEmptyString(input.turnId);
+          let turnStartedBeforeSend = false;
+          if (normalizedTurnId) {
+            const turnStartIdx = postMsgProj.eventLog.findIndex(
+              (ev) =>
+                ev.externalEventName === 'team.childTurnStarted' &&
+                ev.correlationId === normalizedTurnId &&
+                ev.participantId === input.participant.id,
+            );
+            const ctxPublishedIdx = postMsgProj.eventLog.findIndex(
+              (ev) =>
+                ev.type === 'context_revision_published' &&
+                ev.payload.revision.id === targetCtx.id,
+            );
+            const baselineIdx =
+              sentMeta &&
+                sentMeta.revisionId === targetCtx.id &&
+                sentMeta.sendInitiatedEventIndex !== undefined
+                ? Math.max(sentMeta.sendInitiatedEventIndex, ctxPublishedIdx)
+                : ctxPublishedIdx;
+            if (
+              baselineIdx >= 0 &&
+              turnStartIdx >= 0 &&
+              turnStartIdx < baselineIdx
+            ) {
+              turnStartedBeforeSend = true;
+            }
+          }
+          if (!turnStartedBeforeSend) {
+            this.emitAndIngest(input.convId, {
+              id: `evt_core_rcpt_recv_${targetCtx.id}_${input.participant.id}_${input.extMsgId}`,
+              seq: this.nextLocalSeq(postMsgProj),
+              conversationId: input.convId,
+              timestamp: now,
+              origin: 'gateway',
+              originSource: 'aion_core',
               participantId: input.participant.id,
-              revisionId: latestCtx.id,
-              status: 'received',
-              policyApplied: 'next_turn',
-              updatedAt: now,
-              mechanismNote: `Resposta recebida de ${input.participant.displayName} (msg ${input.extMsgId}); aplicação comprovada somente mediante entrega correlacionada.`,
-            },
-            projectToGeneral: false,
-          },
-        });
+              type: 'context_receipt_updated',
+              payload: {
+                revisionId: targetCtx.id,
+                versionNumber: targetCtx.versionNumber,
+                participantId: input.participant.id,
+                receipt: {
+                  participantId: input.participant.id,
+                  revisionId: targetCtx.id,
+                  status: 'received',
+                  policyApplied: 'next_turn',
+                  updatedAt: now,
+                  mechanismNote: `Resposta recebida de ${input.participant.displayName} após envio (msg ${input.extMsgId}); aplicação comprovada somente mediante entrega/parecer correlacionado.`,
+                },
+                projectToGeneral: false,
+              },
+            });
+          }
+        }
       }
     }
 
@@ -2738,7 +3560,30 @@ export class AionCoreAdapter
       return;
     }
 
+    if (duplicateStructuredReason) {
+      this.diagnostics.record({
+        operation: 'core.structured_envelope_duplicate_ignored',
+        status: 'ok',
+        detail: `${duplicateStructuredReason} (msg ${input.extMsgId}).`,
+      });
+      return;
+    }
+
+    if (
+      validEnvelope.kind === 'plan_proposal' &&
+      proj.tasks.length > 0 &&
+      expectedKind !== 'plan_proposal'
+    ) {
+      this.diagnostics.record({
+        operation: 'core.plan_proposal_ignored_unsolicited',
+        status: 'ok',
+        detail: `Plano duplicado ignorado para ${input.participant.displayName} (msg ${input.extMsgId}; plano ativo já existente).`,
+      });
+      return;
+    }
+
     this.expectedKindByParticipant.delete(expectedKey);
+    this.expectedDispatchByParticipant.delete(expectedKey);
 
     if (validEnvelope.kind === 'plan_proposal') {
       this.applyStructuredPlanProposal(
@@ -2751,19 +3596,38 @@ export class AionCoreAdapter
     }
 
     if (validEnvelope.kind === 'delivery_report') {
+      const normalizedTurnId = asNonEmptyString(input.turnId);
+      if (normalizedTurnId && correlatedDelivery) {
+        this.recordConsumedTurnBinding(`${expectedKey}:${normalizedTurnId}`, {
+          kind: 'delivery_report',
+          taskId: correlatedDelivery.task.id,
+          attemptId: correlatedDelivery.attempt.id,
+        });
+      }
       this.applyStructuredDeliveryReport(
         input.convId,
         input.participant,
         validEnvelope,
+        correlatedDelivery,
       );
       return;
     }
 
     if (validEnvelope.kind === 'review_decision') {
+      const normalizedTurnId = asNonEmptyString(input.turnId);
+      if (normalizedTurnId && correlatedReview) {
+        this.recordConsumedTurnBinding(`${expectedKey}:${normalizedTurnId}`, {
+          kind: 'review_decision',
+          taskId: correlatedReview.task.id,
+          attemptId: correlatedReview.attempt.id,
+          decision: validEnvelope.decision,
+        });
+      }
       this.applyStructuredReviewDecision(
         input.convId,
         input.participant,
         validEnvelope,
+        correlatedReview,
       );
     }
   }
@@ -2777,6 +3641,28 @@ export class AionCoreAdapter
     if (!this.state) return;
     let proj = this.state.conversations[convId];
     if (!proj) return;
+    if (proj.planRevisions.some((r) => r.sourceEventId === sourceEventId)) {
+      return;
+    }
+    const incomingTitles = plan.tasks.map((t) => t.title.trim().toLowerCase());
+    if (
+      incomingTitles.length > 0 &&
+      proj.tasks.some((t) => t.status !== 'completed' && t.status !== 'cancelled') &&
+      incomingTitles.every((title) =>
+        proj.tasks.some(
+          (t) =>
+            t.status !== 'cancelled' &&
+            t.title.trim().toLowerCase() === title,
+        ),
+      )
+    ) {
+      this.diagnostics.record({
+        operation: 'core.plan_proposal_deduplicated',
+        status: 'ok',
+        detail: `Plano idêntico ignorado em "${proj.conversation.title}" (${incomingTitles.length} tarefa(s) já cadastrada(s)).`,
+      });
+      return;
+    }
     const now = new Date().toISOString();
     const roles = resolveTeamRoles(
       proj.participants,
@@ -2805,8 +3691,8 @@ export class AionCoreAdapter
       const assignee =
         (rawTask.assigneeRole
           ? proj.participants.find(
-              (p) => !p.archived && hasRole(p, rawTask.assigneeRole!),
-            )
+            (p) => !p.archived && hasRole(p, rawTask.assigneeRole!),
+          )
           : undefined) ??
         roles.executor ??
         roles.coordinator ??
@@ -2894,9 +3780,527 @@ export class AionCoreAdapter
       },
     });
 
+    if (
+      this.state.conversations[convId]?.conversation.executionStatus ===
+      'paused_queue'
+    ) {
+      return;
+    }
+
     this.enqueueBackgroundWork(async () => {
       await this.dispatchNextRunnableTaskInCore(convId);
     });
+  }
+
+  private parseOptionalAttemptId(
+    raw: unknown,
+  ):
+    | { present: false }
+    | { present: true; valid: true; value: string }
+    | { present: true; valid: false; reason: string } {
+    if (raw === undefined) {
+      return { present: false };
+    }
+    if (typeof raw !== 'string' || !raw.trim()) {
+      return {
+        present: true,
+        valid: false,
+        reason:
+          'Campo attemptId presente com tipo ou valor inválido (esperado string não vazia); mantido para revisão manual.',
+      };
+    }
+    return { present: true, valid: true, value: raw.trim() };
+  }
+
+  private isTurnPrecedingAttemptStage(
+    proj: ConversationProjection,
+    participantId: string,
+    turnId: string,
+    anchorType: 'attempt_started' | 'attempt_delivered',
+    taskId: string,
+    attemptId: string,
+  ): boolean {
+    const anchorEvt = [...proj.eventLog]
+      .reverse()
+      .find(
+        (e) =>
+          e.type === anchorType &&
+          e.taskId === taskId &&
+          e.attemptId === attemptId,
+      );
+    if (!anchorEvt) return false;
+    return proj.eventLog.some(
+      (e) =>
+        e.seq < anchorEvt.seq &&
+        e.participantId === participantId &&
+        e.correlationId === turnId &&
+        (e.type === 'agent_message_posted' ||
+          e.type === 'connection_state_changed'),
+    );
+  }
+
+  private correlateDeliveryReport(
+    proj: ConversationProjection,
+    executor: Participant,
+    report: {
+      taskId: unknown;
+      attemptId?: unknown;
+    },
+    turnId?: string,
+  ):
+    | { status: 'matched'; task: Task; attempt: TaskAttempt }
+    | { status: 'duplicate'; task: Task; attempt: TaskAttempt; reason: string }
+    | { status: 'incompatible'; reason: string } {
+    if (!hasRole(executor, 'executor')) {
+      return {
+        status: 'incompatible',
+        reason: `Participante "${executor.displayName}" não possui papel de executor para registrar entrega estruturada.`,
+      };
+    }
+
+    const taskId = typeof report.taskId === 'string' ? report.taskId.trim() : '';
+    const task = taskId ? proj.tasks.find((t) => t.id === taskId) : undefined;
+    if (!task) {
+      return {
+        status: 'incompatible',
+        reason: `Entrega referencia tarefa inexistente nesta conversa (${taskId || 'vazio'}); mantida para revisão manual sem alterar tarefas.`,
+      };
+    }
+
+    if (task.assigneeParticipantId && task.assigneeParticipantId !== executor.id) {
+      return {
+        status: 'incompatible',
+        reason: `Entrega enviada por "${executor.displayName}", mas a tarefa "${task.title}" está atribuída a outro participante; mantida para revisão manual.`,
+      };
+    }
+
+    const latestAttempt = task.attempts[task.attempts.length - 1];
+    const attemptIdCheck = this.parseOptionalAttemptId(report.attemptId);
+    if (attemptIdCheck.present && !attemptIdCheck.valid) {
+      return { status: 'incompatible', reason: attemptIdCheck.reason };
+    }
+
+    if (attemptIdCheck.present) {
+      const explicitAttemptId = attemptIdCheck.value;
+      const attempt = task.attempts.find((a) => a.id === explicitAttemptId);
+      if (!attempt) {
+        return {
+          status: 'incompatible',
+          reason: `Entrega referencia tentativa inexistente (${explicitAttemptId}) na tarefa "${task.title}"; mantida para revisão manual.`,
+        };
+      }
+      if (attempt.executorParticipantId !== executor.id) {
+        return {
+          status: 'incompatible',
+          reason: `Tentativa ${explicitAttemptId} não pertence ao executor "${executor.displayName}"; mantida para revisão manual.`,
+        };
+      }
+
+      const delEvtId = `evt_core_del_${task.id}_${attempt.id}`;
+      if (
+        attempt.status === 'delivered' &&
+        attempt.id === latestAttempt?.id &&
+        task.status === 'awaiting_review' &&
+        proj.seenEventIds.includes(delEvtId)
+      ) {
+        return {
+          status: 'duplicate',
+          task,
+          attempt,
+          reason: `Reentrega duplicada da Tentativa #${attempt.attemptNumber} (${attempt.id}) já processada em "${task.title}".`,
+        };
+      }
+
+      if (task.status !== 'running') {
+        return {
+          status: 'incompatible',
+          reason: `Tarefa "${task.title}" está em estado "${task.status}" (não elegível para entrega de ${explicitAttemptId}); mantida para revisão manual.`,
+        };
+      }
+      if (attempt.id !== latestAttempt?.id) {
+        return {
+          status: 'incompatible',
+          reason: `Entrega tardia para tentativa antiga (${explicitAttemptId}) enquanto existe tentativa mais recente (${latestAttempt?.id ?? 'indefinida'}) em "${task.title}"; mantida para revisão manual.`,
+        };
+      }
+      if (attempt.status !== 'running') {
+        return {
+          status: 'incompatible',
+          reason: `Tentativa ${explicitAttemptId} está em estado "${attempt.status}" (esperado "running"); mantida para revisão manual.`,
+        };
+      }
+      return { status: 'matched', task, attempt };
+    }
+
+    // attemptId omitted: require turn/dispatch proof when retries exist, and never bind stale turns to newer attempts
+    const convKey = `${proj.conversation.id}:${executor.id}`;
+    const normalizedTurnId = asNonEmptyString(turnId);
+    const consumedBinding = normalizedTurnId
+      ? this.consumedTurnBindings.get(`${convKey}:${normalizedTurnId}`)
+      : undefined;
+    const expectedDispatch = this.expectedDispatchByParticipant.get(convKey);
+
+    if (consumedBinding) {
+      if (
+        consumedBinding.kind === 'delivery_report' &&
+        consumedBinding.taskId === task.id &&
+        consumedBinding.attemptId === latestAttempt?.id &&
+        task.status === 'awaiting_review' &&
+        latestAttempt?.status === 'delivered' &&
+        proj.seenEventIds.includes(`evt_core_del_${task.id}_${latestAttempt.id}`)
+      ) {
+        return {
+          status: 'duplicate',
+          task,
+          attempt: latestAttempt,
+          reason: `Reentrega duplicada sem attemptId do turno ${normalizedTurnId} já processado em "${task.title}" (${latestAttempt.id}).`,
+        };
+      }
+      return {
+        status: 'incompatible',
+        reason: `Entrega sem attemptId reutiliza turno anterior (${normalizedTurnId} vinculado a ${consumedBinding.attemptId}) incompatível com o estado atual de "${task.title}"; mantida para revisão manual.`,
+      };
+    }
+
+    const allRunningAttempts = task.attempts.filter((a) => a.status === 'running');
+    const runningForExecutor = allRunningAttempts.filter(
+      (a) => a.executorParticipantId === executor.id,
+    );
+
+    if (
+      task.attempts.length === 1 &&
+      allRunningAttempts.length === 0 &&
+      task.status === 'awaiting_review' &&
+      latestAttempt &&
+      latestAttempt.status === 'delivered' &&
+      latestAttempt.executorParticipantId === executor.id &&
+      proj.seenEventIds.includes(`evt_core_del_${task.id}_${latestAttempt.id}`)
+    ) {
+      return {
+        status: 'duplicate',
+        task,
+        attempt: latestAttempt,
+        reason: `Reentrega duplicada sem attemptId para a única entrega ativa (${latestAttempt.id}) de "${task.title}".`,
+      };
+    }
+
+    if (task.status !== 'running') {
+      return {
+        status: 'incompatible',
+        reason: `Entrega sem attemptId recebida com a tarefa "${task.title}" em estado "${task.status}" (esperado "running"); mantida para revisão manual.`,
+      };
+    }
+
+    if (
+      allRunningAttempts.length !== 1 ||
+      runningForExecutor.length !== 1 ||
+      !latestAttempt ||
+      runningForExecutor[0].id !== latestAttempt.id
+    ) {
+      return {
+        status: 'incompatible',
+        reason: `Entrega sem attemptId não possui correlação inequívoca com uma única tentativa ativa mais recente em "${task.title}"; mantida para revisão manual.`,
+      };
+    }
+
+    if (
+      normalizedTurnId &&
+      this.isTurnPrecedingAttemptStage(
+        proj,
+        executor.id,
+        normalizedTurnId,
+        'attempt_started',
+        task.id,
+        latestAttempt.id,
+      )
+    ) {
+      return {
+        status: 'incompatible',
+        reason: `Entrega sem attemptId associada a turno anterior (${normalizedTurnId}) ao início da tentativa atual (${latestAttempt.id}) em "${task.title}"; mantida para revisão manual.`,
+      };
+    }
+
+    if (
+      expectedDispatch &&
+      expectedDispatch.kind === 'delivery_report' &&
+      expectedDispatch.taskId === task.id &&
+      expectedDispatch.attemptId === latestAttempt.id &&
+      expectedDispatch.turnId &&
+      normalizedTurnId &&
+      normalizedTurnId !== expectedDispatch.turnId
+    ) {
+      return {
+        status: 'incompatible',
+        reason: `Entrega sem attemptId chegou em turno (${normalizedTurnId}) divergente do turno esperado (${expectedDispatch.turnId}) para ${latestAttempt.id}; mantida para revisão manual.`,
+      };
+    }
+
+    if (task.attempts.length > 1) {
+      const provenByDispatchTurn = Boolean(
+        normalizedTurnId &&
+        expectedDispatch &&
+        expectedDispatch.kind === 'delivery_report' &&
+        expectedDispatch.taskId === task.id &&
+        expectedDispatch.attemptId === latestAttempt.id &&
+        expectedDispatch.turnId === normalizedTurnId,
+      );
+      if (!provenByDispatchTurn) {
+        return {
+          status: 'incompatible',
+          reason: `Entrega sem attemptId em tarefa com histórico de retentativas (${task.attempts.length} tentativas) sem vínculo comprovado ao turno/despacho atual (${latestAttempt.id}); mantida para revisão manual.`,
+        };
+      }
+    }
+
+    return { status: 'matched', task, attempt: runningForExecutor[0] };
+  }
+
+  private correlateReviewDecision(
+    proj: ConversationProjection,
+    reviewer: Participant,
+    decisionPayload: {
+      taskId: unknown;
+      attemptId?: unknown;
+      decision: 'approved' | 'rejected';
+    },
+    turnId?: string,
+  ):
+    | { status: 'matched'; task: Task; attempt: TaskAttempt }
+    | { status: 'duplicate'; task: Task; attempt: TaskAttempt; reason: string }
+    | { status: 'incompatible'; reason: string } {
+    if (!hasRole(reviewer, 'reviewer')) {
+      return {
+        status: 'incompatible',
+        reason: `Participante "${reviewer.displayName}" não possui papel de auditor para registrar parecer estruturado.`,
+      };
+    }
+
+    const taskId =
+      typeof decisionPayload.taskId === 'string'
+        ? decisionPayload.taskId.trim()
+        : '';
+    const task = taskId ? proj.tasks.find((t) => t.id === taskId) : undefined;
+    if (!task) {
+      return {
+        status: 'incompatible',
+        reason: `Parecer de auditoria referencia tarefa inexistente nesta conversa (${taskId || 'vazio'}); mantido para revisão manual sem alterar tarefas.`,
+      };
+    }
+
+    if (task.reviewerParticipantId && task.reviewerParticipantId !== reviewer.id) {
+      return {
+        status: 'incompatible',
+        reason: `Parecer enviado por "${reviewer.displayName}", mas a auditoria de "${task.title}" está atribuída a outro participante; mantido para revisão manual.`,
+      };
+    }
+
+    const latestAttempt = task.attempts[task.attempts.length - 1];
+    const hasRunningAttempt = task.attempts.some((a) => a.status === 'running');
+    const attemptIdCheck = this.parseOptionalAttemptId(decisionPayload.attemptId);
+    if (attemptIdCheck.present && !attemptIdCheck.valid) {
+      return { status: 'incompatible', reason: attemptIdCheck.reason };
+    }
+
+    if (attemptIdCheck.present) {
+      const explicitAttemptId = attemptIdCheck.value;
+      const attempt = task.attempts.find((a) => a.id === explicitAttemptId);
+      if (!attempt) {
+        return {
+          status: 'incompatible',
+          reason: `Parecer de auditoria referencia tentativa inexistente (${explicitAttemptId}) na tarefa "${task.title}"; mantido para revisão manual.`,
+        };
+      }
+
+      const revEvtId = `evt_core_rev_${task.id}_${attempt.id}`;
+      if (
+        !hasRunningAttempt &&
+        attempt.id === latestAttempt?.id &&
+        proj.seenEventIds.includes(revEvtId) &&
+        task.reviews.some(
+          (r) =>
+            r.attemptId === attempt.id &&
+            r.decision === decisionPayload.decision,
+        )
+      ) {
+        return {
+          status: 'duplicate',
+          task,
+          attempt,
+          reason: `Parecer duplicado da Tentativa #${attempt.attemptNumber} (${attempt.id}) já processado em "${task.title}".`,
+        };
+      }
+
+      if (hasRunningAttempt) {
+        return {
+          status: 'incompatible',
+          reason: `Parecer para tentativa ${explicitAttemptId} rejeitado porque a tarefa "${task.title}" possui tentativa em execução; mantido para revisão manual.`,
+        };
+      }
+      if (attempt.id !== latestAttempt?.id) {
+        return {
+          status: 'incompatible',
+          reason: `Parecer tardio para tentativa antiga (${explicitAttemptId}) enquanto a tentativa atual de "${task.title}" é ${latestAttempt?.id ?? 'indefinida'}; mantido para revisão manual.`,
+        };
+      }
+      if (task.status !== 'awaiting_review') {
+        return {
+          status: 'incompatible',
+          reason: `Tarefa "${task.title}" está em estado "${task.status}" (esperado "awaiting_review" para aplicar parecer); mantido para revisão manual.`,
+        };
+      }
+      if (attempt.status !== 'delivered') {
+        return {
+          status: 'incompatible',
+          reason: `Tentativa ${explicitAttemptId} está em estado "${attempt.status}" (esperado "delivered"); mantido para revisão manual.`,
+        };
+      }
+      if (task.reviews.some((r) => r.attemptId === attempt.id)) {
+        return {
+          status: 'incompatible',
+          reason: `Tentativa ${explicitAttemptId} já possui parecer registrado em "${task.title}"; mantido para revisão manual.`,
+        };
+      }
+      return { status: 'matched', task, attempt };
+    }
+
+    // attemptId omitted: require turn/dispatch proof when retries exist, and never bind stale review turns to newer attempts
+    const convKey = `${proj.conversation.id}:${reviewer.id}`;
+    const normalizedTurnId = asNonEmptyString(turnId);
+    const consumedBinding = normalizedTurnId
+      ? this.consumedTurnBindings.get(`${convKey}:${normalizedTurnId}`)
+      : undefined;
+    const expectedDispatch = this.expectedDispatchByParticipant.get(convKey);
+
+    if (consumedBinding) {
+      if (
+        consumedBinding.kind === 'review_decision' &&
+        consumedBinding.taskId === task.id &&
+        consumedBinding.attemptId === latestAttempt?.id &&
+        consumedBinding.decision === decisionPayload.decision &&
+        !hasRunningAttempt &&
+        proj.seenEventIds.includes(`evt_core_rev_${task.id}_${latestAttempt.id}`) &&
+        task.reviews.some(
+          (r) =>
+            r.attemptId === latestAttempt.id &&
+            r.decision === decisionPayload.decision,
+        )
+      ) {
+        return {
+          status: 'duplicate',
+          task,
+          attempt: latestAttempt,
+          reason: `Parecer duplicado sem attemptId do turno ${normalizedTurnId} já processado em "${task.title}" (${latestAttempt.id}).`,
+        };
+      }
+      return {
+        status: 'incompatible',
+        reason: `Parecer sem attemptId reutiliza turno anterior (${normalizedTurnId} vinculado a ${consumedBinding.attemptId}) incompatível com o estado atual de "${task.title}"; mantido para revisão manual.`,
+      };
+    }
+
+    const activeOrDelivered = task.attempts.filter(
+      (a) => a.status === 'delivered' || a.status === 'running',
+    );
+
+    if (
+      task.attempts.length === 1 &&
+      !hasRunningAttempt &&
+      latestAttempt &&
+      activeOrDelivered.length === 0 &&
+      proj.seenEventIds.includes(`evt_core_rev_${task.id}_${latestAttempt.id}`) &&
+      task.reviews.some(
+        (r) =>
+          r.attemptId === latestAttempt.id &&
+          r.decision === decisionPayload.decision,
+      ) &&
+      (task.status === 'completed' ||
+        task.status === 'changes_requested' ||
+        task.status === 'blocked')
+    ) {
+      return {
+        status: 'duplicate',
+        task,
+        attempt: latestAttempt,
+        reason: `Parecer duplicado sem attemptId para a tentativa já auditada (${latestAttempt.id}) em "${task.title}".`,
+      };
+    }
+
+    if (task.status !== 'awaiting_review') {
+      return {
+        status: 'incompatible',
+        reason: `Parecer sem attemptId recebido com a tarefa "${task.title}" em estado "${task.status}" (esperado "awaiting_review"); mantido para revisão manual.`,
+      };
+    }
+
+    if (
+      !latestAttempt ||
+      latestAttempt.status !== 'delivered' ||
+      activeOrDelivered.length !== 1 ||
+      activeOrDelivered[0].id !== latestAttempt.id
+    ) {
+      return {
+        status: 'incompatible',
+        reason: `Parecer sem attemptId não possui correlação inequívoca com uma única tentativa entregue pendente de auditoria em "${task.title}"; mantido para revisão manual.`,
+      };
+    }
+
+    if (task.reviews.some((r) => r.attemptId === latestAttempt.id)) {
+      return {
+        status: 'incompatible',
+        reason: `Tentativa mais recente (${latestAttempt.id}) já possui parecer registrado em "${task.title}"; mantido para revisão manual.`,
+      };
+    }
+
+    if (
+      normalizedTurnId &&
+      this.isTurnPrecedingAttemptStage(
+        proj,
+        reviewer.id,
+        normalizedTurnId,
+        'attempt_delivered',
+        task.id,
+        latestAttempt.id,
+      )
+    ) {
+      return {
+        status: 'incompatible',
+        reason: `Parecer sem attemptId associado a turno anterior (${normalizedTurnId}) à entrega da tentativa atual (${latestAttempt.id}) em "${task.title}"; mantido para revisão manual.`,
+      };
+    }
+
+    if (
+      expectedDispatch &&
+      expectedDispatch.kind === 'review_decision' &&
+      expectedDispatch.taskId === task.id &&
+      expectedDispatch.attemptId === latestAttempt.id &&
+      expectedDispatch.turnId &&
+      normalizedTurnId &&
+      normalizedTurnId !== expectedDispatch.turnId
+    ) {
+      return {
+        status: 'incompatible',
+        reason: `Parecer sem attemptId chegou em turno (${normalizedTurnId}) divergente do turno esperado de auditoria (${expectedDispatch.turnId}) para ${latestAttempt.id}; mantido para revisão manual.`,
+      };
+    }
+
+    if (task.attempts.length > 1) {
+      const provenByDispatchTurn = Boolean(
+        normalizedTurnId &&
+        expectedDispatch &&
+        expectedDispatch.kind === 'review_decision' &&
+        expectedDispatch.taskId === task.id &&
+        expectedDispatch.attemptId === latestAttempt.id &&
+        expectedDispatch.turnId === normalizedTurnId,
+      );
+      if (!provenByDispatchTurn) {
+        return {
+          status: 'incompatible',
+          reason: `Parecer sem attemptId em tarefa com histórico de retentativas (${task.attempts.length} tentativas) sem vínculo comprovado ao despacho/turno atual de auditoria (${latestAttempt.id}); mantido para revisão manual.`,
+        };
+      }
+    }
+
+    return { status: 'matched', task, attempt: latestAttempt };
   }
 
   private applyStructuredDeliveryReport(
@@ -2908,77 +4312,28 @@ export class AionCoreAdapter
       deliverySummary: string;
       evidenceNotes: string[];
     },
+    preCorrelated?: { task: Task; attempt: TaskAttempt },
   ): void {
     if (!this.state) return;
     let proj = this.state.conversations[convId];
     if (!proj) return;
     const now = new Date().toISOString();
 
-    const task =
-      proj.tasks.find((t) => t.id === report.taskId) ??
-      proj.tasks.find(
-        (t) =>
-          t.assigneeParticipantId === executor.id &&
-          (t.status === 'running' || t.status === 'queued'),
-      );
-    if (!task) return;
+    const matched =
+      preCorrelated ??
+      (() => {
+        const corr = this.correlateDeliveryReport(proj, executor, report);
+        return corr.status === 'matched' ? { task: corr.task, attempt: corr.attempt } : undefined;
+      })();
+    if (!matched) return;
 
-    let attempt: TaskAttempt | undefined =
-      (report.attemptId
-        ? task.attempts.find((a) => a.id === report.attemptId)
-        : undefined) ??
-      task.attempts.find((a) => a.status === 'running') ??
-      task.attempts[task.attempts.length - 1];
-
-    if (!attempt) {
-      const latestCtx = getLatestContextRevision(proj);
-      const attId = `att_core_${task.id}_1`;
-      const sStartEvt = `evt_core_att_impl_${task.id}_${this.nextId('s')}`;
-      this.emitAndIngest(convId, {
-        id: sStartEvt,
-        seq: this.nextLocalSeq(proj),
-        conversationId: convId,
-        timestamp: now,
-        origin: 'executor',
-        originSource: 'aion_core',
-        participantId: executor.id,
-        taskId: task.id,
-        attemptId: attId,
-        type: 'attempt_started',
-        payload: {
-          taskId: task.id,
-          attempt: {
-            id: attId,
-            taskId: task.id,
-            attemptNumber: task.attempts.length + 1,
-            executorParticipantId: executor.id,
-            modelTierUsed: executor.modelTier,
-            modelRefUsed: { ...executor.modelRef },
-            rolesSnapshot: [...executor.roles],
-            instructionsSnapshot: executor.instructions,
-            contextRevisionId: latestCtx?.id ?? 'ctx_none',
-            contextRevisionNumber: latestCtx?.versionNumber ?? 0,
-            status: 'running',
-            evidenceNotes: [],
-            startedAt: now,
-            sourceEventIds: [sStartEvt],
-            originSource: 'aion_core',
-          },
-          participantStatus: 'running',
-          projectToGeneral: false,
-        },
-      });
-      proj = this.state.conversations[convId];
-      if (!proj) return;
-      const updatedTask = proj.tasks.find((t) => t.id === task.id);
-      attempt = updatedTask?.attempts[updatedTask.attempts.length - 1];
-    }
-
-    if (!attempt) return;
+    const { task, attempt } = matched;
+    const delEvtId = `evt_core_del_${task.id}_${attempt.id}`;
+    if (proj.seenEventIds.includes(delEvtId)) return;
 
     this.markWsTaskMutation(convId, task.id);
     this.emitAndIngest(convId, {
-      id: `evt_core_del_${task.id}_${attempt.id}`,
+      id: delEvtId,
       seq: this.nextLocalSeq(proj),
       conversationId: convId,
       timestamp: now,
@@ -2999,34 +4354,27 @@ export class AionCoreAdapter
 
     proj = this.state.conversations[convId];
     if (!proj) return;
-    const latestCtx = getLatestContextRevision(proj);
-    if (latestCtx && attempt.contextRevisionId === latestCtx.id) {
-      this.emitAndIngest(convId, {
-        id: `evt_core_rcpt_app_${latestCtx.id}_${executor.id}_${attempt.id}`,
-        seq: this.nextLocalSeq(proj),
-        conversationId: convId,
-        timestamp: now,
+    const attemptCtx = proj.contextRevisions.find(
+      (r) => r.id === attempt.contextRevisionId,
+    );
+    if (attemptCtx) {
+      this.emitContextReceiptApplied({
+        convId,
+        participant: executor,
+        revisionId: attemptCtx.id,
         origin: 'executor',
-        originSource: 'aion_core',
-        participantId: executor.id,
         taskId: task.id,
         attemptId: attempt.id,
-        type: 'context_receipt_updated',
-        payload: {
-          revisionId: latestCtx.id,
-          versionNumber: latestCtx.versionNumber,
-          participantId: executor.id,
-          receipt: {
-            participantId: executor.id,
-            revisionId: latestCtx.id,
-            status: 'applied',
-            policyApplied: 'next_turn',
-            updatedAt: now,
-            mechanismNote: `Contexto v${latestCtx.versionNumber} correlacionado à entrega da Tentativa #${attempt.attemptNumber} (${executor.displayName}).`,
-          },
-          projectToGeneral: false,
-        },
+        mechanismNote: `Contexto v${attemptCtx.versionNumber} correlacionado à entrega da Tentativa #${attempt.attemptNumber} (${executor.displayName}).`,
+        eventSuffix: attempt.id,
       });
+    }
+
+    if (
+      this.state.conversations[convId]?.conversation.executionStatus ===
+      'paused_queue'
+    ) {
+      return;
     }
 
     const deliveredTaskId = task.id;
@@ -3054,22 +4402,22 @@ export class AionCoreAdapter
       rationale: string;
       unmetCriteria: string[];
     },
+    preCorrelated?: { task: Task; attempt: TaskAttempt },
   ): void {
     if (!this.state) return;
     let proj = this.state.conversations[convId];
     if (!proj) return;
     const now = new Date().toISOString();
 
-    const task =
-      proj.tasks.find((t) => t.id === decisionPayload.taskId) ??
-      proj.tasks.find((t) => t.status === 'awaiting_review');
-    if (!task) return;
+    const matched =
+      preCorrelated ??
+      (() => {
+        const corr = this.correlateReviewDecision(proj, reviewer, decisionPayload);
+        return corr.status === 'matched' ? { task: corr.task, attempt: corr.attempt } : undefined;
+      })();
+    if (!matched) return;
 
-    const attempt =
-      (decisionPayload.attemptId
-        ? task.attempts.find((a) => a.id === decisionPayload.attemptId)
-        : undefined) ?? task.attempts[task.attempts.length - 1];
-    if (!attempt) return;
+    const { task, attempt } = matched;
 
     const independence = checkAuditIndependence(
       proj.participants,
@@ -3114,10 +4462,37 @@ export class AionCoreAdapter
 
     proj = this.state.conversations[convId];
     if (!proj) return;
+
     const updatedTask = proj.tasks.find((t) => t.id === task.id);
     if (!updatedTask) return;
 
     if (decisionPayload.decision === 'rejected') {
+      if (
+        updatedTask.attempts.length >= MAX_CORE_TASK_ATTEMPTS ||
+        updatedTask.qualityRejectionCount >= MAX_CORE_TASK_ATTEMPTS
+      ) {
+        this.emitAndIngest(convId, {
+          id: `evt_core_limit_${updatedTask.id}_${updatedTask.attempts.length}`,
+          seq: this.nextLocalSeq(proj),
+          conversationId: convId,
+          timestamp: now,
+          origin: 'system',
+          originSource: 'aion_core',
+          participantId: reviewer.id,
+          taskId: updatedTask.id,
+          attemptId: attempt.id,
+          type: 'task_status_changed',
+          payload: {
+            taskId: updatedTask.id,
+            nextStatus: 'blocked',
+            participantStatus: 'blocked',
+            projectToGeneral: true,
+            generalSummary: `Limite de ${MAX_CORE_TASK_ATTEMPTS} tentativas/reprovações atingido em "${updatedTask.title}". Retentativa automática interrompida; aguardando intervenção manual.`,
+          },
+        });
+        return;
+      }
+
       const policy = this.state.modelPolicy;
       const executor = proj.participants.find(
         (p) => p.id === updatedTask.assigneeParticipantId && !p.archived,
@@ -3128,24 +4503,25 @@ export class AionCoreAdapter
       const currentTier: DemoModelTier =
         executor?.modelTier ?? policy.defaultExecutorTier;
       const targetTier = policy.escalationTargetTier;
+      let autoEscalatedModelId: string | undefined;
 
       if (
         executor &&
         !alreadyEscalated &&
         updatedTask.qualityRejectionCount >=
-          policy.qualityRejectionsBeforeSuggest &&
+        policy.qualityRejectionsBeforeSuggest &&
         currentTier !== targetTier
       ) {
         const escId = `esc_core_${updatedTask.id}_${updatedTask.qualityRejectionCount}`;
         const escEvtId = `evt_core_esc_${escId}`;
-        const promotedRef: ModelRef =
-          executor.modelRef.source === 'user_preference'
-            ? {
-                ...executor.modelRef,
-                displayName: `${executor.modelRef.displayName} → ${PT_BR.modelTierLabels[targetTier]}`,
-                tier: targetTier,
-              }
-            : makeDemoModelRef(targetTier);
+        const executorConn = this.state.connections.find(
+          (c) => c.id === executor.connectionId,
+        );
+        const promotedRef: ModelRef = resolveCoreEscalationModelRef(
+          executorConn,
+          executor.modelRef,
+          targetTier,
+        );
 
         this.emitAndIngest(convId, {
           id: escEvtId,
@@ -3170,7 +4546,7 @@ export class AionCoreAdapter
               fromModelRef: { ...executor.modelRef },
               toModelRef: promotedRef,
               reason: `Atingido o limite de ${policy.qualityRejectionsBeforeSuggest} reprovação(ões) de qualidade na tarefa "${updatedTask.title}".`,
-              expectedEffect: `Promover ${executor.displayName} para ${PT_BR.modelTierLabels[targetTier]} na próxima tentativa.`,
+              expectedEffect: `Promover ${executor.displayName} para ${promotedRef.displayName} na próxima tentativa.`,
               status: 'suggested',
               createdAt: now,
               sourceEventId: escEvtId,
@@ -3183,6 +4559,7 @@ export class AionCoreAdapter
         if (policy.approvalMode === 'manual') {
           return;
         }
+        autoEscalatedModelId = promotedRef.externalId?.trim();
         if (proj) {
           this.emitAndIngest(convId, {
             id: `evt_core_esc_auto_${escId}`,
@@ -3206,9 +4583,22 @@ export class AionCoreAdapter
         }
       }
 
+      if (proj.conversation.executionStatus === 'paused_queue') {
+        return;
+      }
+
+      const nextSlotId = executor?.sessionRef.externalSlotId;
+      const teamId = proj?.conversation.externalTeamId;
       this.enqueueBackgroundWork(async () => {
+        if (autoEscalatedModelId && teamId && nextSlotId) {
+          await this.syncCoreParticipantModel(teamId, nextSlotId, autoEscalatedModelId);
+        }
         await this.dispatchTaskAttemptInCore(convId, updatedTask.id);
       });
+      return;
+    }
+
+    if (proj.conversation.executionStatus === 'paused_queue') {
       return;
     }
 
@@ -3284,6 +4674,7 @@ export class AionCoreAdapter
     if (!this.state) return;
     let proj = this.state.conversations[convId];
     if (!proj) return;
+    if (proj.conversation.executionStatus === 'paused_queue') return;
     const teamId = proj.conversation.externalTeamId;
     if (!teamId) return;
     const task = proj.tasks.find((t) => t.id === taskId);
@@ -3295,137 +4686,149 @@ export class AionCoreAdapter
         (p) => p.id === task.assigneeParticipantId && !p.archived,
       ) ?? resolveTeamRoles(proj.participants).executor;
     if (!executor?.sessionRef.externalSlotId) return;
+    const slotDispatchKey = `${convId}:${executor.sessionRef.externalSlotId}`;
+    if (this.inFlightSlotDispatches.has(slotDispatchKey)) return;
+    this.inFlightSlotDispatches.add(slotDispatchKey);
+    try {
 
-    const now = new Date().toISOString();
-    if (task.status === 'planned') {
-      this.emitAndIngest(convId, {
-        id: `evt_core_q_${task.id}_${task.attempts.length + 1}`,
-        seq: this.nextLocalSeq(proj),
-        conversationId: convId,
-        timestamp: now,
-        origin: 'coordinator',
-        originSource: 'aion_core',
-        taskId: task.id,
-        type: 'task_status_changed',
-        payload: {
-          taskId: task.id,
-          nextStatus: 'queued',
-          projectToGeneral: false,
-        },
-      });
-      proj = this.state.conversations[convId];
-      if (!proj) return;
-    }
-
-    const latestCtx = getLatestContextRevision(proj);
-    const attemptNumber = task.attempts.length + 1;
-    const attemptId = `att_core_${task.id}_${attemptNumber}`;
-    const startEvtId = `evt_core_att_${task.id}_${attemptNumber}`;
-
-    const attempt: TaskAttempt = {
-      id: attemptId,
-      taskId: task.id,
-      attemptNumber,
-      executorParticipantId: executor.id,
-      modelTierUsed: executor.modelTier,
-      modelRefUsed: { ...executor.modelRef },
-      rolesSnapshot: [...executor.roles],
-      instructionsSnapshot: executor.instructions,
-      contextRevisionId: latestCtx?.id ?? 'ctx_none',
-      contextRevisionNumber: latestCtx?.versionNumber ?? 0,
-      status: 'running',
-      evidenceNotes: [],
-      startedAt: now,
-      sourceEventIds: [startEvtId],
-      originSource: 'aion_core',
-    };
-
-    this.emitAndIngest(convId, {
-      id: startEvtId,
-      seq: this.nextLocalSeq(proj),
-      conversationId: convId,
-      timestamp: now,
-      origin: 'executor',
-      originSource: 'aion_core',
-      participantId: executor.id,
-      taskId: task.id,
-      attemptId,
-      type: 'attempt_started',
-      payload: {
-        taskId: task.id,
-        attempt,
-        participantStatus: 'running',
-        projectToGeneral: true,
-        generalSummary: `${executor.displayName} iniciou Tentativa #${attemptNumber} de "${task.title}" no Core.`,
-      },
-    });
-
-    proj = this.state.conversations[convId];
-    if (!proj) return;
-    const latestTask = proj.tasks.find((t) => t.id === task.id) ?? task;
-    const content = this.composeCoreOutgoingContent({
-      proj,
-      targetParticipant: executor,
-      userMarkdown: `Execute a tarefa "${latestTask.title}" (Tentativa #${attemptNumber}) e responda com \`\`\`aion-desk-json\`\`\` de delivery_report quando concluir.`,
-      expectedKind: 'delivery_report',
-      task: latestTask,
-      attempt,
-    });
-
-    this.expectedKindByParticipant.set(
-      `${convId}:${executor.id}`,
-      'delivery_report',
-    );
-    const path = `/api/teams/${encodeURIComponent(teamId)}/agents/${encodeURIComponent(executor.sessionRef.externalSlotId)}/messages`;
-    const body: SendAgentMessageRequest = { content };
-    const rawAck = await this.httpClient.requestJson<unknown>({
-      method: 'POST',
-      path,
-      body,
-      idempotent: false,
-      operationName: 'core.dispatchTaskAttempt',
-      teamId,
-      slotId: executor.sessionRef.externalSlotId,
-    });
-    const ack = unwrapApiResponse<TeamRunAckResponse>(
-      rawAck,
-      `POST ${path}`,
-      (d): d is TeamRunAckResponse =>
-        isRecord(d) &&
-        typeof d.message_id === 'string' &&
-        typeof d.enqueue_status === 'string',
-    );
-
-    if (latestCtx) {
-      const latestProj = this.state.conversations[convId];
-      if (latestProj) {
+      const now = new Date().toISOString();
+      if (task.status === 'planned') {
         this.emitAndIngest(convId, {
-          id: `evt_core_rcpt_sent_${latestCtx.id}_${executor.id}_${ack.message_id}`,
-          seq: this.nextLocalSeq(latestProj),
+          id: `evt_core_q_${task.id}_${task.attempts.length + 1}`,
+          seq: this.nextLocalSeq(proj),
           conversationId: convId,
-          timestamp: new Date().toISOString(),
-          origin: 'gateway',
+          timestamp: now,
+          origin: 'coordinator',
           originSource: 'aion_core',
-          participantId: executor.id,
-          taskId: latestTask.id,
-          attemptId,
-          type: 'context_receipt_updated',
+          taskId: task.id,
+          type: 'task_status_changed',
           payload: {
-            revisionId: latestCtx.id,
-            versionNumber: latestCtx.versionNumber,
-            participantId: executor.id,
-            receipt: {
-              participantId: executor.id,
-              revisionId: latestCtx.id,
-              status: 'sent',
-              policyApplied: 'next_turn',
-              updatedAt: new Date().toISOString(),
-              mechanismNote: `Contexto v${latestCtx.versionNumber} enviado na Tentativa #${attemptNumber} (msg ${ack.message_id}); aguardando confirmação.`,
-            },
+            taskId: task.id,
+            nextStatus: 'queued',
             projectToGeneral: false,
           },
         });
+        proj = this.state.conversations[convId];
+        if (!proj) return;
       }
+
+      const latestCtx = getLatestContextRevision(proj);
+      const attemptNumber = task.attempts.length + 1;
+      const attemptId = `att_core_${task.id}_${attemptNumber}`;
+      const startEvtId = `evt_core_att_${task.id}_${attemptNumber}`;
+
+      const attempt: TaskAttempt = {
+        id: attemptId,
+        taskId: task.id,
+        attemptNumber,
+        executorParticipantId: executor.id,
+        modelTierUsed: executor.modelTier,
+        modelRefUsed: { ...executor.modelRef },
+        rolesSnapshot: [...executor.roles],
+        instructionsSnapshot: executor.instructions,
+        contextRevisionId: latestCtx?.id ?? 'ctx_none',
+        contextRevisionNumber: latestCtx?.versionNumber ?? 0,
+        status: 'running',
+        evidenceNotes: [],
+        startedAt: now,
+        sourceEventIds: [startEvtId],
+        originSource: 'aion_core',
+      };
+
+      this.emitAndIngest(convId, {
+        id: startEvtId,
+        seq: this.nextLocalSeq(proj),
+        conversationId: convId,
+        timestamp: now,
+        origin: 'executor',
+        originSource: 'aion_core',
+        participantId: executor.id,
+        taskId: task.id,
+        attemptId,
+        type: 'attempt_started',
+        payload: {
+          taskId: task.id,
+          attempt,
+          participantStatus: 'running',
+          projectToGeneral: true,
+          generalSummary: `${executor.displayName} iniciou Tentativa #${attemptNumber} de "${task.title}" no Core.`,
+        },
+      });
+
+      proj = this.state.conversations[convId];
+      if (!proj) return;
+      const latestTask = proj.tasks.find((t) => t.id === task.id) ?? task;
+      const content = this.composeCoreOutgoingContent({
+        proj,
+        targetParticipant: executor,
+        userMarkdown: `Execute a tarefa "${latestTask.title}" (Tentativa #${attemptNumber}) e responda com \`\`\`aion-desk-json\`\`\` de delivery_report quando concluir.`,
+        expectedKind: 'delivery_report',
+        task: latestTask,
+        attempt,
+      });
+
+      this.expectedKindByParticipant.set(
+        `${convId}:${executor.id}`,
+        'delivery_report',
+      );
+      this.expectedDispatchByParticipant.set(`${convId}:${executor.id}`, {
+        kind: 'delivery_report',
+        taskId: latestTask.id,
+        attemptId,
+        contextRevisionId: latestCtx?.id,
+      });
+      const path = `/api/teams/${encodeURIComponent(teamId)}/agents/${encodeURIComponent(executor.sessionRef.externalSlotId)}/messages`;
+      const body: SendAgentMessageRequest = { content };
+      const sendInitiatedEventIndex =
+        this.state.conversations[convId]?.eventLog.length ?? proj.eventLog.length;
+      let rawAck: unknown;
+      try {
+        rawAck = await this.httpClient.requestJson<unknown>({
+          method: 'POST',
+          path,
+          body,
+          idempotent: false,
+          operationName: 'core.dispatchTaskAttempt',
+          teamId,
+          slotId: executor.sessionRef.externalSlotId,
+        });
+      } catch (err) {
+        if (latestCtx) {
+          this.emitContextReceiptFailed({
+            convId,
+            participant: executor,
+            revision: latestCtx,
+            taskId: latestTask.id,
+            attemptId,
+            reason:
+              err instanceof Error ? err.message : 'erro de comunicação com o Core',
+          });
+        }
+        throw err;
+      }
+      const ack = unwrapApiResponse<TeamRunAckResponse>(
+        rawAck,
+        `POST ${path}`,
+        (d): d is TeamRunAckResponse =>
+          isRecord(d) &&
+          typeof d.message_id === 'string' &&
+          typeof d.enqueue_status === 'string',
+      );
+
+      if (latestCtx) {
+        this.emitContextReceiptSent({
+          convId,
+          participant: executor,
+          revision: latestCtx,
+          messageId: ack.message_id,
+          sendInitiatedEventIndex,
+          taskId: latestTask.id,
+          attemptId,
+          mechanismNote: `Contexto v${latestCtx.versionNumber} enviado na Tentativa #${attemptNumber} (msg ${ack.message_id}); aguardando confirmação.`,
+        });
+      }
+    } finally {
+      this.inFlightSlotDispatches.delete(slotDispatchKey);
     }
   }
 
@@ -3439,6 +4842,7 @@ export class AionCoreAdapter
     if (!this.state) return;
     const proj = this.state.conversations[convId];
     if (!proj) return;
+    if (proj.conversation.executionStatus === 'paused_queue') return;
     const teamId = proj.conversation.externalTeamId;
     if (!teamId) return;
     const task = proj.tasks.find((t) => t.id === taskId);
@@ -3451,75 +4855,89 @@ export class AionCoreAdapter
     const reviewer =
       (task.reviewerParticipantId
         ? proj.participants.find(
-            (p) => p.id === task.reviewerParticipantId && !p.archived,
-          )
+          (p) => p.id === task.reviewerParticipantId && !p.archived,
+        )
         : undefined) ??
       roles.reviewer ??
       roles.coordinator;
     if (!reviewer?.sessionRef.externalSlotId) return;
+    const reviewDispatchKey = `${convId}:review:${reviewer.sessionRef.externalSlotId}`;
+    if (this.inFlightSlotDispatches.has(reviewDispatchKey)) return;
+    this.inFlightSlotDispatches.add(reviewDispatchKey);
+    try {
 
-    const content = this.composeCoreOutgoingContent({
-      proj,
-      targetParticipant: reviewer,
-      userMarkdown: `Audite a entrega da tarefa "${task.title}" (${attempt ? `Tentativa #${attempt.attemptNumber}` : attemptId}).\nResumo da entrega: ${deliverySummary}\nEvidências:\n${evidenceNotes.map((n) => `- ${n}`).join('\n')}\n\nResponda com \`\`\`aion-desk-json\`\`\` de review_decision.`,
-      expectedKind: 'review_decision',
-      task,
-      attempt,
-    });
+      const latestCtxBeforeReview = getLatestContextRevision(proj);
+      const content = this.composeCoreOutgoingContent({
+        proj,
+        targetParticipant: reviewer,
+        userMarkdown: `Audite os arquivos reais, diff e testes observados no workspace da tarefa "${task.title}" (${attempt ? `Tentativa #${attempt.attemptNumber}` : attemptId}). Não aprove apenas pela afirmação do executor — verifique os critérios contra o estado real do repositório.\nResumo declarado: ${deliverySummary}\nEvidências declaradas:\n${evidenceNotes.map((n) => `- ${n}`).join('\n')}\n\nResponda com \`\`\`aion-desk-json\`\`\` de review_decision.`,
+        expectedKind: 'review_decision',
+        task,
+        attempt,
+      });
 
-    this.expectedKindByParticipant.set(
-      `${convId}:${reviewer.id}`,
-      'review_decision',
-    );
-    const path = `/api/teams/${encodeURIComponent(teamId)}/agents/${encodeURIComponent(reviewer.sessionRef.externalSlotId)}/messages`;
-    const body: SendAgentMessageRequest = { content };
-    const rawAck = await this.httpClient.requestJson<unknown>({
-      method: 'POST',
-      path,
-      body,
-      idempotent: false,
-      operationName: 'core.dispatchReview',
-      teamId,
-      slotId: reviewer.sessionRef.externalSlotId,
-    });
-    unwrapApiResponse<TeamRunAckResponse>(
-      rawAck,
-      `POST ${path}`,
-      (d): d is TeamRunAckResponse =>
-        isRecord(d) &&
-        typeof d.message_id === 'string' &&
-        typeof d.enqueue_status === 'string',
-    );
-
-    const latestProj = this.state.conversations[convId];
-    const latestCtx = latestProj ? getLatestContextRevision(latestProj) : undefined;
-    if (latestProj && latestCtx) {
-      this.emitAndIngest(convId, {
-        id: `evt_core_rcpt_rev_sent_${latestCtx.id}_${reviewer.id}_${attemptId}`,
-        seq: this.nextLocalSeq(latestProj),
-        conversationId: convId,
-        timestamp: new Date().toISOString(),
-        origin: 'gateway',
-        originSource: 'aion_core',
-        participantId: reviewer.id,
+      this.expectedKindByParticipant.set(
+        `${convId}:${reviewer.id}`,
+        'review_decision',
+      );
+      this.expectedDispatchByParticipant.set(`${convId}:${reviewer.id}`, {
+        kind: 'review_decision',
         taskId: task.id,
         attemptId,
-        type: 'context_receipt_updated',
-        payload: {
-          revisionId: latestCtx.id,
-          versionNumber: latestCtx.versionNumber,
-          participantId: reviewer.id,
-          receipt: {
-            participantId: reviewer.id,
-            revisionId: latestCtx.id,
-            status: 'sent',
-            policyApplied: 'next_turn',
-            updatedAt: new Date().toISOString(),
-            mechanismNote: `Contexto v${latestCtx.versionNumber} enviado ao auditor ${reviewer.displayName} para revisão.`,
-          },
-          projectToGeneral: false,
-        },
+        contextRevisionId: latestCtxBeforeReview?.id,
       });
+      const path = `/api/teams/${encodeURIComponent(teamId)}/agents/${encodeURIComponent(reviewer.sessionRef.externalSlotId)}/messages`;
+      const body: SendAgentMessageRequest = { content };
+      const sendInitiatedEventIndex =
+        this.state.conversations[convId]?.eventLog.length ?? proj.eventLog.length;
+      let rawAck: unknown;
+      try {
+        rawAck = await this.httpClient.requestJson<unknown>({
+          method: 'POST',
+          path,
+          body,
+          idempotent: false,
+          operationName: 'core.dispatchReview',
+          teamId,
+          slotId: reviewer.sessionRef.externalSlotId,
+        });
+      } catch (err) {
+        if (latestCtxBeforeReview) {
+          this.emitContextReceiptFailed({
+            convId,
+            participant: reviewer,
+            revision: latestCtxBeforeReview,
+            taskId: task.id,
+            attemptId,
+            reason:
+              err instanceof Error ? err.message : 'erro de comunicação com o Core',
+          });
+        }
+        throw err;
+      }
+      const ack = unwrapApiResponse<TeamRunAckResponse>(
+        rawAck,
+        `POST ${path}`,
+        (d): d is TeamRunAckResponse =>
+          isRecord(d) &&
+          typeof d.message_id === 'string' &&
+          typeof d.enqueue_status === 'string',
+      );
+
+      if (latestCtxBeforeReview) {
+        this.emitContextReceiptSent({
+          convId,
+          participant: reviewer,
+          revision: latestCtxBeforeReview,
+          messageId: ack.message_id,
+          sendInitiatedEventIndex,
+          taskId: task.id,
+          attemptId,
+          mechanismNote: `Contexto v${latestCtxBeforeReview.versionNumber} enviado ao auditor ${reviewer.displayName} para revisão (msg ${ack.message_id}).`,
+        });
+      }
+    } finally {
+      this.inFlightSlotDispatches.delete(reviewDispatchKey);
     }
   }
 
@@ -3585,10 +5003,10 @@ export class AionCoreAdapter
     const nextProjects = state.projects.map((p) =>
       p.id === projectId
         ? {
-            ...p,
-            status: archived ? ('archived' as const) : ('active' as const),
-            updatedAt: new Date().toISOString(),
-          }
+          ...p,
+          status: archived ? ('archived' as const) : ('active' as const),
+          updatedAt: new Date().toISOString(),
+        }
         : p,
     );
     this.state = {
@@ -3618,7 +5036,10 @@ export class AionCoreAdapter
       DEFAULT_TEAM_PRESETS[0];
     const effectivePreset: TeamPreset = input.customMembers?.length
       ? { ...preset, members: input.customMembers }
-      : preset;
+      : {
+        ...preset,
+        members: resolvePresetMembersForCore(state, preset.members),
+      };
 
     const convId = this.nextId('conv');
     const now = new Date().toISOString();
@@ -3786,7 +5207,10 @@ export class AionCoreAdapter
       );
     }
     const nextParticipants = instantiateParticipantsFromPreset({
-      preset,
+      preset: {
+        ...preset,
+        members: resolvePresetMembersForCore(state, preset.members),
+      },
       conversationId,
       idGenerator: (prefix) => this.nextId(prefix),
       isSimulated: false,
@@ -3921,12 +5345,61 @@ export class AionCoreAdapter
     });
   }
 
+  private async syncCoreParticipantModel(
+    teamId: string,
+    slotId: string,
+    modelId: string,
+  ): Promise<void> {
+    await this.httpClient.requestJson({
+      method: 'PATCH',
+      path: `/api/teams/${encodeURIComponent(teamId)}/agents/${encodeURIComponent(slotId)}/model`,
+      body: { model_id: modelId },
+      idempotent: true,
+      operationName: 'core.updateAgentModel',
+      teamId,
+      slotId,
+    });
+  }
+
   async configureParticipant(input: ConfigureParticipantInput): Promise<void> {
     const state = this.getStateSnapshot();
     const proj = state.conversations[input.conversationId];
     if (!proj) return;
     const target = proj.participants.find((p) => p.id === input.participantId);
     if (!target) return;
+
+    const teamId = proj.conversation.externalTeamId;
+    const slotId = target.sessionRef.externalSlotId;
+    if (
+      proj.conversation.executionMode === 'aion_core' &&
+      teamId &&
+      slotId
+    ) {
+      if (input.modelRef) {
+        const nextModelId =
+          input.modelRef.externalId?.trim() || input.modelRef.displayName.trim();
+        const prevModelId =
+          target.modelRef.externalId?.trim() || target.modelRef.displayName.trim();
+        if (nextModelId && nextModelId !== prevModelId) {
+          await this.syncCoreParticipantModel(teamId, slotId, nextModelId);
+        }
+      }
+      if (
+        input.displayName &&
+        input.displayName.trim() &&
+        input.displayName.trim() !== target.displayName
+      ) {
+        await this.httpClient.requestJson({
+          method: 'PATCH',
+          path: `/api/teams/${encodeURIComponent(teamId)}/agents/${encodeURIComponent(slotId)}/name`,
+          body: { name: input.displayName.trim() },
+          idempotent: true,
+          operationName: 'core.renameAgent',
+          teamId,
+          slotId,
+        });
+      }
+    }
     const now = new Date().toISOString();
     let nextProj = proj;
 
@@ -4189,8 +5662,8 @@ export class AionCoreAdapter
     const isGeneral = input.targetTab === 'general';
     const targetParticipant = isGeneral
       ? proj.participants.find(
-          (p) => p.id === proj.conversation.coordinatorParticipantId,
-        ) ?? proj.participants[0]
+        (p) => p.id === proj.conversation.coordinatorParticipantId,
+      ) ?? proj.participants[0]
       : proj.participants.find((p) => p.id === input.targetTab);
 
     if (!targetParticipant) {
@@ -4242,8 +5715,12 @@ export class AionCoreAdapter
       ? proj.tasks.find((t) => t.status === 'awaiting_review')
       : undefined;
 
+    const activeParticipantCount = proj.participants.filter(
+      (p) => !p.archived,
+    ).length;
     let expectedKind: StructuredEnvelopeKind | undefined;
     if (
+      activeParticipantCount > 1 &&
       proj.tasks.length === 0 &&
       (hasRole(targetParticipant, 'planner') ||
         hasRole(targetParticipant, 'coordinator'))
@@ -4258,9 +5735,10 @@ export class AionCoreAdapter
     const activeTask = runningTask ?? awaitingReviewTask;
     const activeAttempt = activeTask
       ? activeTask.attempts.find((a) => a.status === 'running') ??
-        activeTask.attempts[activeTask.attempts.length - 1]
+      activeTask.attempts[activeTask.attempts.length - 1]
       : undefined;
 
+    const ctxAtSend = getLatestContextRevision(proj);
     const composedContent = this.composeCoreOutgoingContent({
       proj,
       targetParticipant,
@@ -4280,16 +5758,33 @@ export class AionCoreAdapter
     const body: SendTeamMessageRequest | SendAgentMessageRequest = {
       content: composedContent,
     };
+    const sendInitiatedEventIndex =
+      this.state?.conversations[input.conversationId]?.eventLog.length ??
+      proj.eventLog.length;
 
-    const rawAck = await this.httpClient.requestJson<unknown>({
-      method: 'POST',
-      path,
-      body,
-      idempotent: false,
-      operationName: isGeneral ? 'core.sendTeamMessage' : 'core.sendAgentMessage',
-      teamId,
-      slotId: targetParticipant.sessionRef.externalSlotId,
-    });
+    let rawAck: unknown;
+    try {
+      rawAck = await this.httpClient.requestJson<unknown>({
+        method: 'POST',
+        path,
+        body,
+        idempotent: false,
+        operationName: isGeneral ? 'core.sendTeamMessage' : 'core.sendAgentMessage',
+        teamId,
+        slotId: targetParticipant.sessionRef.externalSlotId,
+      });
+    } catch (err) {
+      if (ctxAtSend) {
+        this.emitContextReceiptFailed({
+          convId: input.conversationId,
+          participant: targetParticipant,
+          revision: ctxAtSend,
+          reason:
+            err instanceof Error ? err.message : 'erro de comunicação com o Core',
+        });
+      }
+      throw err;
+    }
 
     const ack = unwrapApiResponse<TeamRunAckResponse>(
       rawAck,
@@ -4303,63 +5798,44 @@ export class AionCoreAdapter
 
     const now = new Date().toISOString();
     const latestProj = this.getStateSnapshot().conversations[input.conversationId] ?? proj;
-    const seq = this.nextLocalSeq(latestProj);
-    // ACK proves enqueue/acceptance only — never completion! Original user text preserved.
-    this.emitAndIngest(input.conversationId, {
-      id: this.nextId('evt'),
-      seq,
-      conversationId: input.conversationId,
-      timestamp: now,
-      origin: 'user',
-      originSource: 'user',
-      externalEventName: 'http.team_message.ack',
-      correlationId: ack.run?.team_run_id,
-      participantId: targetParticipant.id,
-      type: 'user_message_sent',
-      payload: {
-        messageId: ack.message_id,
-        targetTab: input.targetTab,
-        targetParticipantId: targetParticipant.id,
-        bodyMarkdown: input.bodyMarkdown,
-        deliveryStatus: 'enqueued_core',
-        externalMessageId: ack.message_id,
-        deliveryNote: `Enfileirado no AionCore (${ack.enqueue_status}, run ${ack.run?.team_run_id ?? 'pendente'}). Aguardando resposta via WebSocket.`,
-        generalSummary: isGeneral
-          ? `Mensagem enviada ao líder (${targetParticipant.displayName}) — enfileirada no Core.`
-          : `Mensagem direta enviada para ${targetParticipant.displayName} — enfileirada no Core.`,
-      },
-    });
+    if (!this.isExternalMessageAlreadyStored(latestProj, ack.message_id)) {
+      const seq = this.nextLocalSeq(latestProj);
+      // ACK proves enqueue/acceptance only — never completion! Original user text preserved.
+      this.emitAndIngest(input.conversationId, {
+        id: this.nextId('evt'),
+        seq,
+        conversationId: input.conversationId,
+        timestamp: now,
+        origin: 'user',
+        originSource: 'user',
+        externalEventName: 'http.team_message.ack',
+        correlationId: ack.run?.team_run_id,
+        participantId: targetParticipant.id,
+        type: 'user_message_sent',
+        payload: {
+          messageId: ack.message_id,
+          targetTab: input.targetTab,
+          targetParticipantId: targetParticipant.id,
+          bodyMarkdown: input.bodyMarkdown,
+          deliveryStatus: 'enqueued_core',
+          externalMessageId: ack.message_id,
+          deliveryNote: `Enfileirado no AionCore (${ack.enqueue_status}, run ${ack.run?.team_run_id ?? 'pendente'}). Aguardando resposta via WebSocket.`,
+          generalSummary: isGeneral
+            ? `Mensagem enviada ao líder (${targetParticipant.displayName}) — enfileirada no Core.`
+            : `Mensagem direta enviada para ${targetParticipant.displayName} — enfileirada no Core.`,
+        },
+      });
+    }
 
-    const postSendProj = this.getStateSnapshot().conversations[input.conversationId];
-    const latestCtx = postSendProj ? getLatestContextRevision(postSendProj) : undefined;
-    if (postSendProj && latestCtx) {
-      const currentRcpt = latestCtx.receipts[targetParticipant.id];
-      if (!currentRcpt || currentRcpt.status === 'pending_send') {
-        this.emitAndIngest(input.conversationId, {
-          id: `evt_core_rcpt_send_${latestCtx.id}_${targetParticipant.id}_${ack.message_id}`,
-          seq: this.nextLocalSeq(postSendProj),
-          conversationId: input.conversationId,
-          timestamp: now,
-          origin: 'gateway',
-          originSource: 'aion_core',
-          participantId: targetParticipant.id,
-          type: 'context_receipt_updated',
-          payload: {
-            revisionId: latestCtx.id,
-            versionNumber: latestCtx.versionNumber,
-            participantId: targetParticipant.id,
-            receipt: {
-              participantId: targetParticipant.id,
-              revisionId: latestCtx.id,
-              status: 'sent',
-              policyApplied: 'next_turn',
-              updatedAt: now,
-              mechanismNote: `Contexto v${latestCtx.versionNumber} incluído e enfileirado na mensagem ${ack.message_id} para ${targetParticipant.displayName} (não comprova aplicação imediata).`,
-            },
-            projectToGeneral: false,
-          },
-        });
-      }
+    if (ctxAtSend) {
+      this.emitContextReceiptSent({
+        convId: input.conversationId,
+        participant: targetParticipant,
+        revision: ctxAtSend,
+        messageId: ack.message_id,
+        sendInitiatedEventIndex,
+        mechanismNote: `Contexto v${ctxAtSend.versionNumber} incluído e enfileirado na mensagem ${ack.message_id} para ${targetParticipant.displayName} (não comprova aplicação imediata).`,
+      });
     }
   }
 
@@ -4386,16 +5862,185 @@ export class AionCoreAdapter
   async controlExecution(input: {
     conversationId: string;
     action:
-      | 'pause_queue'
-      | 'resume_queue'
-      | 'request_interrupt'
-      | 'terminate_session';
+    | 'pause_queue'
+    | 'resume_queue'
+    | 'request_interrupt'
+    | 'terminate_session';
     participantId?: string;
   }): Promise<void> {
     const state = this.getStateSnapshot();
     const proj = state.conversations[input.conversationId];
     if (!proj) return;
     const teamId = proj.conversation.externalTeamId;
+
+    if (
+      input.action === 'resume_queue' &&
+      teamId &&
+      proj.conversation.executionStatus === 'paused_queue'
+    ) {
+      const reconcileResult = await this.reconcileConversation(
+        input.conversationId,
+      );
+      if (!reconcileResult.synced) {
+        throw new GatewayCapabilityError(
+          'OPERATION_FAILED',
+          'Não foi possível retomar o fluxo porque a reconciliação com o Core ficou incompleta. Verifique conexão/autenticação e reconcilie novamente.',
+          true,
+        );
+      }
+
+      const reconciledProj =
+        this.getStateSnapshot().conversations[input.conversationId];
+      if (!reconciledProj) return;
+
+      const slotWorkMap =
+        this.lastReconciledSlotWorkByConv.get(input.conversationId) ??
+        new Map<string, string>();
+      const isSlotBusyInCore = (slotId?: string): boolean => {
+        if (!slotId) return false;
+        const st = slotWorkMap.get(slotId);
+        return st === 'running' || st === 'starting' || st === 'queued';
+      };
+
+      const anySlotBusy = Array.from(slotWorkMap.values()).some(
+        (st) => st === 'running' || st === 'starting' || st === 'queued',
+      );
+
+      const pendingReviewTask = reconciledProj.tasks.find((t) => {
+        if (t.status !== 'awaiting_review') return false;
+        const lastAttempt = t.attempts[t.attempts.length - 1];
+        if (!lastAttempt || lastAttempt.status !== 'delivered') return false;
+        return !t.reviews.some((r) => r.attemptId === lastAttempt.id);
+      });
+
+      const pendingCorrectionTask = reconciledProj.tasks.find(
+        (t) =>
+          t.status === 'changes_requested' &&
+          !t.attempts.some((a) => a.status === 'running') &&
+          !reconciledProj.escalations.some(
+            (e) => e.taskId === t.id && e.status === 'suggested',
+          ) &&
+          areTaskDependenciesSatisfied(t, reconciledProj.tasks).satisfied,
+      );
+
+      const pendingRunnableTask = reconciledProj.tasks.find(
+        (t) =>
+          (t.status === 'planned' || t.status === 'queued') &&
+          !t.attempts.some((a) => a.status === 'running') &&
+          !reconciledProj.escalations.some(
+            (e) => e.taskId === t.id && e.status === 'suggested',
+          ) &&
+          areTaskDependenciesSatisfied(t, reconciledProj.tasks).satisfied,
+      );
+
+      const allTasksCompleted =
+        reconciledProj.tasks.length > 0 &&
+        reconciledProj.tasks.every((t) => t.status === 'completed');
+      const hasFailedTask = reconciledProj.tasks.some(
+        (t) => t.status === 'failed',
+      );
+      const hasBlockedOrStuck = reconciledProj.tasks.some(
+        (t) =>
+          t.status === 'blocked' ||
+          ((t.status === 'queued' ||
+            t.status === 'planned' ||
+            t.status === 'changes_requested') &&
+            (!areTaskDependenciesSatisfied(t, reconciledProj.tasks).satisfied ||
+              reconciledProj.escalations.some(
+                (e) => e.taskId === t.id && e.status === 'suggested',
+              ))),
+      );
+      const hasRunningTask = reconciledProj.tasks.some(
+        (t) => t.status === 'running',
+      );
+
+      const nextExecutionStatus: WorkspaceConversation['executionStatus'] =
+        allTasksCompleted
+          ? 'completed'
+          : anySlotBusy ||
+            hasRunningTask ||
+            Boolean(pendingReviewTask) ||
+            Boolean(pendingCorrectionTask) ||
+            Boolean(pendingRunnableTask)
+            ? 'running'
+            : hasFailedTask
+              ? 'failed'
+              : hasBlockedOrStuck
+                ? 'blocked'
+                : 'idle';
+
+      this.emitAndIngest(input.conversationId, {
+        id: this.nextId('evt'),
+        seq: this.nextLocalSeq(reconciledProj),
+        conversationId: input.conversationId,
+        timestamp: new Date().toISOString(),
+        origin: 'user',
+        originSource: 'aion_core',
+        type: 'execution_control_applied',
+        payload: {
+          control: 'resume_queue',
+          nextExecutionStatus,
+          generalSummary: allTasksCompleted
+            ? 'Fluxo reconciliado e retomado: todas as tarefas já haviam sido concluídas no Core (nenhum pedido repetido).'
+            : anySlotBusy
+              ? 'Fluxo local retomado após reconciliação: aguardando conclusão de turno já em andamento no Core (sem duplicar despacho).'
+              : 'Fluxo local retomado após reconciliação com o Core (sem repetir o pedido original).',
+        },
+      });
+
+      if (allTasksCompleted) {
+        await this.dispatchNextRunnableTaskInCore(input.conversationId);
+        return;
+      }
+
+      if (pendingReviewTask) {
+        const lastAttempt =
+          pendingReviewTask.attempts[pendingReviewTask.attempts.length - 1];
+        const roles = resolveTeamRoles(
+          reconciledProj.participants,
+          reconciledProj.conversation.coordinatorParticipantId,
+        );
+        const reviewer =
+          (pendingReviewTask.reviewerParticipantId
+            ? reconciledProj.participants.find(
+              (p) =>
+                p.id === pendingReviewTask.reviewerParticipantId &&
+                !p.archived,
+            )
+            : undefined) ??
+          roles.reviewer ??
+          roles.coordinator;
+        if (lastAttempt && !isSlotBusyInCore(reviewer?.sessionRef.externalSlotId)) {
+          await this.dispatchReviewInCore(
+            input.conversationId,
+            pendingReviewTask.id,
+            lastAttempt.id,
+            lastAttempt.deliverySummary ?? 'Entrega recuperada via catch-up do Core.',
+            lastAttempt.evidenceNotes ?? [],
+          );
+        }
+        return;
+      }
+
+      if (pendingCorrectionTask) {
+        const executor = reconciledProj.participants.find(
+          (p) =>
+            p.id === pendingCorrectionTask.assigneeParticipantId && !p.archived,
+        );
+        if (!isSlotBusyInCore(executor?.sessionRef.externalSlotId)) {
+          await this.dispatchTaskAttemptInCore(
+            input.conversationId,
+            pendingCorrectionTask.id,
+          );
+        }
+        return;
+      }
+
+      if (!anySlotBusy && !hasRunningTask && pendingRunnableTask) {
+        await this.dispatchNextRunnableTaskInCore(input.conversationId);
+      }
+      return;
+    }
 
     if (input.action === 'request_interrupt' && teamId) {
       const target = proj.participants.find((p) => p.id === input.participantId);
@@ -4412,8 +6057,11 @@ export class AionCoreAdapter
         (d): d is TeamRunStateResponse =>
           typeof d === 'object' && d !== null && Array.isArray((d as TeamRunStateResponse).slot_work),
       );
-      const activeRunId = runState.active_run?.team_run_id;
       const slotId = target?.sessionRef.externalSlotId;
+      const slotWork = slotId
+        ? runState.slot_work.find((s) => s.slot_id === slotId)
+        : undefined;
+      const activeRunId = slotWork?.team_run_id ?? runState.active_run?.team_run_id;
       if (activeRunId && slotId) {
         await this.httpClient.requestJson({
           method: 'POST',
@@ -4424,38 +6072,126 @@ export class AionCoreAdapter
           teamId,
           slotId,
         });
-        this.emitAndIngest(input.conversationId, {
-          id: this.nextId('evt'),
-          seq: this.nextLocalSeq(proj),
-          conversationId: input.conversationId,
-          timestamp: new Date().toISOString(),
-          origin: 'user',
-          originSource: 'aion_core',
-          participantId: target?.id,
-          type: 'execution_control_applied',
-          payload: {
-            control: 'request_interrupt',
+        const latestProj = this.state?.conversations[input.conversationId];
+        if (latestProj) {
+          this.emitAndIngest(input.conversationId, {
+            id: this.nextId('evt'),
+            seq: this.nextLocalSeq(latestProj),
+            conversationId: input.conversationId,
+            timestamp: new Date().toISOString(),
+            origin: 'user',
+            originSource: 'aion_core',
             participantId: target?.id,
-            generalSummary: `Cancelamento do turno solicitado ao AionCore para ${target?.displayName ?? slotId}.`,
-          },
-        });
+            type: 'execution_control_applied',
+            payload: {
+              control: 'request_interrupt',
+              participantId: target?.id,
+              generalSummary: `Cancelamento do turno solicitado ao AionCore para ${target?.displayName ?? slotId}.`,
+            },
+          });
+        }
         return;
+      }
+      if (slotId) {
+        throw new GatewayCapabilityError(
+          'OPERATION_FAILED',
+          `Nenhum turno ativo encontrado no AionCore para interromper (${target?.displayName ?? slotId}).`,
+          true,
+        );
       }
     }
 
     throw new GatewayCapabilityError(
       'CAPABILITY_UNSUPPORTED',
-      `Ação "${input.action}" ainda requer validação local contra o estado ativo no AionCore v0.2.2.`,
+      `Ação "${input.action}" não é suportada pelo protocolo atual do AionCore v0.2.2.`,
       true,
     );
   }
 
-  async respondPermission(): Promise<void> {
-    throw new GatewayCapabilityError(
-      'NOT_IMPLEMENTED_IN_PREVIEW',
-      'Decisões remotas de permissão no modo AionCore dependem da validação local dos eventos de permissão MCP/hook.',
-      true,
-    );
+  async respondPermission(input: {
+    conversationId: string;
+    requestId: string;
+    decision: 'approved' | 'denied';
+  }): Promise<void> {
+    const state = this.getStateSnapshot();
+    const proj = state.conversations[input.conversationId];
+    if (!proj) {
+      throw new GatewayCapabilityError(
+        'CONVERSATION_NOT_FOUND',
+        'Conversa não encontrada para responder permissão.',
+      );
+    }
+
+    const perm = proj.permissions.find((p) => p.id === input.requestId);
+    if (!perm || perm.status !== 'pending') {
+      return;
+    }
+
+    const pendingMeta = this.pendingCoreConfirmations.get(input.requestId);
+    const participant = proj.participants.find((p) => p.id === perm.participantId);
+    const extConvId =
+      pendingMeta?.extConvId ?? participant?.sessionRef.externalConversationId;
+    if (!extConvId) {
+      throw new GatewayCapabilityError(
+        'NOT_CONNECTED_LOCAL_CORE',
+        'Participante sem conversa externa ativa no Core para confirmar permissão.',
+        true,
+      );
+    }
+
+    const callId =
+      pendingMeta?.callId ??
+      (perm.scopeKey.includes(':') ? perm.scopeKey.split(':').slice(1).join(':') : perm.id);
+    const msgId = pendingMeta?.msgId ?? callId;
+    const confirmData =
+      input.decision === 'approved'
+        ? (pendingMeta?.allowData ?? 'allow')
+        : (pendingMeta?.denyData ?? 'reject');
+
+    await this.httpClient.requestJson<unknown>({
+      method: 'POST',
+      path: `/api/conversations/${encodeURIComponent(extConvId)}/confirmations/${encodeURIComponent(callId)}/confirm`,
+      body: {
+        msg_id: msgId,
+        data: confirmData,
+        always_allow: false,
+      },
+      idempotent: false,
+      operationName: 'core.confirmPermission',
+      teamId: proj.conversation.externalTeamId,
+      slotId: participant?.sessionRef.externalSlotId,
+    });
+
+    this.pendingCoreConfirmations.delete(input.requestId);
+    const latestProj = this.getStateSnapshot().conversations[input.conversationId] ?? proj;
+    const now = new Date().toISOString();
+    const evtId = `evt_core_perm_dec_${input.conversationId}_${callId}_${input.decision}`;
+    if (!latestProj.seenEventIds.includes(evtId)) {
+      this.emitAndIngest(input.conversationId, {
+        id: evtId,
+        seq: this.nextLocalSeq(latestProj),
+        conversationId: input.conversationId,
+        timestamp: now,
+        origin: 'user',
+        originSource: 'aion_core',
+        participantId: perm.participantId,
+        taskId: perm.taskId,
+        type: 'permission_decided',
+        payload: {
+          decision: {
+            requestId: perm.id,
+            decision: input.decision,
+            decidedBy: 'Você',
+            note:
+              input.decision === 'approved'
+                ? 'Permitido via POST /confirmations/.../confirm no AionCore.'
+                : 'Recusado via POST /confirmations/.../confirm no AionCore.',
+            decidedAt: now,
+          },
+          generalSummary: `Permissão "${perm.actionTitle}" ${input.decision === 'approved' ? 'aprovada' : 'recusada'} no AionCore.`,
+        },
+      });
+    }
   }
 
   async resolveEscalation(input: {
@@ -4491,6 +6227,17 @@ export class AionCoreAdapter
             : 'Escalonamento dispensado pelo usuário.',
       },
     });
+
+    if (input.resolution === 'approved' && esc.toModelRef) {
+      const targetPart = proj.participants.find((p) => p.id === esc.participantId);
+      const teamId = proj.conversation.externalTeamId;
+      const slotId = targetPart?.sessionRef.externalSlotId;
+      const nextModelId = esc.toModelRef.externalId?.trim();
+      const prevModelId = esc.fromModelRef?.externalId?.trim();
+      if (teamId && slotId && nextModelId && nextModelId !== prevModelId) {
+        await this.syncCoreParticipantModel(teamId, slotId, nextModelId);
+      }
+    }
 
     const latestProj = this.getStateSnapshot().conversations[input.conversationId];
     const pendingCorrectionTask = latestProj?.tasks.find(
@@ -4622,31 +6369,38 @@ export class AionCoreAdapter
       raw,
       `POST /api/agents/${conn.coreAgentId}/health-check`,
     );
-    const ok = row.status === 'ready';
+    const ok = row.status === 'online' || row.status === 'ready';
     const message = ok
-      ? `Agente "${row.name}" pronto no AionCore (${row.last_check_latency_ms ?? 0}ms).`
+      ? row.status === 'ready'
+        ? `Agente "${row.name}" pronto no AionCore (${row.last_check_latency_ms ?? 0}ms).`
+        : `Agente "${row.name}" online no AionCore (${row.last_check_latency_ms ?? 0}ms). Health-check confirma CLI responsiva; login no provedor é validado ao executar um turno.`
       : `Agente "${row.name}" em estado "${row.status}": ${row.last_check_error_message ?? row.last_check_guidance ?? 'requer verificação local'}.`;
-    const nextConnections = state.connections.map((c) =>
+    const discoveredModels = [
+      ...extractAvailableModelOptions(row.available_models),
+      ...extractModelsFromConfigOptions(row.config_options),
+    ];
+    const latestState = this.state ?? state;
+    const nextConnections = latestState.connections.map((c) =>
       c.id === connectionId
         ? {
-            ...c,
-            coreReachability: 'reachable' as const,
-            executableStatus: row.installed
-              ? ('verified' as const)
-              : ('missing' as const),
-            authStatus:
-              row.status === 'ready'
-                ? ('authenticated' as const)
-                : row.status === 'unauthenticated'
-                  ? ('unauthenticated' as const)
-                  : ('unknown' as const),
-            lastConnectionTestAt: testedAt,
-            lastConnectionTestResult: message,
-          }
+          ...c,
+          coreReachability: 'reachable' as const,
+          executableStatus: row.installed
+            ? ('verified' as const)
+            : ('missing' as const),
+          coreAgentStatus: row.status,
+          authStatus: mapCoreAgentStatusToAuthStatus(row.status),
+          availableModels:
+            discoveredModels.length > 0
+              ? mergeConfirmedModels(c.availableModels, discoveredModels, 'core_catalog')
+              : c.availableModels,
+          lastConnectionTestAt: testedAt,
+          lastConnectionTestResult: message,
+        }
         : c,
     );
     this.state = {
-      ...state,
+      ...latestState,
       connections: nextConnections,
       agentProfiles: connectionsToAgentProfiles(nextConnections),
     };
@@ -4828,6 +6582,27 @@ export class AionCoreAdapter
     const unresolvedIdentities = new Set<string>();
     const malformedItems = { count: 0 };
     const recoveredEvents: ExecutionEvent[] = [];
+    let authExpiredDetected = false;
+    let teamNotFoundDetected = false;
+    let coreUnreachableDetected = false;
+    const inspectFailureReason = (reason: unknown): void => {
+      if (reason instanceof GatewayCapabilityError) {
+        if (reason.code === 'AUTH_REQUIRED' || reason.httpStatus === 401) {
+          authExpiredDetected = true;
+        } else if (reason.httpStatus === 404) {
+          teamNotFoundDetected = true;
+        } else if (reason.code === 'NOT_CONNECTED_LOCAL_CORE') {
+          coreUnreachableDetected = true;
+        }
+      } else if (reason instanceof Error) {
+        const lower = reason.message.toLowerCase();
+        if (lower.includes('401') || lower.includes('expirada') || lower.includes('autenticação')) {
+          authExpiredDetected = true;
+        } else if (lower.includes('404')) {
+          teamNotFoundDetected = true;
+        }
+      }
+    };
 
     // Re-read current state AFTER awaits so WS events received during catch-up are preserved
     let currentState = this.getStateSnapshot();
@@ -4840,6 +6615,7 @@ export class AionCoreAdapter
     }
 
     // 1. Run-state slot statuses (TeamRunStateResponse)
+    const slotWorkStateById = new Map<string, string>();
     if (runStateRes.status === 'fulfilled') {
       try {
         const runState = unwrapFlexibleData(
@@ -4847,6 +6623,11 @@ export class AionCoreAdapter
         ) as TeamRunStateResponse;
         if (!isRecord(runState) || !Array.isArray(runState.slot_work)) {
           throw new Error('Formato inválido de /run-state');
+        }
+        for (const s of runState.slot_work) {
+          if (typeof s.slot_id === 'string' && typeof s.state === 'string') {
+            slotWorkStateById.set(s.slot_id, s.state);
+          }
         }
         const updatedParticipants = proj.participants.map((p) => {
           const slotId = p.sessionRef.externalSlotId;
@@ -4863,8 +6644,8 @@ export class AionCoreAdapter
           if (!slotWork) return p;
           const mappedStatus =
             slotWork.state === 'running' ||
-            slotWork.state === 'starting' ||
-            slotWork.state === 'queued'
+              slotWork.state === 'starting' ||
+              slotWork.state === 'queued'
               ? 'running'
               : slotWork.state === 'blocked'
                 ? 'blocked'
@@ -4890,8 +6671,10 @@ export class AionCoreAdapter
         failedEndpoints.push('/run-state');
       }
     } else {
+      inspectFailureReason(runStateRes.reason);
       failedEndpoints.push('/run-state');
     }
+    this.lastReconciledSlotWorkByConv.set(conversationId, slotWorkStateById);
 
     // 2. Mailbox catch-up (`TeamMailboxMessageResponse[]`)
     if (mailboxRes.status === 'fulfilled') {
@@ -4924,6 +6707,7 @@ export class AionCoreAdapter
         failedEndpoints.push('/mailbox');
       }
     } else {
+      inspectFailureReason(mailboxRes.reason);
       failedEndpoints.push('/mailbox');
     }
 
@@ -4958,11 +6742,15 @@ export class AionCoreAdapter
         failedEndpoints.push('/tasks');
       }
     } else {
+      inspectFailureReason(tasksRes.reason);
       failedEndpoints.push('/tasks');
     }
 
     // 4. Activity catch-up (`TeamActivityPageResponse` -> `TeamActivityItemResponse[]`)
     if (activityResult.failed) {
+      if (activityResult.failureReason) {
+        inspectFailureReason(new Error(activityResult.failureReason));
+      }
       failedEndpoints.push(activityResult.failureReason ?? '/activity');
     }
     const sortedActivity = [...activityResult.items].sort(
@@ -5001,11 +6789,165 @@ export class AionCoreAdapter
       }
     }
 
+    // 5. Slot conversation recovery if a WS drop missed a turn finish while a buffer or task was in-flight
+    const latestProjForSlotCatchup = this.getStateSnapshot().conversations[conversationId];
+    if (latestProjForSlotCatchup) {
+      for (const participant of latestProjForSlotCatchup.participants) {
+        if (participant.archived) continue;
+        const extConvId = participant.sessionRef.externalConversationId;
+        if (!extConvId) continue;
+
+        const slotState = participant.sessionRef.externalSlotId
+          ? slotWorkStateById.get(participant.sessionRef.externalSlotId)
+          : undefined;
+        if (
+          slotState === 'running' ||
+          slotState === 'queued' ||
+          slotState === 'starting'
+        ) {
+          continue;
+        }
+
+        const hasOpenBuffer = Array.from(this.streamBuffers.values()).some(
+          (buf) =>
+            buf.conversationId === conversationId &&
+            buf.participantId === participant.id &&
+            !buf.finished,
+        );
+        const hasPendingTaskWork = latestProjForSlotCatchup.tasks.some(
+          (t) =>
+            (t.status === 'running' &&
+              t.assigneeParticipantId === participant.id) ||
+            (t.status === 'awaiting_review' &&
+              t.reviewerParticipantId === participant.id),
+        );
+        const tabMessagesForParticipant =
+          participant.id ===
+            latestProjForSlotCatchup.conversation.coordinatorParticipantId
+            ? [
+              ...(latestProjForSlotCatchup.messagesByTab.general ?? []),
+              ...(latestProjForSlotCatchup.messagesByTab[participant.id] ?? []),
+            ]
+            : (latestProjForSlotCatchup.messagesByTab[participant.id] ?? []);
+        const lastTabMsg =
+          tabMessagesForParticipant[tabMessagesForParticipant.length - 1];
+        const hasUnansweredPausedTurn =
+          latestProjForSlotCatchup.conversation.executionStatus ===
+          'paused_queue' &&
+          (participant.status === 'running' ||
+            (lastTabMsg?.authorType === 'user' &&
+              lastTabMsg.delivery?.status === 'enqueued_core' &&
+              lastTabMsg.delivery?.targetParticipantId === participant.id));
+        if (!hasOpenBuffer && !hasPendingTaskWork && !hasUnansweredPausedTurn) {
+          continue;
+        }
+
+        try {
+          const convRaw = await this.httpClient.requestJson<unknown>({
+            method: 'GET',
+            path: `/api/conversations/${encodeURIComponent(extConvId)}/messages?limit=15`,
+            idempotent: true,
+            operationName: 'core.reconcileSlotMessages',
+            teamId,
+          });
+          const convData = unwrapFlexibleData(convRaw);
+          if (!isRecord(convData) || !Array.isArray(convData.items)) continue;
+          const items = convData.items.filter(isRecord);
+          let lastRightIdx = -1;
+          for (let idx = items.length - 1; idx >= 0; idx -= 1) {
+            if (items[idx].position === 'right') {
+              lastRightIdx = idx;
+              break;
+            }
+          }
+          const trailingTextItems = items
+            .slice(lastRightIdx + 1)
+            .filter(
+              (it) =>
+                it.position === 'left' &&
+                it.hidden !== true &&
+                it.type === 'text' &&
+                it.status === 'finish' &&
+                isRecord(it.content) &&
+                typeof it.content.content === 'string' &&
+                it.content.content.trim().length > 0,
+            );
+          if (trailingTextItems.length === 0) continue;
+
+          const latestProjCheck = this.getStateSnapshot().conversations[conversationId];
+          if (!latestProjCheck) continue;
+          const anyStored = trailingTextItems.some((it) => {
+            const id = asNonEmptyString(it.msg_id) ?? asNonEmptyString(it.id);
+            return id ? this.isExternalMessageAlreadyStored(latestProjCheck, id) : false;
+          });
+          if (anyStored) continue;
+
+          const mergedBody = trailingTextItems
+            .map((it) => String((it.content as Record<string, unknown>).content))
+            .join('\n\n')
+            .trim();
+          const lastItem = trailingTextItems[trailingTextItems.length - 1];
+          const firstItem = trailingTextItems[0];
+          const recoveryMsgId =
+            asNonEmptyString(lastItem.msg_id) ??
+            asNonEmptyString(lastItem.id) ??
+            asNonEmptyString(firstItem.msg_id) ??
+            asNonEmptyString(firstItem.id);
+          if (!mergedBody || !recoveryMsgId) continue;
+          const createdMs = toFiniteMs(lastItem.created_at);
+          const recoveryTimestamp =
+            createdMs !== undefined ? new Date(createdMs).toISOString() : undefined;
+          const recoveryTurnId = asNonEmptyString(lastItem.backend_turn_id);
+
+          this.closeUnfinishedStreamBuffersForTurn(conversationId, participant.id);
+          const beforeLen = latestProjCheck.eventLog.length;
+          this.finalizeCoreAgentMessage({
+            convId: conversationId,
+            participant,
+            fullText: mergedBody,
+            extMsgId: recoveryMsgId,
+            turnId: recoveryTurnId,
+            externalEventName: 'catchup.slot_messages',
+            timestamp: recoveryTimestamp,
+          });
+          const afterProj = this.getStateSnapshot().conversations[conversationId];
+          if (afterProj && afterProj.eventLog.length > beforeLen) {
+            recoveredEvents.push(...afterProj.eventLog.slice(beforeLen));
+          }
+        } catch (err) {
+          inspectFailureReason(err);
+          // Best-effort slot conversation catch-up; do not overwrite main endpoint status if empty.
+        }
+      }
+    }
+
+    if (authExpiredDetected) {
+      this.markCoreSessionExpired(
+        'Sessão expirada no Core durante a reconciliação. Faça login novamente.',
+      );
+    }
+
+    const finalState = this.getStateSnapshot();
+    const finalProj = finalState.conversations[conversationId]!;
+    const pendingOutOfOrderCount = Object.keys(
+      finalProj.pendingOutOfOrder ?? {},
+    ).length;
+
     const synced =
       failedEndpoints.length === 0 &&
       unresolvedIdentities.size === 0 &&
-      malformedItems.count === 0;
+      malformedItems.count === 0 &&
+      pendingOutOfOrderCount === 0;
     const issueParts: string[] = [];
+    if (authExpiredDetected) {
+      issueParts.push('sessão expirada no Core — faça login novamente');
+    } else if (teamNotFoundDetected) {
+      issueParts.push(
+        'equipe não encontrada no Core (verifique se o Core foi reiniciado com outro banco ou vincule novamente)',
+      );
+    } else if (coreUnreachableDetected) {
+      issueParts.push('Core inacessível');
+    }
     if (failedEndpoints.length > 0) {
       issueParts.push(`falha ao consultar ${failedEndpoints.join(', ')}`);
     }
@@ -5017,9 +6959,12 @@ export class AionCoreAdapter
     if (malformedItems.count > 0) {
       issueParts.push(`${malformedItems.count} registro(s) com formato incompatível`);
     }
+    if (pendingOutOfOrderCount > 0) {
+      issueParts.push(
+        `${pendingOutOfOrderCount} evento(s) fora de ordem pendente(s) de reconciliação`,
+      );
+    }
 
-    const finalState = this.getStateSnapshot();
-    const finalProj = finalState.conversations[conversationId]!;
     const syncErrorNote = synced
       ? undefined
       : `Reconciliação incompleta no Core: ${issueParts.join('; ')}.`;
@@ -5058,6 +7003,7 @@ export class AionCoreAdapter
 
   async importWorkspaceState(nextState: WorkspaceStoreState): Promise<void> {
     this.wsClient.disconnect();
+    this.clearRuntimeCaches();
     this.state = nextState;
     await this.persistence.resetAndSave(nextState);
     for (const listener of this.stateListeners) {

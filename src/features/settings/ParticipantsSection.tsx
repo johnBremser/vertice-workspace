@@ -48,6 +48,7 @@ function ParticipantEditorRow({
   connections: {
     id: string;
     displayName: string;
+    mode: 'demo' | 'aion_core';
     availableModels: {
       externalId: string;
       displayName: string;
@@ -156,6 +157,77 @@ function ParticipantEditorRow({
               {participant.sessionRef.id}
             </code>
           </div>
+          {(participant.sessionRef.externalTeamId ||
+            participant.sessionRef.externalSlotId ||
+            participant.sessionRef.externalConversationId ||
+            participant.sessionRef.nativeSessionId) && (
+            <details className="mt-1 text-[11px] text-[var(--text-muted)]">
+              <summary className="cursor-pointer select-none hover:text-[var(--text-secondary)]">
+                Vínculos de sessão no Core
+              </summary>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[10px] text-[var(--text-secondary)]">
+                {participant.sessionRef.externalTeamId && (
+                  <span>team={participant.sessionRef.externalTeamId}</span>
+                )}
+                {participant.sessionRef.externalSlotId && (
+                  <span>slot={participant.sessionRef.externalSlotId}</span>
+                )}
+                {participant.sessionRef.externalConversationId && (
+                  <span>extConv={participant.sessionRef.externalConversationId}</span>
+                )}
+                {participant.sessionRef.nativeSessionId && (
+                  <span>cliSession={participant.sessionRef.nativeSessionId}</span>
+                )}
+              </div>
+            </details>
+          )}
+          {!(
+            participant.sessionRef.externalTeamId ||
+            participant.sessionRef.externalSlotId ||
+            participant.sessionRef.externalConversationId ||
+            participant.sessionRef.nativeSessionId
+          ) &&
+            participant.sessionRef.importedExternalRef && (
+              <details className="mt-1 text-[11px] text-[var(--status-warning)]">
+                <summary className="cursor-pointer select-none">
+                  Referência histórica importada (desvinculada — requer nova vinculação)
+                </summary>
+                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[10px] text-[var(--text-secondary)]">
+                  {participant.sessionRef.importedExternalRef.externalTeamId && (
+                    <span>
+                      origTeam=
+                      {participant.sessionRef.importedExternalRef.externalTeamId}
+                    </span>
+                  )}
+                  {participant.sessionRef.importedExternalRef.externalSlotId && (
+                    <span>
+                      origSlot=
+                      {participant.sessionRef.importedExternalRef.externalSlotId}
+                    </span>
+                  )}
+                  {participant.sessionRef.importedExternalRef
+                    .externalConversationId && (
+                    <span>
+                      origConv=
+                      {
+                        participant.sessionRef.importedExternalRef
+                          .externalConversationId
+                      }
+                    </span>
+                  )}
+                  {participant.sessionRef.importedExternalRef
+                    .nativeSessionId && (
+                    <span>
+                      origCliSession=
+                      {
+                        participant.sessionRef.importedExternalRef
+                          .nativeSessionId
+                      }
+                    </span>
+                  )}
+                </div>
+              </details>
+            )}
         </div>
 
         <div className="flex items-center gap-1">
@@ -209,14 +281,32 @@ function ParticipantEditorRow({
           Conexão / adaptador
           <select
             value={connectionId}
-            onChange={(e) => setConnectionId(e.target.value)}
+            onChange={(e) => {
+              const nextId = e.target.value;
+              setConnectionId(nextId);
+              const nextConn = connections.find((c) => c.id === nextId);
+              if (
+                nextConn?.availableModels.length &&
+                !nextConn.availableModels.some(
+                  (m) => m.externalId === selectedModelKey,
+                )
+              ) {
+                setSelectedModelKey(nextConn.availableModels[0].externalId);
+              }
+            }}
             className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]"
           >
-            {connections.map((conn) => (
-              <option key={conn.id} value={conn.id}>
-                {conn.displayName}
-              </option>
-            ))}
+            {connections
+              .filter(
+                (conn) =>
+                  conn.id === connectionId ||
+                  conn.mode === (currentConnection?.mode ?? 'demo'),
+              )
+              .map((conn) => (
+                <option key={conn.id} value={conn.id}>
+                  {conn.displayName}
+                </option>
+              ))}
           </select>
         </label>
       </div>
@@ -338,7 +428,13 @@ export function ParticipantsSection() {
   const [showAddForm, setShowAddForm] = useState(false);
   const [newProfileId, setNewProfileId] = useState('');
   const [newName, setNewName] = useState('');
-  const [newConnId, setNewConnId] = useState('conn_codex_demo');
+  const defaultAddConnId =
+    store?.executionMode === 'aion_core'
+      ? store.connections.find((c) => c.mode === 'aion_core')?.id ??
+        store.connections[0]?.id ??
+        'conn_codex_demo'
+      : 'conn_codex_demo';
+  const [newConnId, setNewConnId] = useState(defaultAddConnId);
   const [newRoles, setNewRoles] = useState<ParticipantRole[]>(['executor']);
   const [newModelPref, setNewModelPref] = useState('');
   const [newInstructions, setNewInstructions] = useState(
@@ -378,13 +474,31 @@ export function ParticipantsSection() {
       });
     } else {
       if (!newName.trim()) return;
+      const targetConnId = newConnId || store.connections[0].id;
+      const targetConn = store.connections.find((c) => c.id === targetConnId);
+      const trimmedPref = newModelPref.trim();
+      const matchedModel = targetConn?.availableModels.find(
+        (m) => m.externalId === trimmedPref || m.displayName === trimmedPref,
+      ) ?? (!trimmedPref ? targetConn?.availableModels[0] : undefined);
+      const modelRef: ModelRef = matchedModel
+        ? matchedModel.source === 'demo_tier' && matchedModel.tier
+          ? makeDemoModelRef(matchedModel.tier, matchedModel.displayName)
+          : {
+              externalId: matchedModel.externalId,
+              displayName: matchedModel.displayName,
+              source: matchedModel.source,
+              tier: matchedModel.tier ?? 'fast',
+              confirmation: matchedModel.confirmed ? 'confirmed' : 'simulated',
+            }
+        : trimmedPref
+          ? makePreferenceModelRef(trimmedPref, 'fast')
+          : makeDemoModelRef('fast');
+
       await addParticipantToConversation({
-        connectionId: newConnId || store.connections[0].id,
+        connectionId: targetConnId,
         displayName: newName.trim(),
         roles: newRoles.length > 0 ? newRoles : ['executor'],
-        modelRef: newModelPref.trim()
-          ? makePreferenceModelRef(newModelPref.trim(), 'fast')
-          : makeDemoModelRef('fast'),
+        modelRef,
         instructions: newInstructions.trim(),
       });
     }
@@ -586,11 +700,16 @@ export function ParticipantsSection() {
                     onChange={(e) => setNewConnId(e.target.value)}
                     className="mt-1 w-full rounded border border-[var(--border-strong)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]"
                   >
-                    {store.connections.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.displayName}
-                      </option>
-                    ))}
+                    {store.connections
+                      .filter(
+                        (c) =>
+                          c.mode === activeConversation.conversation.executionMode,
+                      )
+                      .map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.displayName}
+                        </option>
+                      ))}
                   </select>
                 </label>
               </div>

@@ -4,7 +4,29 @@ Este arquivo registra a evolução técnica do **Vértice Workspace** (*Powered 
 
 ---
 
-## [Não lançado — Prévia v5] · Aguardando comprovação local (V5-02 a V5-05)
+## [Não lançado — V6 Local (V6-00 a V6-06 aprovados)]
+
+### Instalação, launcher e servidor (`V6-00`, `V6-01`)
+- `package-lock.json` multiplataforma atualizado para `npm ci` limpo no Windows e Linux com opcionais nativos.
+- Identidade autenticada da instância em `scripts/vertice-ctl.mjs` e `scripts/vertice-server.mjs` (`instanceId`, `controlToken`, `/__vertice_ctl/identity`, `/__vertice_ctl/shutdown`) impedindo atuação sobre PIDs reutilizados.
+- Validação de rota HTTP/WS com `safeDecodePathname` (`GET /%ZZ` → `400 Bad Request` sem derrubar o servidor) e build prévio de `dist/` no job E2E da CI.
+- Integração real em loopback (`http://127.0.0.1:4173`) via proxy de mesma origem contra `aioncore.exe v0.2.2` com autenticação WebUI, cookies `HttpOnly`, double-submit CSRF e subprotocolo WS `[ws_token]`.
+
+### Sessões reais, equipe, coordenação e segurança operacional (`V6-02` a `V6-05` — aprovado)
+- Descoberta real de modelos em `snake_case`/`config_options`, captura de `nativeSessionId`, suporte a `Cursor` (`cursor-agent`), `Codex` e `Antigravity` sem Claude, e ciclos multi-agente de 3 tarefas dependentes com auditoria independente (`Sol Auditor`).
+- Correlação estrita `aion-desk/v1` (`correlateDeliveryReport`, `correlateReviewDecision`, vínculo despacho ↔ `turn_id` em `team.childTurnStarted` e validação rígida de `attemptId`) impedindo conclusões/penalizações falsas por entregas tardias ou malformadas.
+- Permissões nativas comprovadas (`Recusar` não executa operação; `Aprovar` executa), reprovação → correção → reauditoria, teto de 3 tentativas + escalonamento manual, saída inválida preservada para revisão manual, falha operacional separada de qualidade e interrupção `POST .../cancel` separando pedido enviado de confirmação `team.childTurnCancelled`.
+- Agregação de `conversation.executionStatus` considerando dependências (`areTaskDependenciesSatisfied`) e capturas preservadas em `docs/screenshots/v6-05/`.
+
+### Contexto versionado, recuperação pós-reload e backups (`V6-06` — aprovado)
+- Semântica estrita e monotônica de recibos (`pending_send` → `sent` → `received` → `applied` / `failed_needs_action`) no reducer e adaptador, protegida contra corrida `team.childTurnStarted` vs ACK HTTP e mantendo revisões intermediárias `v2` em `pending_send`.
+- Fluxo de retomada após fechamento/reload de aba (`paused_queue` persistido, bloqueio de auto-despacho, **`Reconciliar agora`** e **`Retomar fluxo`** explícitos via `controlExecution('resume_queue')` sem repetir pedido nem duplicar turno em curso), sinalização de `syncState: 'incomplete'` para pendências/401/404 e drenagem de `flushSave` no IndexedDB.
+- Importação de backups JSON (`copy` e `replace`) desconectando vínculos externos Core (`importedExternalTeamId`/`importedExternalRef`), sem iniciar execução nem presumir login; capturas e relatório preservados em `docs/screenshots/v6-06/`.
+- Estabilização determinística do fixture WebSocket em `viteProxyConfig.test.ts` e `localServerProxy.test.ts` tratando `ECONNRESET`.
+
+---
+
+## [Histórico v5 — Prévia local]
 
 > **Nota de estado**: A versão `v1.0.0` **ainda não está declarada pronta**. Os marcos `V5-02` a `V5-05` dependem de execução local com `AionCore v0.2.2` e CLIs autenticados (`codex`, `antigravity`).
 

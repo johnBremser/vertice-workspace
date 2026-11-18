@@ -675,4 +675,121 @@ describe('Workspace gateway, storage failure, reload recovery & export', () => {
 
     gateway.dispose();
   });
+
+  it('handles IndexedDB load errors, preserves future incompatible schemas without overwriting, migrates v1->v2 on load, and drains nested flushSave writes (V6-06)', async () => {
+    // 1. Storage unavailable on loadInitial -> switches to session_only with explicit warning
+    const failingLoadDriver: StorageDriver = {
+      async load() {
+        throw new Error('Abertura do IndexedDB bloqueada pelo navegador.');
+      },
+      async save() {
+        throw new Error('Should not overwrite when load failed');
+      },
+      async clear() {},
+    };
+    const pFailLoad = new WorkspacePersistenceManager(failingLoadDriver);
+    const gwFailLoad = new MockWorkspaceGateway(pFailLoad);
+    await gwFailLoad.loadWorkspace();
+    expect(pFailLoad.getInfo().status).toBe('session_only');
+    expect(pFailLoad.getInfo().errorMessage).toContain('IndexedDB bloqueada');
+    gwFailLoad.dispose();
+
+    // 2. Future incompatible schema -> session_only WITHOUT calling save() (preserves local DB)
+    let incompatibleSaveCalls = 0;
+    const futureSchemaDriver: StorageDriver = {
+      async load() {
+        return {
+          schemaVersion: 99,
+          projects: [],
+          conversations: {},
+        } as unknown as WorkspaceStoreState;
+      },
+      async save() {
+        incompatibleSaveCalls += 1;
+      },
+      async clear() {},
+    };
+    const pFuture = new WorkspacePersistenceManager(futureSchemaDriver);
+    const gwFuture = new MockWorkspaceGateway(pFuture);
+    await gwFuture.loadWorkspace();
+    expect(pFuture.getInfo().status).toBe('session_only');
+    expect(pFuture.getInfo().errorMessage).toContain('Schema incompatível');
+    expect(pFuture.getInfo().errorMessage).toContain('sem sobrescrita');
+    expect(incompatibleSaveCalls).toBe(0);
+    gwFuture.dispose();
+
+    // 3. Schema v1 payload loaded -> migrated to v2 and saved back
+    let savedAfterMigration: WorkspaceStoreState | null = null;
+    const v1Driver: StorageDriver = {
+      async load() {
+        return {
+          schemaVersion: 1,
+          projects: [
+            {
+              id: 'proj_v1',
+              name: 'Projeto Legado v1',
+              description: 'Migrado',
+              workspacePathInfo: '',
+              status: 'active',
+              createdAt: '2026-10-01T00:00:00.000Z',
+              updatedAt: '2026-10-01T00:00:00.000Z',
+            },
+          ],
+          conversations: {},
+          activeProjectId: 'proj_v1',
+          activeConversationId: '',
+        } as unknown as WorkspaceStoreState;
+      },
+      async save(state) {
+        savedAfterMigration = structuredClone(state);
+      },
+      async clear() {},
+    };
+    const pMig = new WorkspacePersistenceManager(v1Driver);
+    const gwMig = new MockWorkspaceGateway(pMig);
+    const migrated = await gwMig.loadWorkspace();
+    expect(migrated.schemaVersion).toBe(2);
+    expect(savedAfterMigration).not.toBeNull();
+    expect(savedAfterMigration!.schemaVersion).toBe(2);
+    expect(pMig.getInfo().status).toBe('saved');
+    gwMig.dispose();
+
+    // 4. Nested flushSave drains queued writes arriving during an active write
+    const persistedVersions: string[] = [];
+    let releaseFirstWrite: (() => void) | null = null;
+    const slowDriver: StorageDriver = {
+      async load() {
+        return null;
+      },
+      async save(state) {
+        if (persistedVersions.length === 0) {
+          await new Promise<void>((resolve) => {
+            releaseFirstWrite = resolve;
+          });
+        }
+        persistedVersions.push(state.activeProjectId);
+      },
+      async clear() {},
+    };
+    const pQueue = new WorkspacePersistenceManager(slowDriver);
+    const baseState = await (async () => {
+      const tmp = new MockWorkspaceGateway(
+        new WorkspacePersistenceManager(new MemoryOnlyStorageDriver()),
+      );
+      const loaded = await tmp.loadWorkspace();
+      tmp.dispose();
+      return loaded;
+    })();
+    pQueue.scheduleSave({ ...baseState, activeProjectId: 'p_1' }, 0);
+    const firstFlush = pQueue.flushSave();
+    await new Promise((r) => setTimeout(r, 10));
+    // Enqueue newer state while first write is in flight, then flush again
+    pQueue.scheduleSave({ ...baseState, activeProjectId: 'p_2' }, 200);
+    const secondFlush = pQueue.flushSave();
+    releaseFirstWrite!();
+    await Promise.all([firstFlush, secondFlush]);
+    expect(persistedVersions[persistedVersions.length - 1]).toBe('p_2');
+    expect(pQueue.getInfo().status).toBe('saved');
+    pQueue.dispose();
+  });
 });

@@ -91,11 +91,13 @@ async function createMockCoreServer() {
   const mockSockets = new Set<import('node:stream').Duplex>();
   server.on('connection', (socket) => {
     mockSockets.add(socket);
+    socket.on('error', () => {});
     socket.once('close', () => mockSockets.delete(socket));
   });
 
   server.on('upgrade', (req, socket) => {
     mockSockets.add(socket);
+    socket.on('error', () => {});
     socket.once('close', () => mockSockets.delete(socket));
     const key = req.headers['sec-websocket-key'];
     const proto = req.headers['sec-websocket-protocol'];

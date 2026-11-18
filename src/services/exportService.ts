@@ -47,18 +47,20 @@ export interface BackupValidationPreview {
   presetCount: number;
   profileCount: number;
   executionModes: ExecutionMode[];
+  externalTeamRefsCount: number;
+  externalSessionRefsCount: number;
 }
 
 export type BackupValidationResult =
   | {
-      valid: true;
-      preview: BackupValidationPreview;
-      migratedState: WorkspaceStoreState;
-    }
+    valid: true;
+    preview: BackupValidationPreview;
+    migratedState: WorkspaceStoreState;
+  }
   | {
-      valid: false;
-      error: string;
-    };
+    valid: false;
+    error: string;
+  };
 
 function sanitizeConnectionForExport(
   conn: ConnectionAdapterConfig,
@@ -67,8 +69,84 @@ function sanitizeConnectionForExport(
     ...conn,
     // Never export active auth/session claims that could look valid after reload.
     authStatus: conn.mode === 'aion_core' ? 'unknown' : conn.authStatus,
+    coreAgentStatus: conn.mode === 'aion_core' ? undefined : conn.coreAgentStatus,
     sessionStatus: conn.mode === 'aion_core' ? 'inactive' : conn.sessionStatus,
     coreReachability: conn.mode === 'aion_core' ? 'unknown' : conn.coreReachability,
+    catalogLoaded: conn.mode === 'aion_core' ? false : conn.catalogLoaded,
+  };
+}
+
+function sanitizeConnectionForImport(
+  conn: ConnectionAdapterConfig,
+): ConnectionAdapterConfig {
+  if (conn.mode !== 'aion_core') {
+    return { ...conn };
+  }
+  return {
+    ...conn,
+    coreAgentId: undefined,
+    coreAssistantId: undefined,
+    coreAgentStatus: undefined,
+    coreReachability: 'unknown',
+    catalogLoaded: false,
+    authStatus: 'unknown',
+    sessionStatus: 'inactive',
+  };
+}
+
+function detachExternalBindingsFromProjection(
+  proj: ConversationProjection,
+): ConversationProjection {
+  const hasTeamRef = Boolean(proj.conversation.externalTeamId);
+  const nextParticipants = proj.participants.map((p) => {
+    const hasSessionRef = Boolean(
+      p.sessionRef.externalTeamId ||
+      p.sessionRef.externalSlotId ||
+      p.sessionRef.externalConversationId ||
+      p.sessionRef.nativeSessionId,
+    );
+    const preservedRef = hasSessionRef
+      ? {
+        externalTeamId: p.sessionRef.externalTeamId,
+        externalSlotId: p.sessionRef.externalSlotId,
+        externalConversationId: p.sessionRef.externalConversationId,
+        nativeSessionId: p.sessionRef.nativeSessionId,
+      }
+      : p.sessionRef.importedExternalRef;
+    const isActiveRuntimeStatus =
+      p.status === 'running' ||
+      p.status === 'preparing' ||
+      p.status === 'awaiting_permission' ||
+      p.status === 'awaiting_review';
+    return {
+      ...p,
+      status: isActiveRuntimeStatus ? ('idle' as const) : p.status,
+      sessionRef: {
+        ...p.sessionRef,
+        externalTeamId: undefined,
+        externalSlotId: undefined,
+        externalConversationId: undefined,
+        nativeSessionId: undefined,
+        importedExternalRef: preservedRef,
+        status:
+          proj.conversation.executionMode === 'aion_core' || hasSessionRef
+            ? ('inactive' as const)
+            : p.sessionRef.status,
+      },
+    };
+  });
+
+  return {
+    ...proj,
+    conversation: {
+      ...proj.conversation,
+      externalTeamId: undefined,
+      importedExternalTeamId: hasTeamRef
+        ? proj.conversation.externalTeamId
+        : proj.conversation.importedExternalTeamId,
+      autoPlayWasRunning: false,
+    },
+    participants: nextParticipants,
   };
 }
 
@@ -122,7 +200,7 @@ export function buildConversationMarkdownExport(
       .map((r) => PT_BR.roleLabels[r])
       .join(' + ');
     lines.push(
-      `- **${p.displayName}** (${rolesText}) — Conexão: \`${p.connectionId}\` · Modelo: ${p.modelRef.displayName} (\`${p.modelRef.confirmation}\`) · Sessão: \`${p.sessionRef.id}\` · Estado: ${PT_BR.participantStatusLabels[p.status]}${p.isSimulated ? ' [simulado]' : ''}`,
+      `- **${p.displayName}** (${rolesText}) — Conexão: \`${p.connectionId}\` · Modelo: ${p.modelRef.displayName} (\`${p.modelRef.confirmation}\`) · Sessão: \`${p.sessionRef.id}\`${p.sessionRef.externalSlotId ? ` · Slot Core: \`${p.sessionRef.externalSlotId}\`` : ''}${p.sessionRef.externalConversationId ? ` · Conversa Core: \`${p.sessionRef.externalConversationId}\`` : ''}${p.sessionRef.nativeSessionId ? ` · Sessão CLI: \`${p.sessionRef.nativeSessionId}\`` : ''} · Estado: ${PT_BR.participantStatusLabels[p.status]}${p.isSimulated ? ' [simulado]' : ''}`,
     );
     if (p.instructions) {
       lines.push(`  - Instruções: ${p.instructions}`);
@@ -278,8 +356,8 @@ export function buildWorkspaceJsonExport(
 ): string {
   const conversations = onlyConversationId
     ? Object.values(state.conversations).filter(
-        (c) => c.conversation.id === onlyConversationId,
-      )
+      (c) => c.conversation.id === onlyConversationId,
+    )
     : Object.values(state.conversations);
 
   const projectIds = new Set(
@@ -348,7 +426,7 @@ export function parseAndValidateWorkspaceBackup(
     typeof record.schemaVersion === 'number'
       ? record.schemaVersion
       : typeof record.exportSchemaVersion === 'string' &&
-          record.exportSchemaVersion.startsWith('2.')
+        record.exportSchemaVersion.startsWith('2.')
         ? 2
         : 1;
 
@@ -417,6 +495,23 @@ export function parseAndValidateWorkspaceBackup(
         ),
       ),
     );
+    const externalTeamRefsCount = Object.values(migrated.conversations).filter(
+      (c) => Boolean(c.conversation.externalTeamId),
+    ).length;
+    const externalSessionRefsCount = Object.values(
+      migrated.conversations,
+    ).reduce(
+      (acc, c) =>
+        acc +
+        c.participants.filter(
+          (p) =>
+            Boolean(p.sessionRef.externalTeamId) ||
+            Boolean(p.sessionRef.externalSlotId) ||
+            Boolean(p.sessionRef.externalConversationId) ||
+            Boolean(p.sessionRef.nativeSessionId),
+        ).length,
+      0,
+    );
 
     return {
       valid: true,
@@ -431,6 +526,8 @@ export function parseAndValidateWorkspaceBackup(
         presetCount: migrated.teamPresets.length,
         profileCount: migrated.participantProfiles.length,
         executionModes,
+        externalTeamRefsCount,
+        externalSessionRefsCount,
       },
       migratedState: migrated,
     };
@@ -454,9 +551,16 @@ export function applyImportedWorkspaceBackup(
   mode: 'copy' | 'replace',
 ): WorkspaceStoreState {
   if (mode === 'replace') {
+    const detachedConversations: Record<string, ConversationProjection> = {};
+    for (const [cid, proj] of Object.entries(importedState.conversations)) {
+      detachedConversations[cid] = detachExternalBindingsFromProjection(proj);
+    }
     return sanitizeLoadedStateAfterReload({
       ...importedState,
       coreSettings: currentState.coreSettings,
+      coreSessionAuthenticated: false,
+      connections: importedState.connections.map(sanitizeConnectionForImport),
+      conversations: detachedConversations,
     });
   }
 
@@ -701,7 +805,8 @@ export function applyImportedWorkspaceBackup(
       eventLog: remappedEventLog,
     };
 
-    nextConversations[newConvId] = remappedProjection;
+    nextConversations[newConvId] =
+      detachExternalBindingsFromProjection(remappedProjection);
   }
 
   const existingProfileIds = new Set(

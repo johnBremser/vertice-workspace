@@ -38,6 +38,9 @@ export const PT_BR = {
   reconcileAction: 'Reconciliar agora',
   pausedAfterReloadLabel: 'Demonstração pausada após recarregar',
   resumeDemoAction: 'Retomar demonstração',
+  pausedCoreAfterReloadLabel:
+    'Fluxo local pausado após recarregar/reabrir a aba: o Core pode ter concluído trabalho já aceito enquanto a aba estava fechada, mas novas etapas não foram despachadas automaticamente. Reconcilie e retome o fluxo em vez de repetir o pedido.',
+  resumeCoreQueueAction: 'Retomar fluxo',
   composerPlaceholderGeneral:
     'Enviar pedido ou orientação ao coordenador (Enter para enviar, Shift+Enter para nova linha)...',
   composerPlaceholderAgent: (agentName: string) =>
@@ -90,7 +93,7 @@ export const PT_BR = {
     advanced: 'Avançado (Demonstração)',
   } satisfies Record<DemoModelTier, string>,
   receiptHonestyNote:
-    'Recibos "Enviada" e "Recebida" indicam entrega ao canal e não comprovam isoladamente que o modelo aplicou a instrução durante uma tentativa já em curso.',
+    'A fonte de verdade do projeto (Contexto Compartilhado no Vértice) não equivale à janela de contexto interna do modelo. Recibos "Enviada", "Recebida" e "Aplicada à execução" exigem evidências distintas — enviar uma mensagem não comprova aplicação.',
   demoControls: {
     title: 'Simulação',
     stepForward: 'Avançar cenário',

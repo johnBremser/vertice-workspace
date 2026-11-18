@@ -165,7 +165,9 @@ export class AionCoreHttpClient {
 
   private async performRefresh(): Promise<boolean> {
     const path = '/api/auth/refresh';
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
     const csrf = this.resolveCsrfToken();
     if (csrf) {
       headers[CSRF_HEADER_NAME] = csrf;
@@ -177,12 +179,7 @@ export class AionCoreHttpClient {
         method: 'POST',
         credentials: 'include',
         headers,
-        body: this.bearerToken
-          ? JSON.stringify({ token: this.bearerToken })
-          : undefined,
-        ...(this.bearerToken
-          ? { headers: { ...headers, 'Content-Type': 'application/json' } }
-          : {}),
+        body: JSON.stringify({ token: this.bearerToken ?? '' }),
         signal: controller.signal,
       });
       if (!response.ok) {
@@ -531,6 +528,19 @@ export class AionCoreWsClient {
       try {
         const parsed = JSON.parse(raw) as unknown;
         const msg = assertWebSocketMessage(parsed);
+        if (msg.name === 'ping') {
+          try {
+            socket.send(
+              JSON.stringify({
+                name: 'pong',
+                data: msg.data ?? { timestamp: Date.now() },
+              }),
+            );
+          } catch {
+            // Ignore send error if socket is already closing
+          }
+          return;
+        }
         this.callbacks?.onMessage(msg);
       } catch (err) {
         this.diagnostics?.record({

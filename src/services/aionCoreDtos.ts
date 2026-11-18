@@ -63,6 +63,10 @@ export interface WsTokenResponse {
 }
 
 export type AgentManagementStatus =
+  | 'online'
+  | 'offline'
+  | 'missing'
+  | 'unchecked'
   | 'ready'
   | 'unauthenticated'
   | 'not_installed'
@@ -250,6 +254,7 @@ export const CORE_WS_EVENTS = {
   TEAM_MAILBOX_CHANGED: 'team.mailboxChanged',
   TEAM_TEAMMATE_MESSAGE: 'team.teammateMessage',
   MESSAGE_STREAM: 'message.stream',
+  CONFIRMATION_REMOVE: 'confirmation.remove',
 } as const;
 
 export interface TeamChildTurnPayload {
@@ -447,9 +452,14 @@ export function extractAvailableModelOptions(
   if (!rawModels) return [];
   if (Array.isArray(rawModels)) {
     const out: Array<{ externalId: string; displayName: string }> = [];
+    const seen = new Set<string>();
     for (const item of rawModels) {
       if (typeof item === 'string' && item.trim()) {
-        out.push({ externalId: item.trim(), displayName: item.trim() });
+        const id = item.trim();
+        if (!seen.has(id)) {
+          seen.add(id);
+          out.push({ externalId: id, displayName: id });
+        }
       } else if (isObjectRecord(item)) {
         const id =
           typeof item.id === 'string'
@@ -462,6 +472,7 @@ export function extractAvailableModelOptions(
                   ? item.name
                   : '';
         if (!id.trim()) continue;
+        const cleanId = id.trim();
         const label =
           typeof item.label === 'string'
             ? item.label
@@ -469,14 +480,59 @@ export function extractAvailableModelOptions(
               ? item.name
               : typeof item.displayName === 'string'
                 ? item.displayName
-                : id;
-        out.push({ externalId: id.trim(), displayName: label.trim() });
+                : cleanId;
+        if (!seen.has(cleanId)) {
+          seen.add(cleanId);
+          out.push({ externalId: cleanId, displayName: label.trim() });
+        }
       }
     }
     return out;
   }
-  if (isObjectRecord(rawModels) && Array.isArray(rawModels.availableModels)) {
-    return extractAvailableModelOptions(rawModels.availableModels);
+  if (isObjectRecord(rawModels)) {
+    if (Array.isArray(rawModels.available_models)) {
+      return extractAvailableModelOptions(rawModels.available_models);
+    }
+    if (Array.isArray(rawModels.availableModels)) {
+      return extractAvailableModelOptions(rawModels.availableModels);
+    }
+    if (Array.isArray(rawModels.models)) {
+      return extractAvailableModelOptions(rawModels.models);
+    }
   }
   return [];
+}
+
+/**
+ * Parses ACP `config_options` payloads (`AgentManagementRow.config_options` or WS `acp_config_option`).
+ */
+export function extractModelsFromConfigOptions(
+  rawConfigOptions: unknown,
+): Array<{ externalId: string; displayName: string }> {
+  const entries = Array.isArray(rawConfigOptions)
+    ? rawConfigOptions
+    : isObjectRecord(rawConfigOptions) &&
+        Array.isArray(rawConfigOptions.config_options)
+      ? rawConfigOptions.config_options
+      : isObjectRecord(rawConfigOptions) &&
+          Array.isArray(rawConfigOptions.configOptions)
+        ? rawConfigOptions.configOptions
+        : isObjectRecord(rawConfigOptions)
+          ? [rawConfigOptions]
+          : [];
+  const out: Array<{ externalId: string; displayName: string }> = [];
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    if (!isObjectRecord(entry)) continue;
+    const category = typeof entry.category === 'string' ? entry.category : '';
+    const id = typeof entry.id === 'string' ? entry.id : '';
+    if (category !== 'model' && id !== 'model') continue;
+    for (const m of extractAvailableModelOptions(entry.options)) {
+      if (!seen.has(m.externalId)) {
+        seen.add(m.externalId);
+        out.push(m);
+      }
+    }
+  }
+  return out;
 }

@@ -9,23 +9,27 @@ function capabilityLabel(label: string, flag: CapabilityFlag): string {
   return `${label}: desconhecida`;
 }
 
-function executableLabel(
-  status: ConnectionAdapterConfig['executableStatus'],
-): string {
-  switch (status) {
-    case 'verified':
-      return 'Verificado no Core';
-    case 'missing':
-      return 'Não encontrado no ambiente local';
-    case 'unknown_in_browser':
-      return 'Não verificável no navegador';
-    default:
-      return 'Desconhecido';
+function executableLabel(conn: ConnectionAdapterConfig): string {
+  const base = (() => {
+    switch (conn.executableStatus) {
+      case 'verified':
+        return 'Verificado no Core';
+      case 'missing':
+        return 'Não encontrado no ambiente local';
+      case 'unknown_in_browser':
+        return 'Não verificável no navegador';
+      default:
+        return 'Desconhecido';
+    }
+  })();
+  if (conn.mode === 'aion_core' && conn.coreAgentStatus) {
+    return `${base} (${conn.coreAgentStatus})`;
   }
+  return base;
 }
 
-function authLabel(status: ConnectionAdapterConfig['authStatus']): string {
-  switch (status) {
+function authLabel(conn: ConnectionAdapterConfig): string {
+  switch (conn.authStatus) {
     case 'simulated':
       return 'Simulada no preview';
     case 'authenticated':
@@ -35,6 +39,12 @@ function authLabel(status: ConnectionAdapterConfig['authStatus']): string {
     case 'expired':
       return 'Expirada';
     default:
+      if (conn.mode === 'aion_core' && conn.coreAgentStatus === 'online') {
+        return 'Validada ao usar CLI (health-check online)';
+      }
+      if (conn.mode === 'aion_core' && conn.coreAgentStatus === 'unchecked') {
+        return 'Aguardando verificação / 1º turno CLI';
+      }
       return 'Desconhecida';
   }
 }
@@ -111,13 +121,13 @@ export function AgentCatalogSection() {
               <div>
                 <dt className="text-[var(--text-muted)]">3. Executável</dt>
                 <dd className="font-medium text-[var(--text-secondary)]">
-                  {executableLabel(conn.executableStatus)}
+                  {executableLabel(conn)}
                 </dd>
               </div>
               <div>
                 <dt className="text-[var(--text-muted)]">4. Autenticação</dt>
                 <dd className="font-medium text-[var(--text-primary)]">
-                  {authLabel(conn.authStatus)}
+                  {authLabel(conn)}
                 </dd>
               </div>
               <div>

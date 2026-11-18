@@ -77,11 +77,10 @@ export function ContextPanel() {
                     key={rev.id}
                     type="button"
                     onClick={() => setSelectedRevId(rev.id)}
-                    className={`tabular-nums rounded border px-2.5 py-1 text-xs font-medium ${
-                      isSelected
+                    className={`tabular-nums rounded border px-2.5 py-1 text-xs font-medium ${isSelected
                         ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
                         : 'border-[var(--border-hairline)] bg-[var(--bg-surface)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-                    }`}
+                      }`}
                   >
                     v{rev.versionNumber}
                   </button>
@@ -96,9 +95,14 @@ export function ContextPanel() {
                 Revisão v{inspectedRev.versionNumber}{' '}
                 {inspectedRev.id === latestRev?.id ? '(Atual)' : '(Histórico)'}
               </span>
-              <span className="font-mono text-[10px] text-[var(--text-muted)]">
-                {inspectedRev.id}
-              </span>
+              <details className="text-right text-[10px] text-[var(--text-muted)]">
+                <summary className="cursor-pointer select-none hover:text-[var(--text-secondary)]">
+                  ID técnico
+                </summary>
+                <span className="font-mono text-[10px] text-[var(--text-secondary)]">
+                  {inspectedRev.id}
+                </span>
+              </details>
             </div>
 
             <div className="text-[var(--text-secondary)]">

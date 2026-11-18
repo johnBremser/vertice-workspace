@@ -59,53 +59,75 @@ export function SettingsView() {
   const coreConnections = (store?.connections ?? []).filter(
     (c) => c.mode === 'aion_core',
   );
+  const isCoreModeActive = mode === 'aion_core';
+  const hasReachableCore =
+    isCoreModeActive &&
+    (store?.coreRuntimeStatus === 'reachable' ||
+      coreConnections.some((c) => c.coreReachability === 'reachable'));
+  const hasConfirmedCatalogModels =
+    isCoreModeActive &&
+    coreConnections.some(
+      (c) => c.catalogLoaded && c.availableModels.some((m) => m.confirmed),
+    );
+  const hasUnreachableError =
+    isCoreModeActive &&
+    (store?.coreRuntimeStatus === 'unreachable' ||
+      coreConnections.some((c) => c.coreReachability === 'unreachable'));
+  const catalogSyncedEmpty =
+    isCoreModeActive &&
+    coreConnections.some((c) => c.catalogLoaded) &&
+    !hasConfirmedCatalogModels;
+  const hasMissingExecutables =
+    isCoreModeActive &&
+    coreConnections.some((c) => c.catalogLoaded && c.executableStatus === 'verified') === false &&
+    coreConnections.some((c) => c.catalogLoaded && c.executableStatus === 'missing');
+
   const setupSteps = [
     {
       id: 'health',
       label: '1. Conectar runtime local',
-      done: (store?.connections ?? []).some(
-        (c) => c.coreReachability === 'reachable',
-      ),
-      detail: 'Confirma que o AionCore local responde na origem configurada.',
+      done: hasReachableCore,
+      detail: 'Confirma que o AionCore local responde nesta sessão.',
     },
     {
       id: 'auth',
       label: '2. Autenticar sessão local',
-      done:
-        Boolean(store?.coreSessionAuthenticated) ||
-        (store?.connections ?? []).some(
-          (c) => c.authStatus === 'authenticated',
-        ),
-      detail: 'Sessão mantida apenas no navegador via cookie/token da origem.',
+      done: isCoreModeActive && Boolean(store?.coreSessionAuthenticated),
+      detail: 'Sessão WebUI confirmada no navegador (sem credenciais salvas).',
     },
     {
       id: 'catalog',
       label: '3. Verificar agentes e modelos',
-      done: coreConnections.some(
-        (c) =>
-          c.catalogLoaded && c.availableModels.some((m) => m.confirmed),
-      ),
+      done: hasConfirmedCatalogModels,
       detail: 'Identifica assistentes e modelos realmente disponíveis no Core.',
     },
     {
       id: 'team',
       label: '4. Escolher workspace e criar equipe',
       done:
+        isCoreModeActive &&
         Boolean(store?.coreSettings.workspacePath.trim()) &&
-        Boolean(activeConversation?.conversation.externalTeamId),
+        Boolean(
+          activeConversation?.conversation.executionMode === 'aion_core' &&
+          activeConversation.conversation.externalTeamId,
+        ),
       detail: 'Vincula a pasta local e os papéis dos participantes no Core.',
     },
     {
       id: 'first_order',
       label: '5. Enviar primeiro pedido',
       done: Boolean(
+        isCoreModeActive &&
         activeConversation &&
-          activeConversation.conversation.executionMode === 'aion_core' &&
-          activeConversation.generalFeed.some((g) => g.kind === 'user_request'),
+        activeConversation.conversation.executionMode === 'aion_core' &&
+        activeConversation.conversation.externalTeamId &&
+        activeConversation.generalFeed.some((g) => g.kind === 'user_request'),
       ),
       detail: 'Inicia coordenação real a partir da aba Geral.',
     },
   ];
+
+  const nextPendingStep = setupSteps.find((s) => !s.done);
 
   const handleSaveCoreSettings = async (e: FormEvent) => {
     e.preventDefault();
@@ -208,6 +230,9 @@ export function SettingsView() {
                     {setupSteps.filter((s) => s.done).length}/{setupSteps.length} etapas confirmadas
                   </span>
                 </div>
+                <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+                  Sinais ao vivo (/health, sessão e catálogo) são revalidados automaticamente ao recarregar neste modo, sem custo de modelo.
+                </p>
                 <ol className="mt-2.5 grid grid-cols-1 gap-2 sm:grid-cols-2">
                   {setupSteps.map((step) => (
                     <li
@@ -242,6 +267,81 @@ export function SettingsView() {
                     </li>
                   ))}
                 </ol>
+
+                {/* Objective next-step & empty/error/no-agent guidance */}
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border-hairline)] pt-2.5 text-xs">
+                  {hasUnreachableError ? (
+                    <span className="text-[var(--status-danger)]">
+                      Runtime local inacessível no endereço configurado. Inicie o AionCore ou teste o endereço com <strong>Verificar /health</strong>.
+                    </span>
+                  ) : catalogSyncedEmpty || hasMissingExecutables ? (
+                    <span className="text-[var(--status-warning)]">
+                      Nenhum agente ou modelo confirmado foi encontrado no catálogo atual. Verifique os CLIs locais (<code>aioncore doctor</code> / login do provedor) ou altere acima para o <strong>Modo Demonstração (simulação)</strong>.
+                    </span>
+                  ) : nextPendingStep ? (
+                    <span className="text-[var(--text-secondary)]">
+                      <strong className="font-medium text-[var(--text-primary)]">
+                        Próximo passo:
+                      </strong>{' '}
+                      {nextPendingStep.label} — {nextPendingStep.detail}
+                    </span>
+                  ) : (
+                    <span className="font-medium text-[var(--status-success)]">
+                      Todas as 5 etapas reais confirmadas nesta sessão.
+                    </span>
+                  )}
+
+                  {isCoreModeActive && nextPendingStep && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      {nextPendingStep.id === 'health' && (
+                        <button
+                          type="button"
+                          onClick={() => void coreCheckHealth()}
+                          className="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
+                        >
+                          Verificar /health agora
+                        </button>
+                      )}
+                      {nextPendingStep.id === 'auth' && (
+                        <button
+                          type="button"
+                          onClick={() => void coreCheckAuthStatus()}
+                          className="rounded-md border border-[var(--border-strong)] bg-[var(--bg-surface)] px-2.5 py-1 text-[11px] font-medium text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]"
+                        >
+                          Checar sessão (/api/auth/status)
+                        </button>
+                      )}
+                      {nextPendingStep.id === 'catalog' && (
+                        <button
+                          type="button"
+                          onClick={() => void coreRefreshCatalog()}
+                          className="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
+                        >
+                          Sincronizar catálogo agora
+                        </button>
+                      )}
+                      {nextPendingStep.id === 'team' && (
+                        <button
+                          type="button"
+                          disabled={!activeConversation}
+                          onClick={() => void coreCreateTeamForActiveConversation()}
+                          className="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50"
+                        >
+                          Criar time no Core
+                        </button>
+                      )}
+                      {nextPendingStep.id === 'first_order' && (
+                        <button
+                          type="button"
+                          onClick={() => setMainSurface('conversation')}
+                          className="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
+                        >
+                          Ir para a conversa
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* V5-05.4 Browser Tab Close Policy */}

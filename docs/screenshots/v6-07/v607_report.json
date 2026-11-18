@@ -1,0 +1,89 @@
+{
+  "startedAt": "2026-11-18T14:49:30.089Z",
+  "viewports": {
+    "1440x900-dark": {
+      "scrollWidth": 1440,
+      "innerWidth": 1440,
+      "overflow": false,
+      "headerHeight": 87,
+      "composerHeight": 192,
+      "screenshot": "docs/screenshots/v6-07/v607-1440x900-dark.png"
+    },
+    "1024x768-dark": {
+      "scrollWidth": 1024,
+      "innerWidth": 1024,
+      "overflow": false,
+      "headerHeight": 87,
+      "composerHeight": 192,
+      "screenshot": "docs/screenshots/v6-07/v607-1024x768-dark.png"
+    },
+    "390x844-dark": {
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": false,
+      "headerHeight": 101,
+      "composerHeight": 133,
+      "screenshot": "docs/screenshots/v6-07/v607-390x844-dark.png"
+    },
+    "1440x900-light": {
+      "scrollWidth": 1440,
+      "innerWidth": 1440,
+      "overflow": false,
+      "headerHeight": 87,
+      "composerHeight": 192,
+      "screenshot": "docs/screenshots/v6-07/v607-1440x900-light.png"
+    },
+    "1024x768-light": {
+      "scrollWidth": 1024,
+      "innerWidth": 1024,
+      "overflow": false,
+      "headerHeight": 87,
+      "composerHeight": 192,
+      "screenshot": "docs/screenshots/v6-07/v607-1024x768-light.png"
+    },
+    "390x844-light": {
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": false,
+      "headerHeight": 101,
+      "composerHeight": 133,
+      "screenshot": "docs/screenshots/v6-07/v607-390x844-light.png"
+    }
+  },
+  "onboarding": {
+    "initialStepCount": "0/5 etapas confirmadas",
+    "afterHealth": "1/5 etapas confirmadas",
+    "afterLogin": "2/5 etapas confirmadas",
+    "afterCatalog": "3/5 etapas confirmadas",
+    "teamId": "01a1ef22-a29f-7190-8c1f-687800235f84",
+    "afterTeam": "4/5 etapas confirmadas",
+    "afterFirstOrder": "5/5 etapas confirmadas",
+    "afterReloadSteps": "2/5 etapas confirmadas"
+  },
+  "checks": {
+    "uiFinishing": {
+      "ok": true,
+      "demoBadgeVisible": true,
+      "stepBtnOutsideMenuCount": 0,
+      "hiddenTechDetailsCount": 1,
+      "visibleRawEvtIds": false,
+      "secondTabSelected": true,
+      "backToGeneral": true,
+      "mobileRecipientVisible": true,
+      "mobileContextToggleVisible": true,
+      "mobileSendVisible": true,
+      "drawerClosedOnEsc": true,
+      "modalClosedOnEsc": true,
+      "pageErrors": []
+    },
+    "unreachableErrorState": {
+      "ok": true
+    },
+    "guidedOnboardingReal": {
+      "ok": true,
+      "pageErrors": []
+    }
+  },
+  "allOk": true,
+  "finishedAt": "2026-11-18T14:49:50.946Z"
+}

@@ -5485,4 +5485,75 @@ describe('AionCoreAdapter HTTP/CSRF/Refresh/WS & Collaboration Pipeline integrat
 
     adapter.dispose();
   });
+
+  it('V6-07: rastreia coreRuntimeStatus mesmo sem conexões Core, preserva auth=false no catálogo e reseta ao mudar baseUrl', async () => {
+    let healthOk = true;
+    const fetchFn = async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/health')) {
+        if (!healthOk) {
+          throw new Error('connect ECONNREFUSED 127.0.0.1:25828');
+        }
+        return jsonResponse({
+          status: 'ok',
+          version: '0.2.2',
+          build_time: '2026-11-18T00:00:00Z',
+        });
+      }
+      if (url.endsWith('/api/agents/management') || url.endsWith('/api/assistants')) {
+        return jsonResponse({ success: true, data: [] });
+      }
+      return jsonResponse({ success: true, data: {} });
+    };
+
+    const persistence = new WorkspacePersistenceManager(new MemoryOnlyStorageDriver());
+    const adapter = new AionCoreAdapter(persistence, {
+      baseUrl: 'http://127.0.0.1:25828',
+      fetchFn,
+      wsFactory: (url, protocols) => new MockSocket(url, protocols),
+      readCookie: () => 'csrf_v607',
+    });
+
+    await adapter.loadWorkspace();
+    expect(adapter.getStateSnapshot().connections.filter((c) => c.mode === 'aion_core')).toHaveLength(0);
+    expect(adapter.getStateSnapshot().coreRuntimeStatus ?? 'unknown').toBe('unknown');
+
+    // checkHealth() succeeds -> coreRuntimeStatus becomes 'reachable' even with 0 Core connections
+    const health1 = await adapter.checkHealth();
+    expect(health1.reachable).toBe(true);
+    expect(adapter.getStateSnapshot().coreRuntimeStatus).toBe('reachable');
+
+    // checkHealth() fails -> coreRuntimeStatus becomes 'unreachable'
+    healthOk = false;
+    await expect(adapter.checkHealth()).rejects.toThrow();
+    expect(adapter.getStateSnapshot().coreRuntimeStatus).toBe('unreachable');
+
+    // refreshCoreCatalog() when unauthenticated does NOT mark coreSessionAuthenticated=true
+    healthOk = true;
+    const unauthenticatedState = structuredClone(adapter.getStateSnapshot());
+    unauthenticatedState.coreSessionAuthenticated = false;
+    await adapter.importWorkspaceState(unauthenticatedState);
+    await adapter.refreshCoreCatalog();
+    expect(adapter.getStateSnapshot().coreSessionAuthenticated).toBe(false);
+    expect(adapter.getStateSnapshot().coreRuntimeStatus).toBe('reachable');
+
+    // updateCoreSettings() changing baseUrl resets live verification flags
+    const authedState = structuredClone(adapter.getStateSnapshot());
+    authedState.coreSessionAuthenticated = true;
+    authedState.coreRuntimeStatus = 'reachable';
+    await adapter.importWorkspaceState(authedState);
+    const currentCoreSettings = authedState.coreSettings ?? {
+      baseUrl: 'http://127.0.0.1:25828',
+      workspacePath: 'C:/sandbox',
+      authMode: 'local_session',
+    };
+    await adapter.updateCoreSettings({
+      ...currentCoreSettings,
+      baseUrl: 'http://127.0.0.1:29999',
+    });
+    expect(adapter.getStateSnapshot().coreRuntimeStatus).toBe('unknown');
+    expect(adapter.getStateSnapshot().coreSessionAuthenticated).toBe(false);
+
+    adapter.dispose();
+  });
 });

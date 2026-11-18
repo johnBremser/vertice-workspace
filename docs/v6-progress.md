@@ -365,7 +365,71 @@ Relatório JSON e capturas preservadas no repositório em `docs/screenshots/v6-0
 - V6-04 — Autoridade de coordenação/ciclo real: **concluído com Codex e Cursor** (repetição opcional de 3 tarefas com Antigravity/Gemini pendente).
 - V6-05 — Permissões/correção/falhas/limites: **aprovado pelo auditor (18/11/2026)**.
 - V6-06 — Contexto/sessões/dados/recuperação: **aprovado pelo auditor (18/11/2026)**, com higiene de CI (`viteProxyConfig.test.ts`) e correções documentais/evidências aplicadas em seguida.
-- V6-07 — Acabamento/primeiro uso: **em andamento** (base visual aprovada; refinamentos e validação real em execução).
+- V6-07 — Acabamento/primeiro uso: **concluído (aguardando revisão do auditor antes de avançar ao V6-08)**.
 - V6-08 — Distribuição/operação: concluído launcher/servidor base; integração com Core real pendente.
 - V6-09 — Validação integrada/release: pendente.
 - V6-10 — Versionamento/GitHub/documentação: pendente; remoto não definido nesta entrega.
+
+---
+
+## Etapa V6-07 — Acabamento e primeiro uso (concluída — aguardando revisão do auditor)
+
+### Escopo e alterações implementadas
+
+1. **Controles de simulação agrupados e marca visível sem dominar a conversa (`DemoControlsMenu.tsx`, `e2e/aion-desk.spec.ts`)**:
+   - Todos os controles de simulação (`Avançar cenário`, `Executar automaticamente` / `Pausar`, cenários de borda como revisão/permissão/saída inválida e `Reiniciar demonstração`) foram agrupados no menu secundário **`Simulação`** (`aria-label="Controles de simulação"`).
+   - O indicador discreto **`Modo Demonstração`** permanece visível na barra superior sempre que o modo ativo é Demonstração, distinguindo claramente simulação de operação real.
+
+2. **IDs técnicos em blocos expansíveis preservando rastreabilidade (`WorkspaceHeader.tsx`, `MessageStream.tsx`, `ContextPanel.tsx`, `PermissionCard.tsx`)**:
+   - `WorkspaceHeader.tsx`: `externalTeamId` bruto foi movido do breadcrumb inline para `"Equipe Core vinculada"` + `<details>ID</details>`.
+   - `MessageStream.tsx`: `{item.sourceEventId}` e `{msg.sourceEventId}` passaram a residir em `<details>Detalhes técnicos</details>`, mantendo `data-event-id` e todos os links diretos de rastreabilidade (`timeline` ↔ tarefa ↔ contexto ↔ auditoria).
+   - `ContextPanel.tsx` e `PermissionCard.tsx`: `inspectedRev.id`, `request.taskId` e `request.id` foram movidos para blocos `<details>`, mantendo o título legível da tarefa (`taskTitle`) visível inline.
+
+3. **Compactação responsiva no mobile e fechamento seguro de drawer (`WorkspaceHeader.tsx`, `AgentTabs.tsx`, `Composer.tsx`, `WorkspaceContext.tsx`)**:
+   - `WorkspaceHeader.tsx`: padding compacto no mobile (`px-3 py-2 sm:px-6 sm:py-2.5`).
+   - `AgentTabs.tsx`: padding vertical reduzido no mobile (`py-2 ... sm:py-3`) preservando navegação por teclado (`ArrowRight`/`Home`) e unread/status.
+   - `Composer.tsx`: altura compacta no mobile (`px-3 pt-1.5 pb-2`, `min-h-[38px]`, rótulo conciso `Para: ... (Geral)` + checkbox `Registrar no contexto` + botão `Enviar` sempre visíveis; rodapé de assinatura oculto em `< sm`).
+   - `WorkspaceContext.tsx`: listener `matchMedia('(min-width: 1280px)')` fecha o `InspectorDrawer` auto-aberto no desktop caso a janela encolha para `< 1280px` (`xl:`), evitando sobreposição indesejada no mobile.
+
+4. **Preparação guiada real sem falsos positivos (`types.ts`, `storage.ts`, `exportService.ts`, `aionCoreAdapter.ts`, `SettingsView.tsx`, `App.tsx`)**:
+   - Adicionado `coreRuntimeStatus?: 'unknown' | 'reachable' | 'unreachable'` em `WorkspaceStoreState` (persistido em `storage.ts`, redefinido para `'unknown'` após `sanitizeLoadedStateAfterReload`, em importação `replace` no `exportService.ts` e na troca de `baseUrl` em `updateCoreSettings`).
+   - `checkHealth()`, `checkAuthStatus()`, `login()` e `refreshCoreCatalog()` atualizam `coreRuntimeStatus` mesmo quando `store.connections` ainda não possui conexões `aion_core` (origem limpa antes de sincronizar o catálogo).
+   - Corrigido `refreshCoreCatalog()` em `aionCoreAdapter.ts` (`Boolean(latestState.coreSessionAuthenticated)` em vez de `?? true`) para nunca assumir sessão autenticada sem comprovação.
+   - Em `SettingsView.tsx`, as 5 etapas da **Preparação guiada para operação real** só confirmam progresso quando `mode === 'aion_core'` e o sinal correspondente foi comprovado nesta sessão; adicionada barra **`Próximo passo`** com ações diretas (`Verificar /health agora`, `Checar sessão`, `Sincronizar catálogo agora`, `Criar time no Core`, `Ir para a conversa`) e alertas explícitos para runtime inacessível ou catálogo sem agentes selecionáveis.
+   - Em `src/App.tsx`, `isPausedDemo` restringe o banner `"Demonstração pausada após recarregar"` para `executionMode !== 'aion_core'` e `mainSurface === 'conversation'`, evitando banner residual ao inspecionar `Configurações` ou operar em modo `AionCore local`.
+   - **Correção `[P1]` da auditoria (`exportService.ts`, `v4DomainAndMigration.test.ts`)**: `applyImportedWorkspaceBackup(..., 'copy')` deixou de invocar `sanitizeLoadedStateAfterReload()` sobre `currentState`, preservando `coreRuntimeStatus`, `coreSessionAuthenticated`, conexões/catálogo Core e conversas vivas; `detachExternalBindingsFromProjection()` passa a pausar conversas `running` copiadas/substituídas diretamente para `paused_queue`/`paused_demo` com `autoPlayWasRunning: false` e desvinculação completa.
+   - **Endereçamento `[P2]` da auditoria (`WorkspaceContext.tsx`, `SettingsView.tsx`, `workspace.test.ts`)**: adicionado `probeCoreSessionOnStartup()` silencioso ao carregar em modo `aion_core` (revalida `/health`, `/api/auth/status` e, quando autenticado, `/api/agents/management` + `/api/assistants` sem custo de modelo nem alertas na abertura) + nota explicativa explícita na checklist de preparação em `SettingsView.tsx`.
+
+### Verificações determinísticas (após a última edição)
+
+- `npm run lint` (`tsc --noEmit`): **0 erros**.
+- `npm test` (`vitest run`): **8 arquivos / 67 testes aprovados (67/67, exit 0)**, incluindo:
+  - Novo teste em `src/services/__tests__/workspace.test.ts` validando invalidação de flags vivas (`coreRuntimeStatus`, `coreSessionAuthenticated`, conexões Core) após reload e comportamento de `probeCoreSessionOnStartup()` para sessão autenticada, não autenticada, Core inacessível e cancelamento.
+  - Asserções estendidas em `src/domain/__tests__/v4DomainAndMigration.test.ts` provando que `applyImportedWorkspaceBackup(..., 'copy')` preserva `coreSessionAuthenticated: true`, `coreRuntimeStatus: 'reachable'`, conexões `aion_core` e conversa ativa em `running`, mantendo a cópia desvinculada e em `paused_queue`.
+  - Novo teste em `src/services/__tests__/aionCoreAdapter.test.ts` (`V6-07`) validando rastreamento de `coreRuntimeStatus` com `0` conexões Core (`reachable`/`unreachable`), preservação de `coreSessionAuthenticated === false` em `refreshCoreCatalog()` e reset para `'unknown'` ao alterar `baseUrl` em `updateCoreSettings()`.
+- `npm run build` (`vite build`): **OK (1,15s)**.
+- `npm run test:e2e` (`playwright test`, Chrome real em modo Demonstração + menu `Simulação`): **1/1 aprovado (13,3s)**.
+- Revalidação real pós-reload sem modelo (`aioncore.exe v0.2.2` + Chrome + `vertice-ctl`): após autenticar e sincronizar catálogo (`3/5 etapas confirmadas`), `page.reload()` revalidou silenciosamente `/health`, `/api/auth/status` e catálogo, restaurando **`afterReloadChecklist: 3/5 etapas confirmadas`** sem clique manual nem chamada a modelo; captura `docs/screenshots/v6-07/v607-error-core-unreachable.png` confirmada com `hasDemoPausedBanner: false`.
+- Ambiente encerrado limpo (`vertice-ctl` e `aioncore.exe` finalizados).
+
+### Evidências reais observadas com `aioncore.exe v0.2.2` + Chrome (origem limpa)
+
+Registrado em `docs/screenshots/v6-07/v607_report.json` e capturas em `docs/screenshots/v6-07/`:
+
+1. **Matriz responsiva e temas (Modo Demonstração + menu `Simulação` + IDs em `<details>` + teclado `ArrowRight`/`Home` + `Esc` no drawer/modal)**:
+   - `1440×900` escuro (`v607-1440x900-dark.png`) e claro (`v607-1440x900-light.png`): `scrollWidth=1440`, `overflow=false`, `headerHeight=87`, `composerHeight=192`.
+   - `1024×768` escuro (`v607-1024x768-dark.png`) e claro (`v607-1024x768-light.png`): `scrollWidth=1024`, `overflow=false`, `headerHeight=87`, `composerHeight=192`.
+   - `390×844` escuro (`v607-390x844-dark.png`) e claro (`v607-390x844-light.png`): `scrollWidth=390`, `overflow=false`, `headerHeight=101`, `composerHeight=133`, com destinatário, `Registrar no contexto` e `Enviar` visíveis; `stepBtnOutsideMenuCount=0`, `hiddenTechDetailsCount=1`, `visibleRawEvtIds=false`, `pageErrors=[]`.
+2. **Primeiro uso real guiado (`0/5 → 5/5`) sem editar JSON nem DevTools**:
+   - Origem limpa em modo `aion_core` (com conexões Demo ignoradas): iniciou em **`0/5 etapas confirmadas`**.
+   - Clique em `Verificar /health agora` → **`1/5 etapas confirmadas`**.
+   - Autenticação WebUI (`admin`) → **`2/5 etapas confirmadas`**.
+   - Clique em `Sincronizar catálogo agora` → **`3/5 etapas confirmadas`**.
+   - Criação de projeto + conversa e time real no Core (`teamId=01a1ef22-a29f-7190-8c1f-687800235f84`, `Codex gpt-5.6-luna`) → **`4/5 etapas confirmadas`** (`v607-onboarding-4of5.png`).
+   - Primeiro pedido real aceito e respondido (`v607-first-use-real-1440x900.png`) → **`5/5 etapas confirmadas`** (`v607-onboarding-5of5.png`), `pageErrors=[]`.
+   - Após `page.reload()`: estado vivo foi invalidado com honestidade para **`2/5 etapas confirmadas`** (exigindo nova comprovação de runtime, autenticação e catálogo na sessão atual).
+
+### Limitações registradas no V6-07 (transparência para auditoria)
+
+- A matriz completa de 6 capturas e a rodada real completa `0/5 → 5/5` (`v607_report.json` e `v607-onboarding-*.png`) foram registradas antes da correção final do banner `isPausedDemo` e dos ajustes `[P1]`/`[P2]` da auditoria; após os ajustes finais, foram reexecutados `tsc --noEmit`, `npm test` (67/67), `npm run build`, `npm run test:e2e` (Chrome real) e a verificação real pós-reload (`3/5 etapas confirmadas` contra `aioncore.exe v0.2.2`), sem repetir chamada paga ao modelo apenas pelo ajuste de banner e importação/revalidação.
+- Correções e evidências consolidadas em commit de checkpoint do V6-07 aguardando confirmação final do auditor antes de iniciar o V6-08.

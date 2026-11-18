@@ -880,9 +880,31 @@ export class AionCoreAdapter
 
   async updateCoreSettings(settings: CoreRuntimeSettings): Promise<void> {
     const state = this.getStateSnapshot();
-    this.httpClient.setBaseUrl(normalizeBaseUrl(settings.baseUrl));
+    const prevUrl = normalizeBaseUrl(state.coreSettings.baseUrl);
+    const nextUrl = normalizeBaseUrl(settings.baseUrl);
+    this.httpClient.setBaseUrl(nextUrl);
+    const urlChanged = prevUrl !== nextUrl;
+    const nextConnections = urlChanged
+      ? state.connections.map((c) =>
+        c.mode === 'aion_core'
+          ? {
+            ...c,
+            coreReachability: 'unknown' as const,
+            catalogLoaded: false,
+            coreAgentStatus: undefined,
+            authStatus: 'unknown' as const,
+            sessionStatus: 'inactive' as const,
+          }
+          : c,
+      )
+      : state.connections;
     this.state = {
       ...state,
+      coreRuntimeStatus: urlChanged ? 'unknown' : state.coreRuntimeStatus,
+      coreSessionAuthenticated: urlChanged
+        ? false
+        : state.coreSessionAuthenticated,
+      connections: nextConnections,
       coreSettings: { ...settings },
     };
     this.notifyState();
@@ -952,6 +974,7 @@ export class AionCoreAdapter
         );
         this.state = {
           ...state,
+          coreRuntimeStatus: health.status === 'ok' ? 'reachable' : 'unreachable',
           connections: nextConnections,
           agentProfiles: connectionsToAgentProfiles(nextConnections),
         };
@@ -979,6 +1002,7 @@ export class AionCoreAdapter
         );
         this.state = {
           ...state,
+          coreRuntimeStatus: 'unreachable',
           connections: nextConnections,
           agentProfiles: connectionsToAgentProfiles(nextConnections),
         };
@@ -1025,6 +1049,7 @@ export class AionCoreAdapter
       );
       this.state = {
         ...state,
+        coreRuntimeStatus: 'reachable',
         coreSessionAuthenticated: Boolean(status.is_authenticated),
         connections: nextConnections,
         agentProfiles: connectionsToAgentProfiles(nextConnections),
@@ -1078,6 +1103,7 @@ export class AionCoreAdapter
       );
       this.state = {
         ...state,
+        coreRuntimeStatus: 'reachable',
         coreSessionAuthenticated: true,
         connections: nextConnections,
         agentProfiles: connectionsToAgentProfiles(nextConnections),
@@ -1258,7 +1284,8 @@ export class AionCoreAdapter
     const nextConnections = [...keptDemoConnectionsNow, ...derivedCoreConnections];
     this.state = {
       ...latestState,
-      coreSessionAuthenticated: latestState.coreSessionAuthenticated ?? true,
+      coreRuntimeStatus: 'reachable',
+      coreSessionAuthenticated: Boolean(latestState.coreSessionAuthenticated),
       connections: nextConnections,
       agentProfiles: connectionsToAgentProfiles(nextConnections),
     };

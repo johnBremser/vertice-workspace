@@ -58,13 +58,13 @@ describe('Vite .env.local proxy configuration (Fix 6)', () => {
     const upstreamSockets = new Set<import('node:stream').Duplex>();
     upstreamServer.on('connection', (socket) => {
       upstreamSockets.add(socket);
-      socket.on('error', () => {});
+      socket.on('error', () => { });
       socket.once('close', () => upstreamSockets.delete(socket));
     });
 
     upstreamServer.on('upgrade', (req, socket) => {
       upstreamSockets.add(socket);
-      socket.on('error', () => {});
+      socket.on('error', () => { });
       socket.once('close', () => upstreamSockets.delete(socket));
       if (!req.url?.startsWith('/ws')) {
         socket.destroy();
@@ -309,7 +309,7 @@ describe('Vite .env.local proxy configuration (Fix 6)', () => {
           maxRetries: 5,
           retryDelay: 50,
         })
-        .catch(() => {});
+        .catch(() => { });
     }
   }, 20_000);
 });

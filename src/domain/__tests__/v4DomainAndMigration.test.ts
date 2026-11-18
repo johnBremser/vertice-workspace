@@ -697,6 +697,7 @@ describe('V4 Domain, Migration, Configurable Teams, Protocol & Backup', () => {
     const coreRichState: WorkspaceStoreState = {
       ...structuredClone(initial),
       executionMode: 'aion_core',
+      coreRuntimeStatus: 'reachable',
       coreSessionAuthenticated: true,
       connections: initial.connections.map((c, idx) =>
         idx === 0
@@ -778,6 +779,7 @@ describe('V4 Domain, Migration, Configurable Teams, Protocol & Backup', () => {
 
     // 1. Replace mode: detaches live Core refs, clears login & Core connection bindings, pauses execution
     const replaced = applyImportedWorkspaceBackup(initial, validation.migratedState, 'replace');
+    expect(replaced.coreRuntimeStatus).toBe('unknown');
     expect(replaced.coreSessionAuthenticated).toBe(false);
     expect(replaced.connections[0].authStatus).toBe('unknown');
     expect(replaced.connections[0].catalogLoaded).toBe(false);
@@ -805,19 +807,36 @@ describe('V4 Domain, Migration, Configurable Teams, Protocol & Backup', () => {
     expect(repConv.contextRevisions).toHaveLength(1);
     expect(repConv.contextRevisions[0].receipts[repConv.participants[0].id]?.status).toBe('applied');
 
-    // 2. Copy mode: remaps IDs, detaches live Core refs so two conversations never share a live Core team/slot
+    // 2. Copy mode: remaps IDs, detaches live Core refs on copied conversations WITHOUT dropping live session/catalog/runtime state (V6-07 P1)
     const copied = applyImportedWorkspaceBackup(coreRichState, validation.migratedState, 'copy');
     const copiedConvIds = Object.keys(copied.conversations).filter((id) => id !== convId);
     expect(copiedConvIds).toHaveLength(1);
     const copiedProj = copied.conversations[copiedConvIds[0]];
     expect(copiedProj.conversation.executionStatus).toBe('paused_queue');
+    expect(copiedProj.conversation.autoPlayWasRunning).toBe(false);
     expect(copiedProj.conversation.externalTeamId).toBeUndefined();
     expect(copiedProj.conversation.importedExternalTeamId).toBe('team_remote_env_123');
     expect(copiedProj.participants[0].sessionRef.externalSlotId).toBeUndefined();
     expect(copiedProj.participants[0].sessionRef.importedExternalRef?.externalSlotId).toBe('slot_remote_0');
     expect(copiedProj.participants[0].sessionRef.status).toBe('inactive');
-    // Original conversation kept untouched
+    // Live session, runtime reachability, catalog connections, and active conversation preserved untouched
+    expect(copied.coreRuntimeStatus).toBe('reachable');
+    expect(copied.coreSessionAuthenticated).toBe(true);
+    expect(copied.connections[0].authStatus).toBe('authenticated');
+    expect(copied.connections[0].catalogLoaded).toBe(true);
+    expect(copied.connections[0].coreReachability).toBe('reachable');
+    expect(copied.connections[0].sessionStatus).toBe('active');
+    expect(copied.connections[0].coreAgentId).toBe('agent_remote_1');
     expect(copied.conversations[convId].conversation.externalTeamId).toBe('team_remote_env_123');
+    expect(copied.conversations[convId].conversation.executionStatus).toBe('running');
+
+    // Direct copy of unsanitized running state also detaches and pauses only the copy
+    const directCopy = applyImportedWorkspaceBackup(coreRichState, coreRichState, 'copy');
+    const directCopiedIds = Object.keys(directCopy.conversations).filter((id) => id !== convId);
+    expect(directCopiedIds).toHaveLength(1);
+    expect(directCopy.conversations[directCopiedIds[0]].conversation.executionStatus).toBe('paused_queue');
+    expect(directCopy.coreSessionAuthenticated).toBe(true);
+    expect(directCopy.connections[0].catalogLoaded).toBe(true);
 
     gateway.dispose();
   });

@@ -90,7 +90,7 @@ export function AgentTabs() {
         aria-selected={activeTabId === 'general'}
         tabIndex={activeTabId === 'general' ? 0 : -1}
         onClick={() => selectTab('general')}
-        className={`group flex shrink-0 items-center gap-2.5 border-b-2 px-3 py-3 text-left transition-colors ${
+        className={`group flex shrink-0 items-center gap-2.5 border-b-2 px-3 py-2 text-left transition-colors sm:py-3 ${
           activeTabId === 'general'
             ? 'border-[var(--accent)] text-[var(--text-primary)]'
             : 'border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
@@ -135,7 +135,7 @@ export function AgentTabs() {
             aria-selected={isActive}
             tabIndex={isActive ? 0 : -1}
             onClick={() => selectTab(p.id)}
-            className={`group flex shrink-0 items-center gap-2.5 border-b-2 px-3 py-3 text-left transition-colors ${
+            className={`group flex shrink-0 items-center gap-2.5 border-b-2 px-3 py-2 text-left transition-colors sm:py-3 ${
               isActive
                 ? 'border-[var(--accent)] text-[var(--text-primary)]'
                 : 'border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]'

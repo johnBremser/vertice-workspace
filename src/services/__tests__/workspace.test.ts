@@ -10,7 +10,8 @@ import {
   buildConversationMarkdownExport,
   buildWorkspaceJsonExport,
 } from '../exportService';
-import { GatewayCapabilityError } from '../gateway';
+import { GatewayCapabilityError, type AgentWorkspaceGateway } from '../gateway';
+import { probeCoreSessionOnStartup } from '../../features/workspace/WorkspaceContext';
 import { MockWorkspaceGateway } from '../mockGateway';
 import {
   MemoryOnlyStorageDriver,
@@ -791,5 +792,89 @@ describe('Workspace gateway, storage failure, reload recovery & export', () => {
     expect(persistedVersions[persistedVersions.length - 1]).toBe('p_2');
     expect(pQueue.getInfo().status).toBe('saved');
     pQueue.dispose();
+  });
+
+  it('clears stale Core runtime/auth confirmations on reload so demo or previous-runtime state cannot confirm guided setup steps (V6-07)', async () => {
+    const driver = new MemoryOnlyStorageDriver();
+    const p1 = new WorkspacePersistenceManager(driver);
+    const gw1 = new MockWorkspaceGateway(p1);
+    const initial = await gw1.loadWorkspace();
+    const staleCoreState: WorkspaceStoreState = {
+      ...structuredClone(initial),
+      executionMode: 'aion_core',
+      coreSessionAuthenticated: true,
+      connections: initial.connections.map((c, idx) =>
+        idx === 0
+          ? {
+              ...c,
+              mode: 'aion_core',
+              coreReachability: 'reachable',
+              catalogLoaded: true,
+              authStatus: 'authenticated',
+              sessionStatus: 'active',
+            }
+          : c,
+      ),
+    };
+    await gw1.importWorkspaceState(staleCoreState);
+    gw1.dispose();
+
+    const p2 = new WorkspacePersistenceManager(driver);
+    const gw2 = new MockWorkspaceGateway(p2);
+    const reloaded = await gw2.loadWorkspace();
+    expect(reloaded.coreSessionAuthenticated).toBe(false);
+    const coreConn = reloaded.connections.find((c) => c.mode === 'aion_core')!;
+    expect(coreConn.coreReachability).toBe('unknown');
+    expect(coreConn.catalogLoaded).toBe(false);
+    expect(coreConn.authStatus).toBe('unknown');
+    expect(coreConn.sessionStatus).toBe('inactive');
+    gw2.dispose();
+  });
+
+  it('revalidates /health, /api/auth/status and catalog silently on startup without model cost when authenticated (V6-07 P2)', async () => {
+    const calls: string[] = [];
+    let authenticated = true;
+    let healthFails = false;
+
+    const fakeCoreGateway = {
+      kind: 'aion_core',
+      core: {
+        checkHealth: async () => {
+          calls.push('health');
+          if (healthFails) throw new Error('ECONNREFUSED');
+          return { reachable: true, version: '0.2.2', buildTime: '2026-11-18T00:00:00Z', message: 'ok' };
+        },
+        checkAuthStatus: async () => {
+          calls.push('auth');
+          return { authenticated, message: authenticated ? 'ok' : 'no' };
+        },
+        refreshCoreCatalog: async () => {
+          calls.push('catalog');
+          return { connectionsUpdated: 2, assistantsCount: 2, agentsCount: 2, message: 'ok' };
+        },
+      },
+    } as unknown as AgentWorkspaceGateway;
+
+    // 1. Authenticated cookie -> probes health, auth, and catalog
+    await probeCoreSessionOnStartup(fakeCoreGateway, () => true);
+    expect(calls).toEqual(['health', 'auth', 'catalog']);
+
+    // 2. Unauthenticated -> stops before catalog
+    calls.length = 0;
+    authenticated = false;
+    await probeCoreSessionOnStartup(fakeCoreGateway, () => true);
+    expect(calls).toEqual(['health', 'auth']);
+
+    // 3. Unreachable Core -> swallows silently without throwing or calling auth/catalog
+    calls.length = 0;
+    healthFails = true;
+    await expect(probeCoreSessionOnStartup(fakeCoreGateway, () => true)).resolves.toBeUndefined();
+    expect(calls).toEqual(['health']);
+
+    // 4. Unmounted / cancelled guard -> aborts cleanly
+    calls.length = 0;
+    healthFails = false;
+    await probeCoreSessionOnStartup(fakeCoreGateway, () => false);
+    expect(calls).toEqual([]);
   });
 });

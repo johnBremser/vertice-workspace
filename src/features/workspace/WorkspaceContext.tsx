@@ -63,6 +63,25 @@ function defaultGatewayFactory(
     : new MockWorkspaceGateway(persistence);
 }
 
+export async function probeCoreSessionOnStartup(
+  gateway: AgentWorkspaceGateway,
+  shouldContinue: () => boolean,
+): Promise<void> {
+  if (!gateway.core || !shouldContinue()) return;
+  try {
+    await gateway.core.checkHealth();
+    if (!shouldContinue()) return;
+    const auth = await gateway.core.checkAuthStatus();
+    if (!shouldContinue()) return;
+    if (auth.authenticated) {
+      await gateway.core.refreshCoreCatalog();
+    }
+  } catch {
+    // Revalidação silenciosa inicial: falhas de rede/502 já atualizam coreRuntimeStatus
+    // sem bloquear o carregamento nem exibir alertas ruidosos na abertura.
+  }
+}
+
 interface WorkspaceContextValue {
   loading: boolean;
   store: WorkspaceStoreState | null;
@@ -335,6 +354,18 @@ export function WorkspaceProvider({
   }, []);
 
   useEffect(() => {
+    if (!window.matchMedia) return;
+    const wideQuery = window.matchMedia('(min-width: 1280px)');
+    const onBreakpointChange = (ev: MediaQueryListEvent) => {
+      if (!ev.matches) {
+        setDrawerOpen(false);
+      }
+    };
+    wideQuery.addEventListener('change', onBreakpointChange);
+    return () => wideQuery.removeEventListener('change', onBreakpointChange);
+  }, []);
+
+  useEffect(() => {
     saveUiPreferences({
       theme: themePreference,
       sidebarCollapsed,
@@ -381,9 +412,13 @@ export function WorkspaceProvider({
 
     bindGateway(initialGateway);
 
+    let cancelled = false;
+
     void initialGateway
       .loadWorkspace()
       .then(async (loaded) => {
+        if (cancelled) return;
+        let activeGateway = initialGateway;
         if (
           loaded.executionMode === 'aion_core' &&
           initialGateway.kind !== 'aion_core'
@@ -392,6 +427,13 @@ export function WorkspaceProvider({
           const coreGw = gatewayFactory('aion_core', persistence);
           bindGateway(coreGw);
           await coreGw.loadWorkspace();
+          activeGateway = coreGw;
+        }
+        if (!cancelled && loaded.executionMode === 'aion_core') {
+          void probeCoreSessionOnStartup(
+            activeGateway,
+            () => !cancelled && gatewayRef.current === activeGateway,
+          );
         }
       })
       .finally(() => {
@@ -399,6 +441,7 @@ export function WorkspaceProvider({
       });
 
     return () => {
+      cancelled = true;
       unsubStorage();
       for (const unsub of unsubGatewayRef.current) {
         unsub();

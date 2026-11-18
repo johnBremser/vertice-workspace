@@ -404,8 +404,24 @@ export function sanitizeLoadedStateAfterReload(
       },
     };
   }
+  const nextConnections = state.connections.map((conn) =>
+    conn.mode === 'aion_core'
+      ? {
+          ...conn,
+          coreReachability: 'unknown' as const,
+          catalogLoaded: false,
+          coreAgentStatus: undefined,
+          authStatus: 'unknown' as const,
+          sessionStatus: 'inactive' as const,
+        }
+      : conn,
+  );
+
   return {
     ...state,
+    coreRuntimeStatus: 'unknown',
+    coreSessionAuthenticated: false,
+    connections: nextConnections,
     conversations: nextConversations,
   };
 }

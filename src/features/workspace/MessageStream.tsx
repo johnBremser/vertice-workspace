@@ -601,9 +601,6 @@ export function MessageStream() {
                             {item.actorRoleLabel}
                           </span>
                         )}
-                        <span className="font-mono text-[10px] text-[var(--text-muted)]">
-                          {item.sourceEventId}
-                        </span>
                       </div>
                       <time className="tabular-nums text-[11px] text-[var(--text-muted)]">
                         {formatClock(item.timestamp)}
@@ -613,6 +610,16 @@ export function MessageStream() {
                     <p className="mt-1.5 text-[14px] leading-[1.7] text-[var(--text-primary)]">
                       {item.summary}
                     </p>
+
+                    <details className="mt-1 text-[11px] text-[var(--text-muted)]">
+                      <summary className="cursor-pointer select-none hover:text-[var(--text-secondary)]">
+                        Detalhes técnicos
+                      </summary>
+                      <div className="mt-0.5 flex flex-wrap gap-x-2 font-mono text-[10px] text-[var(--text-secondary)]">
+                        <span>evento={item.sourceEventId}</span>
+                        {item.targetTaskId && <span>tarefa={item.targetTaskId}</span>}
+                      </div>
+                    </details>
 
                     {item.kind === 'coordinator_plan' &&
                       activeConversation.tasks.length > 0 && (
@@ -824,14 +831,23 @@ export function MessageStream() {
                                   : 'Local'}
                           </span>
                         )}
-                        <span className="font-mono text-[10px] text-[var(--text-muted)]">
-                          {msg.sourceEventId}
-                        </span>
                       </div>
                       <time className="tabular-nums text-[11px] text-[var(--text-muted)]">
                         {formatClock(msg.timestamp)}
                       </time>
                     </div>
+
+                    <details className="mt-1 text-[11px] text-[var(--text-muted)]">
+                      <summary className="cursor-pointer select-none hover:text-[var(--text-secondary)]">
+                        Detalhes técnicos
+                      </summary>
+                      <div className="mt-0.5 flex flex-wrap gap-x-2 font-mono text-[10px] text-[var(--text-secondary)]">
+                        <span>evento={msg.sourceEventId}</span>
+                        {msg.externalMessageId && (
+                          <span>extMsg={msg.externalMessageId}</span>
+                        )}
+                      </div>
+                    </details>
 
                     {hasParseWarning && (
                       <div className="mt-2 flex items-center gap-1.5 rounded-md bg-[var(--status-warning-soft)] px-3 py-2 text-xs text-[var(--status-warning)]">
@@ -894,6 +910,11 @@ export function MessageStream() {
               participant={activeConversation.participants.find(
                 (p) => p.id === req.participantId,
               )}
+              taskTitle={
+                req.taskId
+                  ? activeConversation.tasks.find((t) => t.id === req.taskId)?.title
+                  : undefined
+              }
               onApprove={(id) => void respondPermission(id, 'approved')}
               onDeny={(id) => void respondPermission(id, 'denied')}
             />

@@ -110,24 +110,24 @@ export function WorkspaceHeader({ onOpenExport }: WorkspaceHeaderProps) {
         : 'text-[var(--text-secondary)]';
 
   return (
-    <header className="shrink-0 border-b border-[var(--border-hairline)] bg-[var(--bg-canvas)] px-4 py-3 sm:px-6">
+    <header className="shrink-0 border-b border-[var(--border-hairline)] bg-[var(--bg-canvas)] px-3 py-2 sm:px-6 sm:py-2.5">
       {/* Tier 1: Breadcrumb + Honest Runtime Marker */}
-      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--text-muted)]">
+      <div className="flex items-center justify-between gap-2 text-[11px] text-[var(--text-muted)]">
         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
           <button
             type="button"
             onClick={toggleSidebar}
             aria-label="Alternar barra lateral de projetos"
-            className="-ml-1.5 flex h-7 w-7 items-center justify-center rounded-md text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]"
+            className="-ml-1.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]"
           >
             <PanelLeft className="h-4 w-4" aria-hidden="true" />
           </button>
 
-          <span className="truncate font-medium text-[var(--text-secondary)]">
+          <span className="max-w-[140px] truncate font-medium text-[var(--text-secondary)] sm:max-w-none">
             {activeProject?.name ?? 'Sem projeto'}
           </span>
-          <span aria-hidden="true">/</span>
-          <span>Conversas</span>
+          <span aria-hidden="true" className="hidden sm:inline">/</span>
+          <span className="hidden sm:inline">Conversas</span>
 
           {coordinator && (
             <>
@@ -145,11 +145,23 @@ export function WorkspaceHeader({ onOpenExport }: WorkspaceHeaderProps) {
 
           {isCoreMode && conv && (
             <>
-              <span aria-hidden="true">·</span>
-              <span className="truncate">
-                {conv.externalTeamId
-                  ? `Equipe Core: ${conv.externalTeamId}`
-                  : 'Sem equipe criada no Core'}
+              <span aria-hidden="true" className="hidden sm:inline">·</span>
+              <span className="hidden items-center gap-1.5 sm:inline-flex">
+                <span>
+                  {conv.externalTeamId
+                    ? 'Equipe Core vinculada'
+                    : 'Sem equipe criada no Core'}
+                </span>
+                {conv.externalTeamId && (
+                  <details className="inline-block">
+                    <summary className="cursor-pointer select-none text-[10px] text-[var(--text-muted)] hover:text-[var(--text-secondary)]">
+                      ID
+                    </summary>
+                    <span className="ml-1 font-mono text-[10px] text-[var(--text-secondary)]">
+                      {conv.externalTeamId}
+                    </span>
+                  </details>
+                )}
               </span>
             </>
           )}
@@ -175,16 +187,16 @@ export function WorkspaceHeader({ onOpenExport }: WorkspaceHeaderProps) {
       </div>
 
       {/* Tier 2: Conversation Title + Uncluttered Action Cluster */}
-      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
-        <div className="min-w-[200px] flex-1">
-          <h1 className="truncate text-lg font-semibold tracking-tight text-[var(--text-primary)] sm:text-[21px]">
+      <div className="mt-1 flex items-center justify-between gap-2 sm:mt-1.5 sm:flex-wrap sm:gap-x-3 sm:gap-y-2">
+        <div className="min-w-0 flex-1">
+          <h1 className="truncate text-base font-semibold tracking-tight text-[var(--text-primary)] sm:text-[21px]">
             {mainSurface === 'settings'
               ? 'Configurações do workspace'
               : (conv?.title ?? 'Nenhuma conversa selecionada')}
           </h1>
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+        <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
           {mainSurface === 'conversation' && (
             <>
               <div className="mr-1 hidden sm:block">{execBadge}</div>
@@ -284,7 +296,14 @@ export function WorkspaceHeader({ onOpenExport }: WorkspaceHeaderProps) {
 
       {/* Mobile execution status line */}
       {mainSurface === 'conversation' && (
-        <div className="mt-1.5 flex items-center sm:hidden">{execBadge}</div>
+        <div className="mt-1 flex items-center justify-between gap-2 sm:hidden">
+          {execBadge}
+          {isCoreMode && conv && (
+            <span className="truncate text-[11px] text-[var(--text-muted)]">
+              {conv.externalTeamId ? 'Equipe Core vinculada' : 'Sem equipe Core'}
+            </span>
+          )}
+        </div>
       )}
     </header>
   );

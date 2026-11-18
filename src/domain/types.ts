@@ -760,6 +760,7 @@ export interface ConversationSnapshot {
 export interface WorkspaceStoreState {
   schemaVersion: number;
   executionMode: ExecutionMode;
+  coreRuntimeStatus?: 'unknown' | 'reachable' | 'unreachable';
   coreSessionAuthenticated?: boolean;
   coreSettings: CoreRuntimeSettings;
   projects: Project[];

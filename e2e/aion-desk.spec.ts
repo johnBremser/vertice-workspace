@@ -33,6 +33,11 @@ test.describe('Aion Desk v4 E2E flow', () => {
     await expect(page.getByRole('tab', { name: /Sol 6\.1/i })).toBeVisible();
     await expect(page.getByRole('tab', { name: /Gemini Hydrogen/i })).toBeVisible();
 
+    const openDemoMenuItem = async (itemPattern: RegExp) => {
+      await page.getByRole('button', { name: /Controles de simulação/i }).click();
+      await page.getByRole('menuitem', { name: itemPattern }).click();
+    };
+
     // 4. Send initial message in General + Step forward -> MUST NOT create a seq gap (Fix 1)
     const composer = page.getByPlaceholder(
       /Enviar pedido ou orientação ao coordenador/i,
@@ -43,11 +48,11 @@ test.describe('Aion Desk v4 E2E flow', () => {
       page.getByText('Organizar plano inicial da equipe configurável'),
     ).toBeVisible();
 
-    await page.getByRole('button', { name: /Avançar cenário/i }).click();
+    await openDemoMenuItem(/Avançar cenário/i);
     await expect(page.getByText(/Lacuna detectada/i)).toHaveCount(0);
 
     // 5. Ensure Trabalho drawer is open (or open it), create a manual 3rd task, and publish Context v1
-    await page.getByRole('button', { name: /Avançar cenário/i }).click();
+    await openDemoMenuItem(/Avançar cenário/i);
     const tasksTab = page.getByRole('tab', { name: /Tarefas/i });
     if (!(await tasksTab.isVisible().catch(() => false))) {
       await page.getByRole('button', { name: /Trabalho/i }).click();
@@ -70,7 +75,6 @@ test.describe('Aion Desk v4 E2E flow', () => {
     await page.getByRole('button', { name: 'Fechar painel lateral' }).click();
 
     // 6. Advance Terra/Sol/Gemini + 3rd manual task step-by-step all the way to Concluída
-    const stepButton = page.getByRole('button', { name: /Avançar cenário/i });
     for (let i = 0; i < 35; i += 1) {
       if (
         await page
@@ -96,10 +100,16 @@ test.describe('Aion Desk v4 E2E flow', () => {
         await approveEscBtn.click();
         continue;
       }
-      if (await stepButton.isDisabled().catch(() => false)) {
+      await page.getByRole('button', { name: /Controles de simulação/i }).click();
+      const stepItem = page.getByRole('menuitem', { name: /Avançar cenário/i });
+      if (
+        !(await stepItem.isVisible().catch(() => false)) ||
+        (await stepItem.isDisabled().catch(() => false))
+      ) {
+        await page.keyboard.press('Escape');
         break;
       }
-      await stepButton.click();
+      await stepItem.click();
     }
 
     await expect(
@@ -114,24 +124,14 @@ test.describe('Aion Desk v4 E2E flow', () => {
     await page.getByLabel('Título da conversa').fill('Permissão e Reconciliação E2E');
     await page.getByRole('button', { name: 'Salvar' }).click();
 
-    await page
-      .getByRole('button', { name: /Mais controles de simulação/i })
-      .click();
-    await page
-      .getByRole('menuitem', { name: /Solicitar permissão simulada/i })
-      .click();
+    await openDemoMenuItem(/Solicitar permissão simulada/i);
     await expect(page.getByRole('button', { name: 'Recusar' }).first()).toBeVisible();
     await page.getByRole('button', { name: 'Recusar' }).first().click();
 
-    await page.getByRole('button', { name: /Executar automaticamente/i }).click();
+    await openDemoMenuItem(/Executar automaticamente/i);
     await expect(page.getByText(/recusada/i).first()).toBeVisible();
 
-    await page
-      .getByRole('button', { name: /Mais controles de simulação/i })
-      .click();
-    await page
-      .getByRole('menuitem', { name: /Simular evento fora de ordem/i })
-      .click();
+    await openDemoMenuItem(/Simular evento fora de ordem/i);
     await expect(
       page.getByRole('button', { name: /Reconciliar agora/i }),
     ).toBeVisible();
@@ -172,12 +172,7 @@ test.describe('Aion Desk v4 E2E flow', () => {
     await expect(page.getByText(/\(cópia\)/i).first()).toBeVisible();
 
     // 9. 2,000-event performance stress test: verify real mounted DOM cap + load-older scroll
-    await page
-      .getByRole('button', { name: /Mais controles de simulação/i })
-      .click();
-    await page
-      .getByRole('menuitem', { name: /Carregar teste de desempenho \(2\.000 eventos\)/i })
-      .click();
+    await openDemoMenuItem(/Carregar teste de desempenho \(2\.000 eventos\)/i);
 
     await page.getByRole('tab', { name: /Executor/i }).click();
 

@@ -46,7 +46,11 @@ function WorkspaceShell() {
   const conv = activeConversation?.conversation;
   const hasGap =
     conv?.syncState === 'gap_detected' || conv?.syncState === 'incomplete';
-  const isPausedDemo = conv?.executionStatus === 'paused_demo';
+  const isPausedDemo =
+    store?.executionMode !== 'aion_core' &&
+    conv?.executionMode !== 'aion_core' &&
+    conv?.executionStatus === 'paused_demo' &&
+    mainSurface === 'conversation';
   const isPausedCoreQueue =
     conv?.executionMode === 'aion_core' &&
     conv?.executionStatus === 'paused_queue';

@@ -5,6 +5,7 @@ import { PT_BR } from '../i18n/ptBR';
 interface PermissionCardProps {
   request: PermissionRequest;
   participant?: Participant;
+  taskTitle?: string;
   onApprove: (requestId: string) => void;
   onDeny: (requestId: string) => void;
 }
@@ -12,6 +13,7 @@ interface PermissionCardProps {
 export function PermissionCard({
   request,
   participant,
+  taskTitle,
   onApprove,
   onDeny,
 }: PermissionCardProps) {
@@ -40,9 +42,22 @@ export function PermissionCard({
         </div>
         <span className="tabular-nums text-xs text-[var(--text-secondary)]">
           {participant?.displayName ?? request.participantId}
-          {request.taskId ? ` · tarefa ${request.taskId}` : ''}
+          {taskTitle ? ` · ${taskTitle}` : ''}
         </span>
       </div>
+
+      {request.taskId && (
+        <details className="mt-1 text-[11px] text-[var(--text-muted)]">
+          <summary className="cursor-pointer select-none hover:text-[var(--text-secondary)]">
+            Detalhes técnicos da permissão
+          </summary>
+          <div className="mt-0.5 flex flex-wrap gap-x-3 font-mono text-[10px] text-[var(--text-secondary)]">
+            <span>req={request.id}</span>
+            <span>task={request.taskId}</span>
+            {request.attemptId && <span>attempt={request.attemptId}</span>}
+          </div>
+        </details>
+      )}
 
       <p className="mt-2 text-sm font-medium text-[var(--text-primary)]">
         {request.actionTitle}

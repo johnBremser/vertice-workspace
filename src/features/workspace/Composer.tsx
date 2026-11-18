@@ -67,17 +67,21 @@ export function Composer() {
     : 'Participante';
 
   return (
-    <div className="shrink-0 bg-[var(--bg-canvas)] px-4 pt-2 pb-4 sm:px-8">
+    <div className="shrink-0 bg-[var(--bg-canvas)] px-3 pt-1.5 pb-2 sm:px-8 sm:pt-2 sm:pb-4">
       <div className="mx-auto max-w-[820px]">
-        <div className="rounded-[14px] border border-[var(--border-strong)] bg-[var(--bg-surface)] px-4 py-3 transition-colors focus-within:border-[var(--accent)]">
+        <div className="rounded-[12px] border border-[var(--border-strong)] bg-[var(--bg-surface)] px-3 py-2 transition-colors focus-within:border-[var(--accent)] sm:rounded-[14px] sm:px-4 sm:py-3">
           <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--text-muted)]">
-            <span>
+            <span className="min-w-0 truncate">
               {isGeneral ? (
                 <>
-                  {PT_BR.composerTargetGeneral} ·{' '}
+                  <span className="sm:hidden">Para: </span>
+                  <span className="hidden sm:inline">
+                    {PT_BR.composerTargetGeneral} ·{' '}
+                  </span>
                   <strong className="font-medium text-[var(--text-secondary)]">
                     {targetParticipant?.displayName ?? 'não definido'}
                   </strong>
+                  <span className="sm:hidden"> (Geral)</span>
                 </>
               ) : (
                 <span className="font-medium text-[var(--text-secondary)]">
@@ -98,30 +102,34 @@ export function Composer() {
           </label>
           <textarea
             id="aion-composer-input"
-            rows={2}
+            rows={1}
             value={draft}
             onChange={(e) => setDraft(convId, activeTabId, e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={placeholder}
-            className="mt-2 block min-h-[50px] max-h-40 w-full resize-y bg-transparent text-[14px] leading-relaxed text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none"
+            className="mt-1.5 block min-h-[38px] max-h-36 w-full resize-y bg-transparent text-[14px] leading-snug text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none sm:mt-2 sm:min-h-[50px] sm:max-h-40 sm:leading-relaxed"
           />
 
-          <div className="mt-2 flex flex-wrap items-center justify-between gap-3 pt-1">
+          <div className="mt-1.5 flex items-center justify-between gap-2 pt-0.5 sm:mt-2 sm:gap-3 sm:pt-1">
             <div className="min-w-0">
               {isGeneral && (
-                <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-[var(--text-secondary)]">
+                <label className="inline-flex cursor-pointer items-center gap-1.5 text-xs text-[var(--text-secondary)] sm:gap-2">
                   <input
                     type="checkbox"
                     checked={promoteToContext}
                     onChange={(e) => setPromoteToContext(e.target.checked)}
-                    className="h-3.5 w-3.5 rounded border-[var(--border-strong)] accent-[var(--accent)]"
+                    aria-label={PT_BR.promoteToContextLabel}
+                    className="h-3.5 w-3.5 shrink-0 rounded border-[var(--border-strong)] accent-[var(--accent)]"
                   />
-                  <span>{PT_BR.promoteToContextLabel}</span>
+                  <span className="hidden sm:inline">
+                    {PT_BR.promoteToContextLabel}
+                  </span>
+                  <span className="sm:hidden">Registrar no contexto</span>
                 </label>
               )}
             </div>
 
-            <div className="flex items-center gap-3">
+            <div className="flex shrink-0 items-center gap-3">
               <span className="hidden text-[11px] text-[var(--text-muted)] md:inline">
                 Shift + Enter para nova linha
               </span>
@@ -139,7 +147,7 @@ export function Composer() {
           </div>
         </div>
 
-        <div className="mt-2 text-center text-[10px] text-[var(--text-muted)]">
+        <div className="mt-2 hidden text-center text-[10px] text-[var(--text-muted)] sm:block">
           {APP_BRAND.technicalSignature} ·{' '}
           {isCoreMode
             ? 'Conexão local HTTP/WS'

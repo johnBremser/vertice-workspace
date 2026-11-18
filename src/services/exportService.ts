@@ -136,10 +136,18 @@ function detachExternalBindingsFromProjection(
     };
   });
 
+  const nextStatus =
+    proj.conversation.executionStatus === 'running'
+      ? proj.conversation.executionMode === 'aion_core'
+        ? ('paused_queue' as const)
+        : ('paused_demo' as const)
+      : proj.conversation.executionStatus;
+
   return {
     ...proj,
     conversation: {
       ...proj.conversation,
+      executionStatus: nextStatus,
       externalTeamId: undefined,
       importedExternalTeamId: hasTeamRef
         ? proj.conversation.externalTeamId
@@ -558,6 +566,7 @@ export function applyImportedWorkspaceBackup(
     return sanitizeLoadedStateAfterReload({
       ...importedState,
       coreSettings: currentState.coreSettings,
+      coreRuntimeStatus: 'unknown',
       coreSessionAuthenticated: false,
       connections: importedState.connections.map(sanitizeConnectionForImport),
       conversations: detachedConversations,
@@ -825,13 +834,13 @@ export function applyImportedWorkspaceBackup(
     ...importedState.teamPresets.filter((p) => !existingPresetIds.has(p.id)),
   ];
 
-  return sanitizeLoadedStateAfterReload({
+  return {
     ...currentState,
     projects: [...currentState.projects, ...copiedProjects],
     participantProfiles: mergedProfiles,
     teamPresets: mergedPresets,
     conversations: nextConversations,
-  });
+  };
 }
 
 export function triggerFileDownload(

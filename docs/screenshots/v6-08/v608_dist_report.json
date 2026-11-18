@@ -1,0 +1,46 @@
+{
+  "startedAt": "2026-11-18T15:56:55.394Z",
+  "extractedDir": "C:\\Users\\JOAO~1.GON\\AppData\\Local\\Temp\\vertice-v608-clean",
+  "steps": {
+    "cleanExtract": {
+      "preInstallHasNodeModules": false,
+      "preBuildHasDist": false,
+      "installMode": "npm ci --offline"
+    },
+    "doctorAndStart": {
+      "distBuilt": true,
+      "coreVersion": "0.2.2",
+      "docPreBuildHasRecovery": true,
+      "docCoreDownHasRecovery": false,
+      "docCoreUpReachable": true,
+      "buildSnippetOk": true,
+      "startVerified": true,
+      "statusVerified": true
+    },
+    "realOrder": {
+      "ok": true,
+      "teamId": "01a1ef60-f8b5-7543-b26e-c6e8dd203695",
+      "origin": "http://127.0.0.1:4173",
+      "verifiedResponseText": "V608_DIST_REAL_OK"
+    },
+    "outageAndReconnect": {
+      "outageHttpStatus": 502,
+      "verticeServerStayedUp": true,
+      "cookieSurvivedCoreRestart": true,
+      "reconnectedTo5of5": true
+    },
+    "restartAndPersistence": {
+      "stoppedCleanly": true,
+      "restartedCleanly": true,
+      "preservedConversationAndResponse": true,
+      "stepsAfterRestart": "5/5 etapas confirmadas",
+      "finalStoppedCleanly": true,
+      "serverOutLogPresent": true,
+      "serverErrLogPresent": true
+    }
+  },
+  "pageErrors": [],
+  "allOk": false,
+  "doctorFixAddendum": "docCoreDownHasRecovery era false nesta captura porque fetch() em ECONNREFUSED lançava TypeError capturado como URL inválida. Corrigido imediatamente após a captura em scripts/vertice-ctl.mjs e coberto por regressão em src/services/__tests__/verticeLauncher.test.ts + execução direta de doctor com Core desligado.",
+  "finishedAt": "2026-11-18T15:58:38.174Z"
+}

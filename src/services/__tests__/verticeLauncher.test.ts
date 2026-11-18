@@ -61,24 +61,31 @@ async function runCtl(
   workDir: string,
   command: 'doctor' | 'start' | 'status' | 'stop',
   port: number,
+  options?: { useDotEnv?: boolean },
 ) {
   return await new Promise<{
     code: number | null;
     stdout: string;
     stderr: string;
   }>((resolve, reject) => {
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      VERTICE_HOST: '127.0.0.1',
+      VERTICE_PORT: String(port),
+    };
+    if (options?.useDotEnv) {
+      delete childEnv.VITE_AIONCORE_PROXY_TARGET;
+      delete childEnv.VITE_AIONCORE_BASE_URL;
+    } else {
+      childEnv.VITE_AIONCORE_PROXY_TARGET = '';
+    }
     const child = spawn(
       process.execPath,
       [path.join(workDir, 'scripts', 'vertice-ctl.mjs'), command],
       {
         cwd: workDir,
         windowsHide: true,
-        env: {
-          ...process.env,
-          VERTICE_HOST: '127.0.0.1',
-          VERTICE_PORT: String(port),
-          VITE_AIONCORE_PROXY_TARGET: '',
-        },
+        env: childEnv,
         stdio: ['ignore', 'pipe', 'pipe'],
       },
     );
@@ -233,7 +240,7 @@ describe('Launcher identity & lifecycle safety (V6-00)', () => {
       }),
     );
 
-    const doctor = await runCtl(workDir, 'doctor', port);
+    const doctor = await runCtl(workDir, 'doctor', port, { useDotEnv: true });
     expect(doctor.code).toBe(0);
     expect(doctor.stdout).toMatch(/NÃO comprovado/i);
 
@@ -332,7 +339,7 @@ describe('Launcher identity & lifecycle safety (V6-00)', () => {
     expect(meta2.pid).toBe(meta1.pid);
     expect(meta2.instanceId).toBe(meta1.instanceId);
 
-    const doctor = await runCtl(workDir, 'doctor', port);
+    const doctor = await runCtl(workDir, 'doctor', port, { useDotEnv: true });
     expect(doctor.code).toBe(0);
     expect(doctor.stdout).toMatch(/em uso pela instância verificada/i);
 
@@ -357,4 +364,59 @@ describe('Launcher identity & lifecycle safety (V6-00)', () => {
     expect(statusAfter.code).toBe(0);
     expect(statusAfter.stdout).toMatch(/parado/i);
   }, 25_000);
+
+  it('doctor detects missing dist/, malformed .env.local, unverified live PID, and prints concrete recovery steps without leaking controlToken (V6-08)', async () => {
+    const workDir = await createIsolatedWorkspace();
+    const port = await getFreePort();
+    await fs.rm(path.join(workDir, 'dist', 'index.html'));
+    await fs.writeFile(
+      path.join(workDir, '.env.local'),
+      'VITE_AIONCORE_PROXY_TARGET="not-a-valid-url"\nVITE_AIONCORE_BASE_URL="http://127.0.0.1:25828"\n',
+    );
+
+    const dummy = spawnDisposableChild(
+      'console.log("ready"); setInterval(() => {}, 1000);',
+    );
+    await new Promise<void>((resolve) => {
+      dummy.stdout!.once('data', () => resolve());
+    });
+    const secretControlToken = 'super-secret-control-token-v608';
+    await fs.writeFile(
+      path.join(workDir, '.vertice', 'server.json'),
+      JSON.stringify({
+        schemaVersion: 2,
+        pid: dummy.pid,
+        host: '127.0.0.1',
+        port,
+        origin: `http://127.0.0.1:${port}`,
+        instanceId: 'unverified-inst-v608',
+        controlToken: secretControlToken,
+        startedAt: '2026-11-18T00:00:00.000Z',
+        script: 'scripts/vertice-server.mjs',
+      }),
+    );
+
+    const doctor = await runCtl(workDir, 'doctor', port, { useDotEnv: true });
+    expect(doctor.code).toBe(0);
+    expect(doctor.stdout).toContain('ausente (execute npm run build)');
+    expect(doctor.stdout).toContain('URL inválida em VITE_AIONCORE_PROXY_TARGET');
+    expect(doctor.stdout).toMatch(/NÃO comprovado/i);
+    expect(doctor.stdout).toContain('Ações e recuperação');
+    expect(doctor.stdout).toContain('npm run build');
+    expect(doctor.stdout).toContain('VITE_AIONCORE_BASE_URL');
+    expect(doctor.stdout).toMatch(/não encerrará esse PID alheio/i);
+    expect(doctor.stdout).not.toContain(secretControlToken);
+
+    // Valid URL pointing to a closed loopback port MUST report "inacessível", NOT "URL inválida"
+    const closedCorePort = await getFreePort();
+    await fs.writeFile(
+      path.join(workDir, '.env.local'),
+      `VITE_AIONCORE_PROXY_TARGET="http://127.0.0.1:${closedCorePort}"\nVITE_AIONCORE_BASE_URL=""\n`,
+    );
+    const doctorUnreachable = await runCtl(workDir, 'doctor', port, { useDotEnv: true });
+    expect(doctorUnreachable.code).toBe(0);
+    expect(doctorUnreachable.stdout).toContain('inacessível');
+    expect(doctorUnreachable.stdout).toContain('inicie o binário externo AionCore');
+    expect(doctorUnreachable.stdout).not.toContain('URL inválida');
+  });
 });

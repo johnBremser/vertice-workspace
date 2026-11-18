@@ -69,7 +69,7 @@ npm run dev
 
 ---
 
-## Execução local reproduzível (sem Vite dev server)
+## Execução local reproduzível, atualização e retorno (sem Vite dev server)
 
 Para operar o **Vértice Workspace** fora do modo de desenvolvimento, mantendo **mesma origem**, proteção **CSRF** e **loopback seguro por padrão**:
 
@@ -80,10 +80,19 @@ npm run server:doctor
 npm run server:start
 ```
 
-- Por padrão, `scripts/vertice-server.mjs` escuta apenas em **`127.0.0.1:4173`** (aceita apenas endereços loopback; portas podem ser ajustadas via `VERTICE_PORT` ou `PORT` em `.env.local`).
-- Para atualizar após mudanças: execute `npm run server:stop`, `npm run build` e `npm run server:start` (em caso de regressão, restaure o commit/tag anterior em Git e reconstrua `dist/`).
-- Dados da interface ficam no navegador (IndexedDB `aion_desk_storage`); backups JSON (`exportSchemaVersion: "2.0.0"`) podem ser exportados/importados pelo botão **Exportar / Backup** sem credenciais.
-- Fechar todas as abas do navegador interrompe a coordenação pela UI (a v1 web não roda como daemon em segundo plano); ao reabrir, o trabalho já aceito pelo Core é reconstruído via catch-up.
+### Separação de camadas, pré-requisitos e requisito de rede
+
+1. **Vértice Workspace (código, build e controle web)**: código em `src/`/`scripts/`, bundle estático em `dist/` (`npm run build`), estado/logs do launcher em `.vertice/server.json` e `.vertice/logs/server.{out,err}.log`. Em runtime após o build, `scripts/vertice-server.mjs` utiliza exclusivamente módulos nativos do Node.js (`0` pacotes externos em execução).
+2. **AionCore Local (`v0.2.2`, `aioncore.exe`)**: binário separado executado em processo próprio com `--identity-mode webui --host 127.0.0.1 --port <PORTA> --data-dir ... --work-dir ... --log-dir ...`, mantendo banco SQLite, workspaces e logs **fora** da pasta do repositório. O launcher `vertice-ctl` nunca gerencia nem encerra processos externos que não comprovem sua identidade autenticada.
+3. **Runtime gerenciado e rede no primeiro preparo**: exige `Node.js` `^22.12.0 || ^24.0.0 || >=26.0.0` (recomendado `24.x`). **Possuir o código ou build estático não torna a operação 100% offline**: o primeiro `npm ci` (sem cache local aquecido), `npm run test:e2e:install` (Chromium do Playwright), instalação/login de CLIs e chamadas reais a modelos requerem acesso à rede.
+4. **CLIs locais e autenticação**: `codex`, `antigravity` e `cursor-agent` são instalados e autenticados separadamente no ambiente local; sessões WebUI do AionCore usam apenas cookies `HttpOnly` + CSRF no navegador (nunca salvos em IndexedDB ou backups).
+
+### Segurança de rede e política de atualização/rollback
+
+- **Loopback obrigatório por padrão**: `scripts/vertice-server.mjs` vincula-se exclusivamente a `127.0.0.1:4173` (aceita apenas loopback; ajuste a porta com `VERTICE_PORT` ou `PORT` em `.env.local`). Sem abertura de firewall, bind público, acesso remoto ou relaxamento de CORS/CSRF/autenticação.
+- **Dados preservados na atualização**: execute `npm run server:stop`, atualize o código, rode `npm ci && npm run build`, confira `npm run server:doctor` e suba com `npm run server:start`. Essa rotina **não apaga** o histórico do navegador (IndexedDB `aion_desk_storage`), backups JSON exportados, nem `core-data`, `core-work`, `core-logs` ou credenciais dos CLIs/WebUI.
+- **Retorno à versão anterior (rollback)**: utilize exclusivamente commits ou tags reais do histórico Git (`git log --oneline`, por exemplo os checkpoints `40f39f8` ou `68dfb73`), reconstrua `dist/` (`npm ci && npm run build`) e reinicie (`server:stop` / `server:start`). Se houver alteração de esquema local, importe o backup JSON prévio pelo botão **Exportar / Backup** (sem credenciais).
+- Fechar todas as abas do navegador interrompe a coordenação pela UI (a v1 web não roda como daemon em segundo plano); ao reabrir, sinais ao vivo (`/health`, sessão e catálogo) são revalidados automaticamente e o trabalho aceito pelo Core é reconstruído via catch-up.
 
 ---
 

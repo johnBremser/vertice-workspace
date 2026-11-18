@@ -365,8 +365,8 @@ Relatório JSON e capturas preservadas no repositório em `docs/screenshots/v6-0
 - V6-04 — Autoridade de coordenação/ciclo real: **concluído com Codex e Cursor** (repetição opcional de 3 tarefas com Antigravity/Gemini pendente).
 - V6-05 — Permissões/correção/falhas/limites: **aprovado pelo auditor (18/11/2026)**.
 - V6-06 — Contexto/sessões/dados/recuperação: **aprovado pelo auditor (18/11/2026)**, com higiene de CI (`viteProxyConfig.test.ts`) e correções documentais/evidências aplicadas em seguida.
-- V6-07 — Acabamento/primeiro uso: **concluído (aguardando revisão do auditor antes de avançar ao V6-08)**.
-- V6-08 — Distribuição/operação: concluído launcher/servidor base; integração com Core real pendente.
+- V6-07 — Acabamento/primeiro uso: **aprovado pelo auditor (18/11/2026)** (checkpoint `68dfb73`; adendo de defasagem registrado em `docs/screenshots/v6-07/v607_report.json`).
+- V6-08 — Distribuição/operação: **concluído e validado em extração limpa com Core real (aguardando revisão do auditor antes de avançar ao V6-09)**.
 - V6-09 — Validação integrada/release: pendente.
 - V6-10 — Versionamento/GitHub/documentação: pendente; remoto não definido nesta entrega.
 
@@ -433,3 +433,51 @@ Registrado em `docs/screenshots/v6-07/v607_report.json` e capturas em `docs/scre
 
 - A matriz completa de 6 capturas e a rodada real completa `0/5 → 5/5` (`v607_report.json` e `v607-onboarding-*.png`) foram registradas antes da correção final do banner `isPausedDemo` e dos ajustes `[P1]`/`[P2]` da auditoria; após os ajustes finais, foram reexecutados `tsc --noEmit`, `npm test` (67/67), `npm run build`, `npm run test:e2e` (Chrome real) e a verificação real pós-reload (`3/5 etapas confirmadas` contra `aioncore.exe v0.2.2`), sem repetir chamada paga ao modelo apenas pelo ajuste de banner e importação/revalidação.
 - Correções e evidências consolidadas em commit de checkpoint do V6-07 aguardando confirmação final do auditor antes de iniciar o V6-08.
+
+---
+
+## Etapa V6-08 — Distribuição e operação local (concluída — aguardando revisão do auditor)
+
+### Escopo e alterações implementadas
+
+1. **Endurecimento de distribuição e proteção contra exposição (`scripts/vertice-server.mjs`)**:
+   - `resolveDistFile()` passa a validar também `fs.realpathSync()` contra `realDist`, bloqueando leitura de arquivos externos via symlinks além da checagem de travessia de caminho (`..`).
+   - `forwardHttpRequest()` e `forwardWebSocketUpgrade()` removem o cabeçalho interno `x-vertice-control-token` antes de encaminhar requisições/upgrades ao AionCore upstream.
+   - Mantidos bind estrito em loopback (`127.0.0.1` por padrão, bloqueio de bind não-loopback sem override explícito), redirecionamento de cookies `Set-Cookie`, CSRF, subprotocolo WS `[ws_token]` e tratamento HTTP `502` JSON / drop WS limpo quando upstream está indisponível.
+
+2. **`doctor` com diagnósticos e passos objetivos de recuperação (`scripts/vertice-ctl.mjs`)**:
+   - `cmdDoctor()` valida faixa de Node (`^22.12.0 || ^24.0.0 || >=26.0.0`), presença de `dist/index.html`, `.env.local`, aviso caso `VITE_AIONCORE_BASE_URL` esteja preenchido junto ao proxy, política de loopback em `VERTICE_HOST` e `VITE_AIONCORE_PROXY_TARGET`, validade da porta (`1..65535`), estado comprovado vs `unverified_pid` (sem nunca anunciar PID não comprovado como servidor identificado nem expor `controlToken`), separação clara de diretórios (`dist/`, `.vertice/`, IndexedDB, `--data-dir`/`--log-dir` externos) e seção **`Ações e recuperação`** com orientação prática para cada falha.
+   - Corrigido bug real diagnosticado durante o roteiro de extração limpa: em Node.js, `fetch()` lança `TypeError: fetch failed` em `ECONNREFUSED`, que era confundido com `URL inválida em VITE_AIONCORE_PROXY_TARGET`. A validação sintática da URL foi isolada em bloco próprio antes do `fetch('/health')`, garantindo reporte exato de `inacessível (ECONNREFUSED)` com passos de recuperação para iniciar o Core.
+
+3. **Documentação de camadas, pré-requisitos de rede, atualização e rollback (`README.md`, `docs/compatibility-matrix.md`, `docs/screenshots/v6-07/v607_report.json`)**:
+   - Documentados separadamente: (1) Vértice Workspace (`src/`, `scripts/`, `dist/`, `.vertice/`), (2) AionCore Local (`aioncore.exe v0.2.2`, `--data-dir`/`--work-dir`/`--log-dir` externos), (3) pré-requisitos/rede (Node 24 recomendado, `npm ci`, Playwright Chromium opcional, aviso explícito de que pacote/binário local não é 100% offline na preparação inicial nem nas chamadas aos modelos) e (4) CLIs/autenticação separados (`codex`, `cursor-agent`, `antigravity`).
+   - Documentados atualização segura sem apagar dados/credenciais e retorno à versão anterior usando apenas commits reais existentes no Git (`git log --oneline`, ex. `40f39f8`, `68dfb73`).
+   - Adicionado `addendumNote` em `docs/screenshots/v6-07/v607_report.json` esclarecendo a defasagem do campo histórico `afterReloadSteps: "2/5"` antes do commit `68dfb73` (`[P3]` da auditoria anterior).
+
+### Verificações determinísticas (após a última edição)
+
+- `npm run lint` (`tsc --noEmit`): **0 erros**.
+- `npm test` (`vitest run`): **8 arquivos / 69 testes aprovados (69/69, exit 0)**, incluindo:
+  - Novo teste em `src/services/__tests__/localServerProxy.test.ts` (`V6-08`) validando múltiplos `Set-Cookie` (`aionui-session` + `aionui-csrf-token`), subprotocolo WS `Sec-WebSocket-Protocol`, remoção de `x-vertice-control-token` antes do upstream, queda HTTP `502` / WS sem derrubar `dist/`, reconexão após retorno do upstream na mesma porta e bloqueio de travessia/symlink.
+  - Novo teste em `src/services/__tests__/verticeLauncher.test.ts` (`V6-08`) validando `doctor` com `dist/` ausente, `.env.local` inválido e válido-mas-inacessível (`inacessível`, nunca `URL inválida`), `unverified_pid` sem encerrar PID alheio, passos de recuperação explícitos e ausência de vazamento de `controlToken`.
+- `npm run build` (`vite build`): **OK (1,50s)**.
+- `npm run test:e2e` (`playwright test`, Chrome real): **1/1 aprovado (13,2s)**.
+- `node scripts/vertice-ctl.mjs doctor` (com `VITE_AIONCORE_PROXY_TARGET=http://127.0.0.1:25828` e Core desligado): confirmou `/health: inacessível (ECONNREFUSED)`, separação de diretórios e passo de recuperação para iniciar o binário externo do Core; `node scripts/vertice-ctl.mjs status` confirmou servidor parado (`sem PID rastreado`).
+
+### Evidências reais em extração limpa + build estático + `aioncore.exe v0.2.2` + Chrome
+
+Registradas em `docs/screenshots/v6-08/v608_dist_report.json` e capturas em `docs/screenshots/v6-08/`:
+
+1. **Extração limpa em diretório temporário isolado (`preInstallHasNodeModules: false`, `preBuildHasDist: false`)**:
+   - Instalado com `npm ci --offline` (cache local aquecido; documentado que primeira máquina limpa requer rede), configurado `.env.local` (`VITE_AIONCORE_PROXY_TARGET="http://127.0.0.1:25828"`), construído `dist/` via `npm run build` (`built in`), verificado `doctor` antes do build (apontou `dist/` ausente + passos de recuperação) e com Core ativo (`alcançável (HTTP 200 ...)`), iniciado via `npm run server:start` (`ativo e verificado` em `http://127.0.0.1:4173`).
+2. **Execução real via proxy estático `vertice-server.mjs` (cookies, CSRF, WS `[ws_token]`)**:
+   - Chrome persistente autenticou no WebUI (`admin`), sincronizou catálogo, criou time `01a1ef60-f8b5-7543-b26e-c6e8dd203695` (`Codex gpt-5.6-luna`), conectou WS e executou pedido real com resposta observada **`V608_DIST_REAL_OK`** (`docs/screenshots/v6-08/v608-dist-real-order.png`), `pageErrors: []`.
+3. **Queda e reconexão do Core upstream**:
+   - Parando `aioncore.exe`, o proxy retornou **`HTTP 502`** (`outageHttpStatus: 502`) com mensagem honesta (`docs/screenshots/v6-08/v608-upstream-outage-502.png`) mantendo `vertice-server` ativo (`verticeServerStayedUp: true`); ao reiniciar `aioncore.exe`, reconectou até **`5/5 etapas confirmadas`** (cookie WebUI sobreviveu ao reinício do Core).
+4. **Encerramento controlado, rebuild e reinício preservando dados**:
+   - Fechamento controlado via `npm run server:stop` (`encerrado com segurança` / `status: parado`), rebuild estático simulando atualização (`npm run build`), reinício via `npm run server:start` e reabertura do perfil persistente do Chrome em `http://127.0.0.1:4173`: conversa `"Execucao Dist Real"` e resposta `V608_DIST_REAL_OK` integralmente preservadas, com revalidação silenciosa restaurando **`5/5 etapas confirmadas`** (`docs/screenshots/v6-08/v608-after-restart-5of5.png`) e logs gravados em `.vertice/logs/server.{out,err}.log`.
+
+### Limitações registradas no V6-08 (transparência para auditoria)
+
+- O script de extração limpa (`verify_v6_08_dist.mjs`) revelou `docCoreDownHasRecovery: false` em razão da captura de `TypeError` no `fetch` quando o Core estava desligado; o defeito foi corrigido imediatamente em `scripts/vertice-ctl.mjs` e coberto pelo teste determinístico em `verticeLauncher.test.ts` + execução direta de `vertice-ctl.mjs doctor` contra porta fechada (confirmando `inacessível` + ação de recuperação), sem repetir nova chamada paga ao Codex apenas para regenerar o campo boolean do JSON da rodada.
+- Distribuição validada nativamente no Windows 11 (`Node v24.11.0`); validação real interativa do instalador/serviço em Linux segue coberta pela suíte Vitest multiplataforma e CI.

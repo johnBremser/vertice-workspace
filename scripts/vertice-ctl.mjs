@@ -214,39 +214,128 @@ function getRuntimeConfig(rootDir = defaultRootDir) {
     fileEnv.VITE_AIONCORE_PROXY_TARGET ??
     '',
   ).trim();
-  return { host, port, proxyTarget };
+  const baseUrlEnv = String(
+    process.env.VITE_AIONCORE_BASE_URL ??
+    fileEnv.VITE_AIONCORE_BASE_URL ??
+    '',
+  ).trim();
+  return { host, port, proxyTarget, baseUrlEnv };
 }
 
 async function cmdDoctor(rootDir = defaultRootDir) {
-  const { host, port, proxyTarget } = getRuntimeConfig(rootDir);
+  const { host, port, proxyTarget, baseUrlEnv } = getRuntimeConfig(rootDir);
+  const { stateDir, logsDir, pidFile } = getPaths(rootDir);
   const nodeSupported = isSupportedNodeVersion(process.versions.node);
-  const distIndex = path.join(rootDir, 'dist', 'index.html');
+  const distDir = path.join(rootDir, 'dist');
+  const distIndex = path.join(distDir, 'index.html');
+  const distBuilt = fs.existsSync(distIndex);
   const envLocalExists = fs.existsSync(path.join(rootDir, '.env.local'));
+  const portValid = Number.isInteger(port) && port >= 1 && port <= 65535;
+  const hostLoopback = isLoopbackHost(host);
   const inspection = await inspectTrackedServer(rootDir);
-  const portOccupied = await checkPortInUse(host, port);
+  const portOccupied = portValid ? await checkPortInUse(host, port) : false;
 
+  const recoverySteps = [];
+
+  if (!nodeSupported) {
+    recoverySteps.push(
+      'Node.js fora da faixa suportada: instale ou ative Node ^22.12.0, ^24.x (recomendado) ou >=26.0.0 antes de executar build ou servidor.',
+    );
+  }
+  if (!distBuilt) {
+    recoverySteps.push(
+      'Build estático ausente: execute "npm run build" no diretório raiz antes de rodar "npm run server:start" ou "npm start".',
+    );
+  }
+  if (!hostLoopback && process.env.ALLOW_NON_LOOPBACK !== 'true') {
+    recoverySteps.push(
+      `Host "${host}" não é loopback: ajuste VERTICE_HOST="127.0.0.1" no .env.local (loopback obrigatório por padrão na v1).`,
+    );
+  }
+  if (!portValid) {
+    recoverySteps.push(
+      `Porta configurada inválida (${port}): defina VERTICE_PORT inteiro entre 1 e 65535 no .env.local (padrão: 4173).`,
+    );
+  }
+
+  let proxyTargetValid = true;
+  let proxyLoopback = true;
   let coreHealth = 'não configurado (VITE_AIONCORE_PROXY_TARGET vazio)';
   if (proxyTarget) {
+    let parsedTarget = null;
     try {
-      const targetUrl = new URL('/health', proxyTarget).toString();
-      const res = await fetch(targetUrl, { signal: AbortSignal.timeout(1500) });
-      coreHealth = res.ok
-        ? `alcançável (HTTP ${res.status} em ${targetUrl})`
-        : `respondeu HTTP ${res.status} em ${targetUrl}`;
-    } catch (err) {
-      coreHealth = `inacessível (${err instanceof Error ? err.message : 'erro de rede'})`;
+      parsedTarget = new URL(proxyTarget);
+      if (parsedTarget.protocol !== 'http:' && parsedTarget.protocol !== 'https:') {
+        throw new Error(`esquema "${parsedTarget.protocol}" não suportado`);
+      }
+      proxyLoopback = isLoopbackHost(parsedTarget.hostname);
+    } catch {
+      proxyTargetValid = false;
+      coreHealth = `URL inválida em VITE_AIONCORE_PROXY_TARGET ("${proxyTarget}")`;
+      recoverySteps.push(
+        'Corrija VITE_AIONCORE_PROXY_TARGET em .env.local usando URL HTTP(S) completa, ex.: "http://127.0.0.1:25828".',
+      );
     }
+
+    if (parsedTarget && proxyTargetValid) {
+      const targetUrl = new URL('/health', parsedTarget).toString();
+      try {
+        const res = await fetch(targetUrl, { signal: AbortSignal.timeout(1500) });
+        coreHealth = res.ok
+          ? `alcançável (HTTP ${res.status} em ${targetUrl})`
+          : `respondeu HTTP ${res.status} em ${targetUrl}`;
+        if (!res.ok) {
+          recoverySteps.push(
+            `AionCore respondeu HTTP ${res.status} em ${targetUrl}: verifique logs do Core (--log-dir externo) e reinicie o serviço AionCore separado.`,
+          );
+        }
+      } catch (err) {
+        const errCode =
+          err && typeof err === 'object' && 'cause' in err && err.cause && typeof err.cause === 'object' && 'code' in err.cause
+            ? String(err.cause.code)
+            : '';
+        const detail = errCode || (err instanceof Error ? err.message : 'erro de rede');
+        coreHealth = `inacessível (${detail})`;
+        recoverySteps.push(
+          `AionCore inacessível em ${proxyTarget}: inicie o binário externo AionCore (--identity-mode webui --host 127.0.0.1 --port <PORTA>) ou confira a porta em .env.local.`,
+        );
+      }
+    }
+  } else {
+    recoverySteps.push(
+      'Para operar em Modo AionCore local via proxy de mesma origem, copie .env.example para .env.local e preencha VITE_AIONCORE_PROXY_TARGET="http://127.0.0.1:<PORTA_DO_CORE>" (opcional para Modo Demonstração).',
+    );
+  }
+
+  if (baseUrlEnv && proxyTarget) {
+    recoverySteps.push(
+      `VITE_AIONCORE_BASE_URL está definido como "${baseUrlEnv}": deixe vazio ("") para utilizar o proxy na mesma origem e preservar cookies HttpOnly/CSRF.`,
+    );
+  }
+  if (proxyTargetValid && proxyTarget && !proxyLoopback) {
+    recoverySteps.push(
+      `VITE_AIONCORE_PROXY_TARGET aponta para host não-loopback (${proxyTarget}): na v1 local recomenda-se manter Core e servidor Vértice apenas em 127.0.0.1.`,
+    );
   }
 
   let instanceSummary = 'parado (nenhuma instância registrada)';
   if (inspection.status === 'verified_active') {
     instanceSummary = `ativo e verificado em ${inspection.tracked.origin} (PID ${inspection.tracked.pid}, instância ${inspection.tracked.instanceId})`;
   } else if (inspection.status === 'unverified_pid') {
-    instanceSummary = `NÃO comprovado — PID ${inspection.tracked.pid} está vivo no sistema, mas falhou na verificação de identidade (${inspection.reason})`;
+    instanceSummary = `NÃO comprovado — PID ${inspection.tracked.pid} está vivo no sistema, mas não foi reconhecido como servidor Vértice autenticado (${inspection.reason})`;
+    recoverySteps.push(
+      `PID ${inspection.tracked.pid} em ${pidFile} está vivo mas não respondeu ao token de controle: o launcher NÃO encerrará esse PID alheio. Verifique os processos do SO e, confirmando que não há vertice-server antigo ativo, remova manualmente ${pidFile} ou configure outra VERTICE_PORT livre.`,
+    );
   } else if (inspection.status === 'dead') {
     instanceSummary = `parado (registro obsoleto para PID morto ${inspection.tracked.pid})`;
+    recoverySteps.push(
+      `Registro obsoleto detectado em ${pidFile} (PID ${inspection.tracked.pid} inativo): ele será limpo automaticamente no próximo "server:status", "server:stop" ou "server:start".`,
+    );
   } else if (inspection.status === 'invalid') {
-    instanceSummary = `registro inválido ou legado sem identidade verificável (${inspection.reason})`;
+    instanceSummary = `registro inválido ou legado sem identidade comprovável (${inspection.reason})`;
+    recoverySteps.push(
+      `Registro inválido/legado em ${pidFile}: nenhum processo foi encerrado automaticamente. Confirme que não há processo antigo na porta e remova ${pidFile} antes de iniciar.`,
+    );
   }
 
   const verifiedOwnsConfiguredPort =
@@ -254,31 +343,53 @@ async function cmdDoctor(rootDir = defaultRootDir) {
     inspection.tracked.host === host &&
     inspection.tracked.port === port;
 
+  if (portValid && portOccupied && !verifiedOwnsConfiguredPort) {
+    recoverySteps.push(
+      `Porta ${port} em ${host} ocupada por processo externo não comprovado como instância deste launcher: encerre o serviço externo nessa porta ou ajuste VERTICE_PORT no .env.local.`,
+    );
+  }
+
   console.log('=== Diagnóstico Vértice Workspace (distribuição local) ===');
   console.log(
     `- Node.js: ${process.version} (${nodeSupported ? 'compatível com ^22.12.0 || ^24.0.0 || >=26.0.0' : 'incompatível: exige ^22.12.0 || ^24.0.0 || >=26.0.0'})`,
   );
   console.log(
-    `- Build estático (dist/index.html): ${fs.existsSync(distIndex) ? 'encontrado' : 'ausente (execute npm run build)'}`,
+    `- Build estático (dist/index.html): ${distBuilt ? 'encontrado' : 'ausente (execute npm run build)'}`,
   );
   console.log(
     `- Arquivo .env.local: ${envLocalExists ? 'presente' : 'ausente (opcional para Modo Demonstração)'}`,
   );
   console.log(
-    `- Endereço de escuta: ${host}:${port} (${isLoopbackHost(host) ? 'loopback seguro' : 'NÃO loopback — bloqueado por padrão'})`,
+    `- Endereço de escuta: ${host}:${portValid ? port : 'INVÁLIDO'} (${hostLoopback ? 'loopback seguro' : 'NÃO loopback — bloqueado por padrão'})`,
   );
   console.log(
     `- Proxy AionCore: ${proxyTarget || '(não definido)'} · /health: ${coreHealth}`,
   );
+  if (baseUrlEnv) {
+    console.log(`- VITE_AIONCORE_BASE_URL: ${baseUrlEnv} (aviso: prefira "" com proxy mesma origem)`);
+  }
   console.log(`- Instância registrada: ${instanceSummary}`);
   console.log(
-    `- Porta ${port}: ${portOccupied
-      ? verifiedOwnsConfiguredPort
-        ? `em uso pela instância verificada do Vértice (PID ${inspection.tracked.pid})`
-        : 'ocupada por outro processo não comprovado como instância deste launcher'
-      : 'livre'
+    `- Porta ${portValid ? port : '(inválida)'}: ${!portValid
+      ? 'inválida (não verificada)'
+      : portOccupied
+        ? verifiedOwnsConfiguredPort
+          ? `em uso pela instância verificada do Vértice (PID ${inspection.tracked.pid})`
+          : 'ocupada por outro processo não comprovado como instância deste launcher'
+        : 'livre'
     }`,
   );
+  console.log(
+    `- Separação de diretórios: código/build=${distDir} · controle/logs-web=${stateDir} (${logsDir}) · dados-UI=IndexedDB (navegador) · dados/logs Core=externos (--data-dir/--log-dir)`,
+  );
+  console.log('=== Ações e recuperação ===');
+  if (recoverySteps.length === 0) {
+    console.log('- Tudo pronto para iniciar com "npm run server:start" (ou já ativo e validado).');
+  } else {
+    for (const step of recoverySteps) {
+      console.log(`- ${step}`);
+    }
+  }
 }
 
 async function cmdStart(rootDir = defaultRootDir) {

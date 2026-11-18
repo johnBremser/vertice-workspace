@@ -58,7 +58,8 @@
     "teamId": "01a1ef22-a29f-7190-8c1f-687800235f84",
     "afterTeam": "4/5 etapas confirmadas",
     "afterFirstOrder": "5/5 etapas confirmadas",
-    "afterReloadSteps": "2/5 etapas confirmadas"
+    "afterReloadSteps": "2/5 etapas confirmadas",
+    "addendumNote": "Medido antes do commit 68dfb73 (V6-07 correções). A partir de 68dfb73, probeCoreSessionOnStartup() revalida silenciosamente /health, /api/auth/status e catálogo no reload, restaurando 3/5 (ou 5/5 com equipe e pedido) sem custo de modelo."
   },
   "checks": {
     "uiFinishing": {

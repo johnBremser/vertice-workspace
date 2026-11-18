@@ -4,7 +4,7 @@ Este arquivo registra a evolução técnica do **Vértice Workspace** (*Powered 
 
 ---
 
-## [Não lançado — V6 Local (V6-00 a V6-06 aprovados; V6-07 aguardando auditoria)]
+## [Não lançado — V6 Local (V6-00 a V6-07 aprovados; V6-08 aguardando auditoria)]
 
 ### Instalação, launcher e servidor (`V6-00`, `V6-01`)
 
@@ -27,11 +27,17 @@ Este arquivo registra a evolução técnica do **Vértice Workspace** (*Powered 
 - Importação de backups JSON (`copy` e `replace`) desconectando vínculos externos Core (`importedExternalTeamId`/`importedExternalRef`), sem iniciar execução nem presumir login; capturas e relatório preservados em `docs/screenshots/v6-06/`.
 - Estabilização determinística do fixture WebSocket em `viteProxyConfig.test.ts` e `localServerProxy.test.ts` tratando `ECONNRESET`.
 
-### Acabamento visual e primeiro uso guiado (`V6-07` — em revisão)
+### Acabamento visual e primeiro uso guiado (`V6-07` — aprovado)
 
 - Controles de demonstração agrupados no menu secundário **`Simulação`** (`DemoControlsMenu.tsx`) preservando o marcador discreto `Modo Demonstração` e movendo IDs técnicos (`externalTeamId`, `sourceEventId`, IDs de revisão/permissão) para blocos `<details>` sem perder links de rastreabilidade.
 - Compactação responsiva mobile do cabeçalho, abas e compositor (`WorkspaceHeader.tsx`, `AgentTabs.tsx`, `Composer.tsx`) + fechamento automático do `InspectorDrawer` ao reduzir abaixo de `xl` (`WorkspaceContext.tsx`).
 - Rastreamento real de `coreRuntimeStatus` e invalidação pós-reload (`storage.ts`, `exportService.ts`, `aionCoreAdapter.ts`) com revalidação silenciosa automática de `/health`, `/api/auth/status` e catálogo ao recarregar em modo Core (`WorkspaceContext.tsx`), preservação da sessão viva ao importar backup em modo `copy` (`[P1]`), barra **`Próximo passo`**, tratamento de Core inacessível/sem agentes e filtro de banner residual (`src/App.tsx`); capturas e relatório em `docs/screenshots/v6-07/`.
+
+### Distribuição local, diagnóstico e atualização segura (`V6-08` — em revisão)
+
+- Endurecimento em `scripts/vertice-server.mjs`: validação `realpathSync` em `resolveDistFile()` bloqueando fuga por symlinks dentro de `dist/` e remoção de `x-vertice-control-token` antes do proxy HTTP/WS para o upstream.
+- Expansão de `doctor` em `scripts/vertice-ctl.mjs` com validação de URL/porta, separação explícita entre URL inválida vs Core `inacessível`, aviso para `VITE_AIONCORE_BASE_URL` não vazio junto ao proxy, inventário de separação de diretórios e bloco `Ações e recuperação` sem vazar `controlToken` nem encerrar PIDs alheios.
+- Documentação operacional separando Vértice Workspace, AionCore Local, runtime/requisitos de rede e CLIs/autenticação (`README.md`, `docs/compatibility-matrix.md`), além de guia de atualização/rollback seguro e evidências reais de extração limpa em `docs/screenshots/v6-08/`.
 
 ---
 

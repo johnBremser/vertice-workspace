@@ -163,7 +163,25 @@ function resolveDistFile(distDir, reqUrlPath) {
     return null;
   }
 
+  let realDist = resolvedDist;
+  try {
+    realDist = fs.realpathSync(resolvedDist);
+  } catch {
+    return null;
+  }
+  const realDistPrefix = realDist.endsWith(path.sep)
+    ? realDist
+    : realDist + path.sep;
+
   if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+    try {
+      const realCandidate = fs.realpathSync(candidate);
+      if (realCandidate !== realDist && !realCandidate.startsWith(realDistPrefix)) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
     return { filePath: candidate, isSpaFallback: false };
   }
 
@@ -187,6 +205,7 @@ function forwardHttpRequest(req, res, targetUrl) {
   }
   const client = target.protocol === 'https:' ? https : http;
   const headers = { ...req.headers };
+  delete headers['x-vertice-control-token'];
   // Preserve same-origin semantics (like Vite changeOrigin: false) while forwarding client info
   if (!headers['x-forwarded-host'] && req.headers.host) {
     headers['x-forwarded-host'] = req.headers.host;
@@ -268,6 +287,9 @@ function forwardWebSocketUpgrade(req, clientSocket, head, targetUrl) {
     upstreamSocket.setKeepAlive(true, 15000);
     const rawHeaders = [];
     for (let i = 0; i < req.rawHeaders.length; i += 2) {
+      if (String(req.rawHeaders[i]).toLowerCase() === 'x-vertice-control-token') {
+        continue;
+      }
       rawHeaders.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
     }
     const requestHead =

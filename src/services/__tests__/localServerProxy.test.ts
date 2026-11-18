@@ -445,4 +445,163 @@ describe('Standalone local server & same-origin proxy (V5-07)', () => {
     await new Promise((r) => setTimeout(r, 100));
     expect(shutdownCallbackCalled).toBe(true);
   });
+
+  it('forwards multi Set-Cookie, CSRF and Sec-WebSocket-Protocol, strips control token, handles upstream outages + reconnect, and blocks symlink escape (V6-08)', async () => {
+    const distDir = await createTempDist();
+    const secretDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vertice-secret-'));
+    const secretFile = path.join(secretDir, 'admin-secret.txt');
+    await fs.writeFile(secretFile, 'TOP_SECRET_PASSWORD_DO_NOT_SERVE');
+    cleanups.push(() => fs.rm(secretDir, { recursive: true, force: true }));
+
+    // Best-effort symlink check (on Windows unprivileged accounts symlink creation may throw EPERM)
+    let symlinkCreated = false;
+    try {
+      await fs.symlink(secretFile, path.join(distDir, 'leak.txt'));
+      symlinkCreated = true;
+    } catch {
+      symlinkCreated = false;
+    }
+
+    // Reserve and close a port for upstream-down phase, then rebind on the SAME port for reconnect!
+    const upstreamPort = await new Promise<number>((resolve, reject) => {
+      const srv = http.createServer();
+      srv.once('error', reject);
+      srv.listen(0, '127.0.0.1', () => {
+        const addr = srv.address();
+        const p = typeof addr === 'object' && addr ? addr.port : 0;
+        srv.close(() => resolve(p));
+      });
+    });
+
+    const proxy = await startVerticeServer({
+      rootDir: REPO_ROOT,
+      distDir,
+      host: '127.0.0.1',
+      port: 0,
+      proxyTarget: `http://127.0.0.1:${upstreamPort}`,
+    });
+    cleanups.push(() => proxy.close());
+
+    // 1. Arbitrary file traversal & symlink escape blocked while static SPA stays 200
+    const travRes = await fetch(`${proxy.origin}/..%2fpackage.json`);
+    expect(travRes.status).toBe(404);
+    if (symlinkCreated) {
+      const symRes = await fetch(`${proxy.origin}/leak.txt`);
+      expect(symRes.status).toBe(404);
+      expect(await symRes.text()).not.toContain('TOP_SECRET_PASSWORD');
+    }
+
+    // 2. Upstream Core down -> clean 502 JSON on /health and WS upgrade rejected cleanly, SPA still 200
+    const downHealth = await fetch(`${proxy.origin}/health`);
+    expect(downHealth.status).toBe(502);
+    expect(await downHealth.json()).toMatchObject({ success: false });
+
+    const wsDownFailed = await new Promise<boolean>((resolve) => {
+      const ws = new WebSocket(`${proxy.origin.replace('http://', 'ws://')}/ws`, ['ws_tok_v608']);
+      ws.addEventListener('error', () => resolve(true));
+      ws.addEventListener('open', () => {
+        ws.close();
+        resolve(false);
+      });
+    });
+    expect(wsDownFailed).toBe(true);
+
+    const spaWhileUpstreamDown = await fetch(`${proxy.origin}/`);
+    expect(spaWhileUpstreamDown.status).toBe(200);
+    expect(await spaWhileUpstreamDown.text()).toContain('Vertice SPA');
+
+    // 3. Upstream comes online on the same port -> cookies, CSRF, control-token stripping & WS subprotocol succeed
+    let observedControlHeader: string | string[] | undefined;
+    let observedWsProtocol: string | undefined;
+    const sockets = new Set<import('node:stream').Duplex>();
+    const coreSrv = http.createServer((req, res) => {
+      observedControlHeader = req.headers['x-vertice-control-token'];
+      if (req.url === '/login' && req.method === 'POST') {
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Set-Cookie': [
+            'aionui-session=sess_v608; Path=/; HttpOnly',
+            'aionui-csrf-token=csrf_v608; Path=/',
+          ],
+        });
+        res.end(JSON.stringify({ success: true }));
+        return;
+      }
+      if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', version: '0.2.2' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true }));
+    });
+    coreSrv.on('connection', (s) => {
+      sockets.add(s);
+      s.on('error', () => {});
+      s.once('close', () => sockets.delete(s));
+    });
+    coreSrv.on('upgrade', (req, socket) => {
+      sockets.add(socket);
+      socket.on('error', () => {});
+      socket.once('close', () => sockets.delete(socket));
+      observedControlHeader = req.headers['x-vertice-control-token'];
+      observedWsProtocol = req.headers['sec-websocket-protocol'];
+      const key = req.headers['sec-websocket-key'];
+      const accept = crypto
+        .createHash('sha1')
+        .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+        .digest('base64');
+      socket.write(
+        [
+          'HTTP/1.1 101 Switching Protocols',
+          'Upgrade: websocket',
+          'Connection: Upgrade',
+          `Sec-WebSocket-Accept: ${accept}`,
+          `Sec-WebSocket-Protocol: ${observedWsProtocol}`,
+          '',
+          '',
+        ].join('\r\n'),
+      );
+      const payload = Buffer.from(JSON.stringify({ name: 'reconnected.ok' }));
+      const frame = Buffer.alloc(2 + payload.length);
+      frame[0] = 0x81;
+      frame[1] = payload.length;
+      payload.copy(frame, 2);
+      socket.write(frame);
+    });
+    await new Promise<void>((resolve) => coreSrv.listen(upstreamPort, '127.0.0.1', () => resolve()));
+    cleanups.push(
+      () =>
+        new Promise<void>((resolve) => {
+          for (const s of sockets) s.destroy();
+          coreSrv.closeAllConnections?.();
+          coreSrv.close(() => resolve());
+        }),
+    );
+
+    const upHealth = await fetch(`${proxy.origin}/health`);
+    expect(upHealth.status).toBe(200);
+
+    const loginRes = await fetch(`${proxy.origin}/login`, {
+      method: 'POST',
+      headers: { 'X-Vertice-Control-Token': 'must-not-forward-to-core' },
+    });
+    expect(loginRes.status).toBe(200);
+    expect(observedControlHeader).toBeUndefined();
+    const setCookies = loginRes.headers.getSetCookie();
+    expect(setCookies.some((c) => c.includes('aionui-session=sess_v608'))).toBe(true);
+    expect(setCookies.some((c) => c.includes('aionui-csrf-token=csrf_v608'))).toBe(true);
+
+    const wsConnected = await new Promise<{ protocol: string; data: string }>((resolve, reject) => {
+      const ws = new WebSocket(`${proxy.origin.replace('http://', 'ws://')}/ws`, ['ws_tok_v608']);
+      ws.addEventListener('message', (ev) => {
+        resolve({ protocol: ws.protocol, data: String(ev.data) });
+        ws.close();
+      });
+      ws.addEventListener('error', () => reject(new Error('WS reconnect failed')));
+    });
+    expect(observedWsProtocol).toBe('ws_tok_v608');
+    expect(wsConnected.protocol).toBe('ws_tok_v608');
+    expect(JSON.parse(wsConnected.data)).toMatchObject({ name: 'reconnected.ok' });
+  });
 });

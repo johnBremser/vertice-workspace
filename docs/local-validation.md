@@ -32,9 +32,10 @@ npm run test:e2e
    VITE_AIONCORE_PROXY_TARGET="http://127.0.0.1:<PORTA_REAL_DO_CORE>"
    ```
 3. Escolha o modo de execução local:
-   - **Distribuição estática reproduzível (`V5-07`)**: execute `npm run build && npm run server:doctor && npm run server:start` e abra `http://127.0.0.1:4173` (ao terminar, encerre com `npm run server:stop`).
+   - **Distribuição estática reproduzível (`V6-08`)**: execute `npm run build && npm run server:doctor && npm run server:start` e abra `http://127.0.0.1:4173` (ao terminar, encerre com `npm run server:stop`).
    - **Desenvolvimento**: execute `npm run dev` e abra `http://localhost:3000`.
-4. Abra **Configurações** e siga a lista **Preparação guiada para operação real**:
+4. Consulte `docs/v6-09-release-candidate.md` para ver o mapeamento completo dos 10 cenários validados e suas evidências.
+5. Abra **Configurações** e siga a lista **Preparação guiada para operação real**:
    - Em **Modo de operação**, selecione **Modo AionCore local**.
    - Confirme `Base URL` vazio (para usar o proxy de mesma origem) e informe o caminho do workspace local desejado.
 

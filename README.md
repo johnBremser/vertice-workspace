@@ -1,6 +1,7 @@
 # Vértice Workspace
 
-Plano ativo de conclusão local: [Plano v6](docs/implementation_plan_v6_local.md). Instrução ao executor: [hydrogen-local-v6.txt](docs/hydrogen-local-v6.txt). Progresso: [v6-progress.md](docs/v6-progress.md). O ciclo do AI Studio foi encerrado; a base atual ainda requer as correções e validações reais registradas nesses documentos.
+Plano ativo: [Plano v6](docs/implementation_plan_v6_local.md) · Progresso: [docs/v6-progress.md](docs/v6-progress.md) · Candidata funcional: [docs/v6-09-release-candidate.md](docs/v6-09-release-candidate.md) · Avisos e licenças: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).  
+Estado do pacote: `0.4.0` (pré-lançamento `v1.0.0` **não declarada**). A combinação suportada (`AionCore v0.2.2` + `Codex CLI` multi-sessão + `Cursor`) possui prontidão funcional validada no Windows 11; consulte as limitações conhecidas em [docs/compatibility-matrix.md](docs/compatibility-matrix.md).
 
 > **Seu time de agentes, do plano à entrega.**  
 > *Powered by AionCore*
@@ -91,7 +92,7 @@ npm run server:start
 
 - **Loopback obrigatório por padrão**: `scripts/vertice-server.mjs` vincula-se exclusivamente a `127.0.0.1:4173` (aceita apenas loopback; ajuste a porta com `VERTICE_PORT` ou `PORT` em `.env.local`). Sem abertura de firewall, bind público, acesso remoto ou relaxamento de CORS/CSRF/autenticação.
 - **Dados preservados na atualização**: execute `npm run server:stop`, atualize o código, rode `npm ci && npm run build`, confira `npm run server:doctor` e suba com `npm run server:start`. Essa rotina **não apaga** o histórico do navegador (IndexedDB `aion_desk_storage`), backups JSON exportados, nem `core-data`, `core-work`, `core-logs` ou credenciais dos CLIs/WebUI.
-- **Retorno à versão anterior (rollback)**: utilize exclusivamente commits ou tags reais do histórico Git (`git log --oneline`, por exemplo os checkpoints `40f39f8` ou `68dfb73`), reconstrua `dist/` (`npm ci && npm run build`) e reinicie (`server:stop` / `server:start`). Se houver alteração de esquema local, importe o backup JSON prévio pelo botão **Exportar / Backup** (sem credenciais).
+- **Retorno à versão anterior (rollback)**: utilize exclusivamente commits ou tags reais do histórico Git (`git log --oneline`, por exemplo os checkpoints `40f39f8`, `68dfb73`, `a1f7dd4` ou `752deed`), reconstrua `dist/` (`npm ci && npm run build`) e reinicie (`server:stop` / `server:start`). Se houver alteração de esquema local, importe o backup JSON prévio pelo botão **Exportar / Backup** (sem credenciais).
 - Fechar todas as abas do navegador interrompe a coordenação pela UI (a v1 web não roda como daemon em segundo plano); ao reabrir, sinais ao vivo (`/health`, sessão e catálogo) são revalidados automaticamente e o trabalho aceito pelo Core é reconstruído via catch-up.
 
 ---
@@ -110,13 +111,16 @@ VITE_AIONCORE_PROXY_TARGET="http://127.0.0.1:<PORTA_DO_SEU_CORE>"
 4. Inicie `npm run build && npm run server:start` (ou `npm run dev` em desenvolvimento). Tanto o proxy do Vite quanto `scripts/vertice-server.mjs` encaminham `/api`, `/health`, `/login`, `/logout` e `/ws` preservando cookies e tokens CSRF na mesma origem.
 5. Na interface, acesse **Configurações → Modo de operação → Modo AionCore local** e siga a lista de 5 etapas (**Preparação guiada para operação real**).
 
-Consulte os guias detalhados em `docs/`:
-- `docs/architecture.md` — Entidades, fluxos, fronteiras e persistência.
-- `docs/aioncore-integration.md` — Contratos `v0.2.2`, mapa de IDs, auth/CSRF/WS e pendências.
-- `docs/compatibility-matrix.md` — Versões suportadas, auditoria de dependências/bundle e limitações da v1.
-- `docs/local-validation.md` — Roteiro passo a passo para testes reais com Codex, Antigravity e preset Terra/Sol/Gemini.
-- `docs/local-handoff.md` — Pendências exclusivamente locais com evidência exigida e teste de fechamento.
-- `docs/v5-progress.md` — Registro atualizado dos marcos `V5-00` a `V5-08` (e `docs/v4-progress.md` como registro histórico).
+Consulte os guias detalhados e licenças:
+- `docs/architecture.md` — Entidades, fluxos, fronteiras, servidor local e persistência.
+- `docs/aioncore-integration.md` — Contratos `v0.2.2`, mapa de IDs, auth/CSRF/WS e evidências reais vs pendências opcionais.
+- `docs/compatibility-matrix.md` — Versões suportadas, auditoria de dependências/bundle, ACL/rede e limitações conhecidas.
+- `docs/local-validation.md` — Roteiro passo a passo para validação local com Codex, Cursor e Antigravity.
+- `docs/v6-09-release-candidate.md` — Consolidação dos 10 cenários da candidata funcional e distinção prontidão × publicação × `v1.0.0`.
+- `docs/v6-progress.md` — Progresso completo do ciclo v6 (`V6-00` a `V6-10`), além dos registros históricos `docs/v4-progress.md` e `docs/v5-progress.md`.
+- `CHANGELOG.md` e `THIRD_PARTY_NOTICES.md` — Histórico de mudanças e atribuições Apache-2.0 (`AionUi`, `AionCore`).
+
+> **Publicação e CI**: o workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) executa `lint`, `build`, `test` (`70` testes em `ubuntu-latest` Node 22/24 e `windows-latest` Node 24) e Playwright E2E em `ubuntu-latest`. Após publicar em remoto (`git push -u origin main`), observe a execução da CI no GitHub Actions antes de declarar qualquer release ou tag.
 
 ---
 

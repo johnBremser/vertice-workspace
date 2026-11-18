@@ -322,9 +322,10 @@ describe('Launcher identity & lifecycle safety (V6-00)', () => {
         encoding: 'utf8',
         windowsHide: true,
       });
-      // Inheritance removed (/inheritance:r) so inherited Users/Everyone ACEs do not remain (V6-09 P3 fix)
+      // Inheritance removed (/inheritance:r) and owner granted Full Control (includes Delete) so rmSync never hits EPERM outside %TEMP% (V6-09/V6-10 fix)
       expect(aclOut).not.toMatch(/\(I\)/);
       expect(aclOut).not.toMatch(/Everyone|BUILTIN\\Users/i);
+      expect(aclOut).toMatch(/:\((?:F|[^)]*D[^)]*)\)|:F/);
     }
     const meta1 = JSON.parse(metaRaw) as {
       pid: number;

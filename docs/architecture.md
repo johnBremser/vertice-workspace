@@ -100,8 +100,9 @@ Este documento descreve a organização técnica do **Vértice Workspace** (*Pow
 
 ---
 
-## 5. Onde trocar ou estender a integração
+## 5. Onde trocar ou estender a integração e distribuição local
 
 - **Contrato principal**: `src/services/gateway.ts` (`AgentWorkspaceGateway`).
-- **Fábrica de modo**: `src/features/workspace/WorkspaceContext.tsx` instancia `MockWorkspaceGateway` (`demo`) ou `AionCoreAdapter` (`aion_core`) via `WorkspaceGatewayFactory`, mantendo o modo `aion_core` isolado de timers de simulação.
+- **Fábrica de modo e revalidação inicial**: `src/features/workspace/WorkspaceContext.tsx` instancia `MockWorkspaceGateway` (`demo`) ou `AionCoreAdapter` (`aion_core`) via `WorkspaceGatewayFactory`, mantendo o modo `aion_core` isolado de timers de simulação e executando `probeCoreSessionOnStartup()` silenciosamente ao recarregar em modo Core.
 - **Transporte HTTP/CSRF/WS**: `src/services/aionCoreTransport.ts` e `src/services/aionCoreDtos.ts`.
+- **Servidor estático e launcher local**: `scripts/vertice-server.mjs` (proxy de mesma origem em loopback, stripping de `x-vertice-control-token` e proteção `realpathSync` contra symlinks em `dist/`) e `scripts/vertice-ctl.mjs` (identidade autenticada, ACL restritiva no Windows em `.vertice/server.json` via `icacls /inheritance:r` e comando `doctor` com passos de recuperação).

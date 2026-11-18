@@ -4,7 +4,7 @@ Este arquivo registra a evolução técnica do **Vértice Workspace** (*Powered 
 
 ---
 
-## [Não lançado — V6 Local (V6-00 a V6-08 aprovados; V6-09 aguardando auditoria)]
+## [Não lançado — V6 Local (V6-00 a V6-09 aprovados; V6-10 concluído localmente)]
 
 ### Instalação, launcher e servidor (`V6-00`, `V6-01`)
 
@@ -39,11 +39,18 @@ Este arquivo registra a evolução técnica do **Vértice Workspace** (*Powered 
 - Expansão de `doctor` em `scripts/vertice-ctl.mjs` com validação de URL/porta, separação explícita entre URL inválida vs Core `inacessível`, aviso para `VITE_AIONCORE_BASE_URL` não vazio junto ao proxy, inventário de separação de diretórios e bloco `Ações e recuperação` sem vazar `controlToken` nem encerrar PIDs alheios.
 - Documentação operacional separando Vértice Workspace, AionCore Local, runtime/requisitos de rede e CLIs/autenticação (`README.md`, `docs/compatibility-matrix.md`), além de guia de atualização/rollback seguro e evidências reais de extração limpa em `docs/screenshots/v6-08/`.
 
-### Validação integrada e candidata funcional (`V6-09` — em revisão)
+### Validação integrada e candidata funcional (`V6-09` — aprovado)
 
 - Hardening de ACL no Windows em `.vertice/server.json` via `restrictPrivateFileAcl()` (`scripts/vertice-ctl.mjs`, removendo permissões herdadas com `icacls /inheritance:r`) + verificação em `verticeLauncher.test.ts` (`[P3]` do parecer V6-08).
 - Incorporação de payloads reais sanitizados do `AionCore v0.2.2` em `src/services/__tests__/fixtures/coreV022RealPayloads.ts` e regressão integrada em `aionCoreAdapter.test.ts` (`team.childTurnStarted` ↔ `message.stream`, `tips`, `ConfirmRequest`, `PATCH .../model` e isolamento entre abas).
 - Relatório consolidado dos 10 itens do roteiro de validação em `docs/v6-09-release-candidate.md` distinguindo prontidão funcional local de publicação e declaração futura de `v1.0.0`.
+
+### Versionamento, higiene de repositório e documentação final (`V6-10` — pronto para publicação)
+
+- Correção em `restrictPrivateFileAcl()` (`scripts/vertice-ctl.mjs`) concedendo permissão completa `:F` exclusivamente ao proprietário (evitando `EPERM` ao excluir `.vertice/server.json` fora de `%TEMP%`), verificada ao vivo no repositório.
+- Desversionado `data/aionui-backend.db` e `data/aionui-backend.db.migrate.lock` do índice Git (`git rm --cached`) e adicionadas exclusões `data/`, `*.db` e `*.db.*` em `.gitignore`.
+- Adicionados `THIRD_PARTY_NOTICES.md` (atribuições Apache-2.0 de `AionUi` e `AionCore`) e evidências da candidata em `docs/screenshots/v6-09/` (`v609-candidate-live-settings.png`, `v609_candidate_report.json`).
+- Revisão e alinhamento completo de `README.md`, `docs/architecture.md`, `docs/aioncore-integration.md`, `docs/local-validation.md`, `docs/local-handoff.md` e `docs/v6-progress.md` para entrada pública sem declarar `v1.0.0`.
 
 ---
 

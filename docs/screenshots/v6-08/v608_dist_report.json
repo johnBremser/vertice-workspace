@@ -1,6 +1,6 @@
 {
   "startedAt": "2026-11-18T15:56:55.394Z",
-  "extractedDir": "C:\\Users\\JOAO~1.GON\\AppData\\Local\\Temp\\vertice-v608-clean",
+  "extractedDir": "%TEMP%\\vertice-v608-clean",
   "steps": {
     "cleanExtract": {
       "preInstallHasNodeModules": false,

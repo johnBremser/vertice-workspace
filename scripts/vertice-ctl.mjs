@@ -38,7 +38,7 @@ export function restrictPrivateFileAcl(filePath) {
     const principal = domain ? `${domain}\\${username}` : username;
     execFileSync(
       'icacls',
-      [filePath, '/inheritance:r', '/grant:r', `${principal}:(R,W)`],
+      [filePath, '/inheritance:r', '/grant:r', `${principal}:F`],
       { windowsHide: true, stdio: 'ignore' },
     );
     return { applied: true, platform: 'win32', principal };

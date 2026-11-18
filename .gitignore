@@ -11,6 +11,9 @@ playwright-report/
 !.env.example
 .aistudio/
 .vertice/
+data/
+*.db
+*.db.*
 .eslintcache
 server.js
 

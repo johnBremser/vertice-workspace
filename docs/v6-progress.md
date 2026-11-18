@@ -367,8 +367,8 @@ Relatório JSON e capturas preservadas no repositório em `docs/screenshots/v6-0
 - V6-06 — Contexto/sessões/dados/recuperação: **aprovado pelo auditor (18/11/2026)**, com higiene de CI (`viteProxyConfig.test.ts`) e correções documentais/evidências aplicadas em seguida.
 - V6-07 — Acabamento/primeiro uso: **aprovado pelo auditor (18/11/2026)** (checkpoint `68dfb73`; adendo de defasagem registrado em `docs/screenshots/v6-07/v607_report.json`).
 - V6-08 — Distribuição/operação: **aprovado pelo auditor (18/11/2026)** (`a1f7dd4`; `[P2]` de numeração do `README.md` corrigido e `[P3]` ACL Windows tratado no V6-09).
-- V6-09 — Validação integrada/release: **concluído (aguardando revisão do auditor antes de avançar ao V6-10)**.
-- V6-10 — Versionamento/GitHub/documentação: pendente; remoto não definido nesta entrega.
+- V6-09 — Validação integrada/release: **aprovado pelo auditor (18/11/2026)** (`752deed`).
+- V6-10 — Versionamento/GitHub/documentação: **concluído localmente e pronto para publicação** (`origin` em `johnBremser/vertice-workspace.git` configurado; aguardando confirmação do usuário para `git push` e observação da CI remota).
 
 ---
 
@@ -511,3 +511,31 @@ Registradas em `docs/screenshots/v6-08/v608_dist_report.json` e capturas em `doc
 
 - Não foi executada nova rodada paga aos modelos nesta etapa porque as alterações de código do V6-09 restringiram-se à ACL Windows de `.vertice/server.json` e à incorporação dos payloads reais sanitizados nas fixtures/testes; os 10 casos do roteiro reúnem as execuções reais comprovadas de `V6-01`..`V6-08` combinadas à revalidação integral da suíte determinística na candidata atual.
 - Permanecem documentados na matriz: ciclo completo de 3 tarefas no provedor opcional `Antigravity` (`agy.exe`), política conservadora `always_allow: false` e execução interativa direta em Linux.
+
+---
+
+## Etapa V6-10 — Versionamento, GitHub e documentação (concluída localmente)
+
+### Escopo e alterações implementadas
+
+1. **Higiene de rastreamento Git e exclusões obrigatórias (`.gitignore`, `git rm --cached`)**:
+   - Removidos do índice Git os arquivos de banco legado `data/aionui-backend.db` (774 KB) e `data/aionui-backend.db.migrate.lock` (que estavam versionados desde o commit inicial `1229ebb`), adicionando `data/`, `*.db` e `*.db.*` ao `.gitignore`.
+   - Sanitizado `"extractedDir"` em `docs/screenshots/v6-08/v608_dist_report.json` (`%TEMP%\vertice-v608-clean`) removendo referência a caminho curto pessoal.
+   - Mantidos fora do controle de versão: `.env.local`, credenciais (`local-admin-password.txt`), cookies, `.vertice/`, `node_modules/`, `dist/`, `.vitest/`, `test-results/` e binários de runtime.
+
+2. **Correção real de ACL no Windows descoberta durante captura da candidata (`scripts/vertice-ctl.mjs`, `verticeLauncher.test.ts`)**:
+   - Ao executar a captura da candidata no diretório raiz (`docs/screenshots/v6-09/v609-candidate-live-settings.png`), `icacls /inheritance:r /grant:r "<usuario>:(R,W)"` causou `EPERM` no `fs.rmSync(.vertice/server.json)` porque `.vertice/` no diretório do repositório não concedia `DELETE_CHILD` herdado (diferente de `%TEMP%`).
+   - Corrigido em `restrictPrivateFileAcl()` para `${principal}:F` (controle completo apenas ao proprietário, removendo todas as ACEs herdadas) e comprovado por `vertice-ctl start → icacls (.vertice\server.json -> STARS\joao.gonzales:(F)) → vertice-ctl stop → status (parado)` + asserção explícita em `verticeLauncher.test.ts`.
+
+3. **Evidência da candidata V6-09/V6-10 (`docs/screenshots/v6-09/`)**:
+   - Anexados `docs/screenshots/v6-09/v609-candidate-live-settings.png` (Chrome real conectado ao `aioncore.exe v0.2.2` via `vertice-server.mjs`, `3/5 etapas confirmadas`, 28 assistentes / 43 agentes no catálogo, sem chamadas pagas a modelo) e `docs/screenshots/v6-09/v609_candidate_report.json`.
+
+4. **Licenças, atribuições e alinhamento integral de documentação**:
+   - Criado `THIRD_PARTY_NOTICES.md` preservando atribuições **Apache-2.0** (`AionUi 2.2.2` `e108b6b5`, `AionCore v0.2.2` `503a8719`) e inventário de licenças npm/Node.
+   - Atualizados `README.md`, `CHANGELOG.md`, `docs/architecture.md`, `docs/aioncore-integration.md`, `docs/compatibility-matrix.md`, `docs/local-validation.md` e `docs/local-handoff.md` alinhando com o estado real verificado (`0.4.0`, `v1.0.0` não declarada, `70/70` Vitest, `data/` excluído).
+
+### Estado do remoto GitHub e pendências administrativas (`Node v24.11.0`)
+
+- Histórico Git local verificado e contínuo: `1229ebb` → `40f39f8` → `68dfb73` → `a1f7dd4` → `752deed` → checkpoint V6-10.
+- Remoto configurado: `origin = https://johnBremser@github.com/johnBremser/vertice-workspace.git` (`git ls-remote --heads origin` alcançável; `origin/main` atualmente em `1229ebb`).
+- `gh` CLI não está instalado neste terminal; conforme regra do plano, o push para o remoto (`git push -u origin main`) e a observação subsequente da CI no GitHub Actions (`.github/workflows/ci.yml`: `ubuntu-latest` Node 22/24, `windows-latest` Node 24 e E2E) ficam prontos aguardando confirmação explícita do usuário para publicar no remoto. (Nota: caso deseje expurgar `data/aionui-backend.db` também do histórico anterior `1229ebb`, será necessário `git filter-repo` antes ou com force-push explícito autorizado pelo usuário.)

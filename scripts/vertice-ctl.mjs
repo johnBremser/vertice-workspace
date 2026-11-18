@@ -1,7 +1,8 @@
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isLoopbackHost, loadEnvFiles } from './vertice-server.mjs';
@@ -25,6 +26,29 @@ export function isSupportedNodeVersion(versionString = process.versions.node) {
   if (major === 22) return minor >= 12;
   if (major === 24) return true;
   return major >= 26;
+}
+
+export function restrictPrivateFileAcl(filePath) {
+  if (process.platform !== 'win32') {
+    return { applied: true, platform: process.platform };
+  }
+  try {
+    const username = os.userInfo().username;
+    const domain = String(process.env.USERDOMAIN || '').trim();
+    const principal = domain ? `${domain}\\${username}` : username;
+    execFileSync(
+      'icacls',
+      [filePath, '/inheritance:r', '/grant:r', `${principal}:(R,W)`],
+      { windowsHide: true, stdio: 'ignore' },
+    );
+    return { applied: true, platform: 'win32', principal };
+  } catch (err) {
+    return {
+      applied: false,
+      platform: 'win32',
+      reason: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 function getPaths(rootDir = defaultRootDir) {
@@ -522,6 +546,7 @@ async function cmdStart(rootDir = defaultRootDir) {
   fs.writeFileSync(pidFile, JSON.stringify(expectedMetadata, null, 2), {
     mode: 0o600,
   });
+  restrictPrivateFileAcl(pidFile);
   console.log(
     `Servidor iniciado e verificado em ${origin} (PID rastreado: ${child.pid}, instância: ${instanceId}).`,
   );

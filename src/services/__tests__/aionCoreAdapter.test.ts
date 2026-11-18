@@ -7,6 +7,16 @@ import {
   MemoryOnlyStorageDriver,
   WorkspacePersistenceManager,
 } from '../storage';
+import {
+  REAL_CORE_AGENTS_MANAGEMENT_V022,
+  REAL_CORE_ASSISTANTS_V022,
+  REAL_CORE_AUTH_STATUS_V022,
+  REAL_CORE_HEALTH_V022,
+  buildRealCapturedConversationMessagesResponse,
+  buildRealMessageStreamFrame,
+  buildRealSlotWorkChangedEvent,
+  buildRealTeamChildTurnEvent,
+} from './fixtures/coreV022RealPayloads';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -5553,6 +5563,276 @@ describe('AionCoreAdapter HTTP/CSRF/Refresh/WS & Collaboration Pipeline integrat
     });
     expect(adapter.getStateSnapshot().coreRuntimeStatus).toBe('unknown');
     expect(adapter.getStateSnapshot().coreSessionAuthenticated).toBe(false);
+
+    adapter.dispose();
+  });
+
+  it('V6-09: processa payloads reais sanitizados do AionCore v0.2.2 (childTurnStarted <-> message.stream, tips, ConfirmRequest, PATCH /model e slot_messages catch-up)', async () => {
+    const sockets: MockSocket[] = [];
+    let patchedModelId: string | undefined;
+    const confirmPayloads: unknown[] = [];
+
+    const teamId = '01a1ef60-f8b5-7543-b26e-c6e8dd203695';
+    const slotLead = '01a1ef5d-0925-7a10-9f35-0b5b7f4c5b63';
+    const slotExec = '01a1ef5d-0a9d-7762-9ca5-8f1c82c20326';
+    const extLead = '6dfc3ce4';
+    const extExec = '89ab12cd';
+
+    const fetchFn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (url.endsWith('/health')) {
+        return jsonResponse(REAL_CORE_HEALTH_V022);
+      }
+      if (url.endsWith('/api/auth/status')) {
+        return jsonResponse(REAL_CORE_AUTH_STATUS_V022);
+      }
+      if (url.endsWith('/api/agents/management')) {
+        return jsonResponse({ success: true, data: REAL_CORE_AGENTS_MANAGEMENT_V022 });
+      }
+      if (url.endsWith('/api/assistants')) {
+        return jsonResponse({ success: true, data: REAL_CORE_ASSISTANTS_V022 });
+      }
+      if (url.endsWith('/api/ws-token')) {
+        return jsonResponse({ ws_token: 'ws_tok_v609_real_shape', expires_in: 300 });
+      }
+      if (url.endsWith('/api/teams') && method === 'POST') {
+        return jsonResponse(
+          {
+            success: true,
+            data: {
+              id: teamId,
+              name: 'Execucao Dist Real',
+              workspace: 'C:/sandbox/vertice-workspace',
+              lead_slot_id: slotLead,
+              assistants: [
+                { slot_id: slotLead, conversation_id: extLead, role: 'lead', name: 'Terra 6.1', model: 'gpt-5.6-luna' },
+                { slot_id: slotExec, conversation_id: extExec, role: 'teammate', name: 'Gemini Hydrogen', model: 'gpt-5.6-luna' },
+              ],
+            },
+          },
+          201,
+        );
+      }
+      if (url.endsWith(`/api/teams/${teamId}/agents/${slotExec}/model`) && method === 'PATCH') {
+        const parsed = JSON.parse(String(init?.body || '{}')) as { model_id?: string };
+        patchedModelId = parsed.model_id;
+        return jsonResponse({ success: true, data: { slot_id: slotExec, model_id: parsed.model_id } });
+      }
+      if (url.includes('/confirmations/') && url.endsWith('/confirm') && method === 'POST') {
+        confirmPayloads.push(JSON.parse(String(init?.body || '{}')));
+        return jsonResponse({ success: true });
+      }
+      if (url.endsWith(`/api/teams/${teamId}/messages`) && method === 'POST') {
+        return jsonResponse({
+          success: true,
+          data: {
+            message_id: '01a1ef5d-1242-75c2-a185-6e0e21fb778d',
+            enqueue_status: 'started',
+            team_run_id: '01a1ef5d-1242-75c2-a185-6de505cbfa45',
+          },
+        });
+      }
+      if (url.endsWith(`/api/teams/${teamId}/run-state`)) {
+        return jsonResponse({
+          success: true,
+          data: {
+            team_id: teamId,
+            active_run: null,
+            slot_work: [],
+          },
+        });
+      }
+      if (url.endsWith(`/api/teams/${teamId}/mailbox`)) {
+        return jsonResponse({ success: true, data: [] });
+      }
+      if (url.endsWith(`/api/teams/${teamId}/tasks`)) {
+        return jsonResponse({ success: true, data: [] });
+      }
+      if (url.includes(`/api/teams/${teamId}/activity`)) {
+        return jsonResponse({ success: true, data: { items: [], has_more: false } });
+      }
+      if (url.includes(`/api/conversations/${extLead}/messages`)) {
+        return jsonResponse(
+          buildRealCapturedConversationMessagesResponse({
+            extConvId: extLead,
+            turnId: '01a1ef5d-19f2-7210-8b84-12d2098879f8',
+            replyText: 'V609_REAL_SHAPE_VERIFIED',
+          }),
+        );
+      }
+      return jsonResponse({ success: true, data: {} });
+    };
+
+    const persistence = new WorkspacePersistenceManager(new MemoryOnlyStorageDriver());
+    const adapter = new AionCoreAdapter(persistence, {
+      baseUrl: 'http://127.0.0.1:25828',
+      fetchFn,
+      wsFactory: (url, protocols) => {
+        const s = new MockSocket(url, protocols);
+        sockets.push(s);
+        return s;
+      },
+      readCookie: () => 'csrf_v609',
+    });
+
+    await adapter.loadWorkspace();
+    await adapter.checkHealth();
+    await adapter.checkAuthStatus();
+    await adapter.refreshCoreCatalog();
+
+    const project = await adapter.createProject({
+      name: 'Projeto Real Shape',
+      description: 'Validar payloads reais v0.2.2',
+      workspacePathInfo: 'C:/sandbox/vertice-workspace',
+    });
+    const conv = await adapter.createConversation({
+      projectId: project.id,
+      title: 'Conversa Real V6-09',
+    });
+    const leadPart = conv.participants.find((p) => p.role === 'coordinator')!;
+    const execPart = conv.participants.find((p) => p.role === 'executor')!;
+
+    await adapter.createCoreTeamForConversation(conv.conversation.id);
+    await adapter.connectWebSocket(conv.conversation.id);
+    await new Promise((r) => setTimeout(r, 15));
+    const ws = sockets[sockets.length - 1];
+
+    // 1. Live PATCH .../model promotion matches Core snake_case model_id contract
+    await adapter.configureParticipant({
+      conversationId: conv.conversation.id,
+      participantId: execPart.id,
+      displayName: execPart.displayName,
+      roles: execPart.roles,
+      connectionId: execPart.connectionId,
+      modelRef: {
+        externalId: 'gpt-5.6-luna',
+        displayName: 'GPT-5.6-Luna',
+        source: 'core_catalog',
+        confirmation: 'confirmed',
+      },
+      instructions: execPart.instructions,
+    });
+    expect(patchedModelId).toBe('gpt-5.6-luna');
+
+    // 2. Real team.slotWorkChanged (blocked/runtime_starting) + team.childTurnStarted <-> message.stream <-> team.childTurnCompleted
+    await adapter.sendMessage({
+      conversationId: conv.conversation.id,
+      targetTab: 'general',
+      bodyMarkdown: 'Teste real v0.2.2',
+    });
+
+    const leadTurnId = '01a1ef5d-19f2-7210-8b84-12d2098879f8';
+    ws.emitMessage(
+      buildRealSlotWorkChangedEvent({
+        teamId,
+        slotId: slotLead,
+        state: 'blocked',
+        reason: 'runtime_starting',
+      }),
+    );
+    ws.emitMessage(
+      buildRealTeamChildTurnEvent({
+        name: 'team.childTurnStarted',
+        teamId,
+        teamRunId: '01a1ef5d-1242-75c2-a185-6de505cbfa45',
+        slotId: slotLead,
+        role: 'lead',
+        extConvId: extLead,
+        turnId: leadTurnId,
+        status: 'running',
+      }),
+    );
+    ws.emitMessage(
+      buildRealMessageStreamFrame({
+        extConvId: extLead,
+        msgId: '7eaa78d8',
+        turnId: leadTurnId,
+        type: 'tips',
+        data: { content: 'The installed codex is newer...' },
+      }),
+    );
+    ws.emitMessage(
+      buildRealMessageStreamFrame({
+        extConvId: extLead,
+        msgId: '24a6eed4',
+        turnId: leadTurnId,
+        type: 'content',
+        data: { session_id: 'cli_sess_v609_lead', content: 'V609_REAL_SHAPE_VERIFIED' },
+      }),
+    );
+    ws.emitMessage(
+      buildRealMessageStreamFrame({
+        extConvId: extLead,
+        msgId: '24a6eed4',
+        turnId: leadTurnId,
+        type: 'finish',
+        data: { session_id: 'cli_sess_v609_lead' },
+      }),
+    );
+    ws.emitMessage(
+      buildRealTeamChildTurnEvent({
+        name: 'team.childTurnCompleted',
+        teamId,
+        teamRunId: '01a1ef5d-1242-75c2-a185-6de505cbfa45',
+        slotId: slotLead,
+        role: 'lead',
+        extConvId: extLead,
+        turnId: leadTurnId,
+        status: 'completed',
+      }),
+    );
+
+    const snap = adapter.getStateSnapshot().conversations[conv.conversation.id];
+    const leadMsgs = snap.messagesByTab[leadPart.id] ?? [];
+    expect(leadMsgs.some((m) => m.bodyMarkdown.includes('V609_REAL_SHAPE_VERIFIED'))).toBe(true);
+    expect(snap.participants.find((p) => p.id === leadPart.id)?.sessionRef.nativeSessionId).toBe(
+      'cli_sess_v609_lead',
+    );
+    // Strict tab isolation: executor tab recorded config update only and did NOT receive lead turn output
+    const execMsgs = snap.messagesByTab[execPart.id] ?? [];
+    expect(execMsgs.some((m) => m.bodyMarkdown.includes('GPT-5.6-Luna'))).toBe(true);
+    expect(execMsgs.some((m) => m.bodyMarkdown.includes('V609_REAL_SHAPE_VERIFIED'))).toBe(false);
+
+    // 3. Real ConfirmRequest schema (`always_allow: false`, exact `msg_id` and option_id `allow_once`)
+    ws.emitMessage(
+      buildRealMessageStreamFrame({
+        extConvId: extExec,
+        msgId: 'msg_perm_exec_1',
+        turnId: 'turn_exec_perm_1',
+        type: 'acp_permission',
+        data: {
+          tool_call: {
+            tool_call_id: 'call_perm_real_1',
+            kind: 'execute',
+            title: 'Executar comando sandbox',
+            raw_input: { command: 'git status' },
+          },
+          options: [
+            { kind: 'allow_once', option_id: 'allow_once', label: 'Allow once' },
+            { kind: 'reject_once', option_id: 'reject_once', label: 'Reject' },
+          ],
+        },
+      }),
+    );
+    const createdPerm = adapter
+      .getStateSnapshot()
+      .conversations[conv.conversation.id].permissions.find((p) =>
+        p.scopeKey.includes('call_perm_real_1'),
+      );
+    expect(createdPerm).toBeDefined();
+    await adapter.respondPermission({
+      conversationId: conv.conversation.id,
+      requestId: createdPerm!.id,
+      decision: 'approved',
+    });
+    expect(confirmPayloads).toEqual([
+      {
+        msg_id: 'msg_perm_exec_1',
+        data: 'allow_once',
+        always_allow: false,
+      },
+    ]);
 
     adapter.dispose();
   });

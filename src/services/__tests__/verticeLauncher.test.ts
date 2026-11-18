@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
@@ -317,6 +317,15 @@ describe('Launcher identity & lifecycle safety (V6-00)', () => {
       path.join(workDir, '.vertice', 'server.json'),
       'utf8',
     );
+    if (process.platform === 'win32') {
+      const aclOut = execFileSync('icacls', [path.join(workDir, '.vertice', 'server.json')], {
+        encoding: 'utf8',
+        windowsHide: true,
+      });
+      // Inheritance removed (/inheritance:r) so inherited Users/Everyone ACEs do not remain (V6-09 P3 fix)
+      expect(aclOut).not.toMatch(/\(I\)/);
+      expect(aclOut).not.toMatch(/Everyone|BUILTIN\\Users/i);
+    }
     const meta1 = JSON.parse(metaRaw) as {
       pid: number;
       instanceId: string;

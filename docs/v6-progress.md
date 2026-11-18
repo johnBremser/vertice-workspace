@@ -366,8 +366,8 @@ Relatório JSON e capturas preservadas no repositório em `docs/screenshots/v6-0
 - V6-05 — Permissões/correção/falhas/limites: **aprovado pelo auditor (18/11/2026)**.
 - V6-06 — Contexto/sessões/dados/recuperação: **aprovado pelo auditor (18/11/2026)**, com higiene de CI (`viteProxyConfig.test.ts`) e correções documentais/evidências aplicadas em seguida.
 - V6-07 — Acabamento/primeiro uso: **aprovado pelo auditor (18/11/2026)** (checkpoint `68dfb73`; adendo de defasagem registrado em `docs/screenshots/v6-07/v607_report.json`).
-- V6-08 — Distribuição/operação: **concluído e validado em extração limpa com Core real (aguardando revisão do auditor antes de avançar ao V6-09)**.
-- V6-09 — Validação integrada/release: pendente.
+- V6-08 — Distribuição/operação: **aprovado pelo auditor (18/11/2026)** (`a1f7dd4`; `[P2]` de numeração do `README.md` corrigido e `[P3]` ACL Windows tratado no V6-09).
+- V6-09 — Validação integrada/release: **concluído (aguardando revisão do auditor antes de avançar ao V6-10)**.
 - V6-10 — Versionamento/GitHub/documentação: pendente; remoto não definido nesta entrega.
 
 ---
@@ -481,3 +481,33 @@ Registradas em `docs/screenshots/v6-08/v608_dist_report.json` e capturas em `doc
 
 - O script de extração limpa (`verify_v6_08_dist.mjs`) revelou `docCoreDownHasRecovery: false` em razão da captura de `TypeError` no `fetch` quando o Core estava desligado; o defeito foi corrigido imediatamente em `scripts/vertice-ctl.mjs` e coberto pelo teste determinístico em `verticeLauncher.test.ts` + execução direta de `vertice-ctl.mjs doctor` contra porta fechada (confirmando `inacessível` + ação de recuperação), sem repetir nova chamada paga ao Codex apenas para regenerar o campo boolean do JSON da rodada.
 - Distribuição validada nativamente no Windows 11 (`Node v24.11.0`); validação real interativa do instalador/serviço em Linux segue coberta pela suíte Vitest multiplataforma e CI.
+
+---
+
+## Etapa V6-09 — Validação integrada e release (concluída — aguardando revisão do auditor)
+
+### Escopo e alterações implementadas
+
+1. **Correção do `[P2]` e fechamento do `[P3]` da auditoria do V6-08 (`README.md`, `scripts/vertice-ctl.mjs`, `verticeLauncher.test.ts`, `compatibility-matrix.md`)**:
+   - Restaurada a numeração sequencial `1..5` em `README.md` (`git checkout -- README.md`) após formatação externa pós-`a1f7dd4`, e versionado `docs/auditoria-v6-08-2026-11-18.md`.
+   - Adicionado `restrictPrivateFileAcl()` em `scripts/vertice-ctl.mjs` (`icacls <pidFile> /inheritance:r /grant:r "<usuario>:(R,W)"` com `windowsHide: true` no Windows) garantindo remoção de ACLs herdadas (`Everyone`/`BUILTIN\Users`) em `.vertice/server.json`, coberto por asserção em `src/services/__tests__/verticeLauncher.test.ts` e documentado com a devida fronteira de confiança de mesmo usuário em `docs/compatibility-matrix.md`.
+
+2. **Fixtures baseadas em payloads reais sanitizados do produtor (`src/services/__tests__/fixtures/coreV022RealPayloads.ts`, `src/services/__tests__/aionCoreAdapter.test.ts`)**:
+   - Extraídos e sanitizados payloads reais observados no `AionCore v0.2.2` (`health`, `auth/status`, `agents/management`, `assistants`, `team.slotWorkChanged` `runtime_starting`, `team.childTurnStarted` / `team.childTurnCompleted` conforme `TeamChildTurnPayload`, `message.stream` `tips`/`content`/`finish`/`acp_permission`, `ConfirmRequest` com `always_allow: false`, e `GET /api/conversations/:id/messages`).
+   - Adicionado teste `V6-09` em `aionCoreAdapter.test.ts` validando o fluxo integrado completo contra esses contratos reais, incluindo promoção `PATCH .../model` (`GPT-5.6-Luna`) e isolamento entre abas.
+
+3. **Relatório consolidado da candidata funcional (`docs/v6-09-release-candidate.md`)**:
+   - Documentados versões reais, comandos executados, resultados da suíte candidata, mapeamento completo dos 10 itens obrigatórios do V6-09 e separação explícita entre **prontidão funcional** (atingida na combinação Windows 11 + `AionCore v0.2.2` + `Codex` / `Cursor`), **publicação** (`V6-10`) e **release `v1.0.0`** (ainda não declarada).
+
+### Verificações na candidata final (`Node v24.11.0`, após a última edição de código)
+
+- `npm run lint` (`tsc --noEmit`): **0 erros**.
+- `npm test` (`vitest run`): **8 arquivos / 70 testes aprovados (70/70, exit 0, 8,91s)** — todos os arquivos aprovados sem falhas nem skips.
+- `npm run build` (`vite build`): **OK (1,82s)**.
+- `npm run test:e2e` (`playwright test`, Chrome real): **1/1 aprovado (12,4s)**.
+- `node scripts/vertice-ctl.mjs status`: parado (`sem PID rastreado`).
+
+### Limitações registradas no V6-09 (transparência para auditoria)
+
+- Não foi executada nova rodada paga aos modelos nesta etapa porque as alterações de código do V6-09 restringiram-se à ACL Windows de `.vertice/server.json` e à incorporação dos payloads reais sanitizados nas fixtures/testes; os 10 casos do roteiro reúnem as execuções reais comprovadas de `V6-01`..`V6-08` combinadas à revalidação integral da suíte determinística na candidata atual.
+- Permanecem documentados na matriz: ciclo completo de 3 tarefas no provedor opcional `Antigravity` (`agy.exe`), política conservadora `always_allow: false` e execução interativa direta em Linux.

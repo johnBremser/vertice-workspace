@@ -4,7 +4,7 @@ Este arquivo registra a evolução técnica do **Vértice Workspace** (*Powered 
 
 ---
 
-## [Não lançado — V6 Local (V6-00 a V6-09 aprovados; V6-10 concluído localmente)]
+## [Não lançado — V6 Local (V6-00 a V6-10 aprovados; V6-11 concluído localmente)]
 
 ### Instalação, launcher e servidor (`V6-00`, `V6-01`)
 
@@ -51,6 +51,15 @@ Este arquivo registra a evolução técnica do **Vértice Workspace** (*Powered 
 - Desversionado `data/aionui-backend.db` e `data/aionui-backend.db.migrate.lock` do índice Git (`git rm --cached`) e adicionadas exclusões `data/`, `*.db` e `*.db.*` em `.gitignore`.
 - Adicionados `THIRD_PARTY_NOTICES.md` (atribuições Apache-2.0 de `AionUi` e `AionCore`) e evidências da candidata em `docs/screenshots/v6-09/` (`v609-candidate-live-settings.png`, `v609_candidate_report.json`).
 - Revisão e alinhamento completo de `README.md`, `docs/architecture.md`, `docs/aioncore-integration.md`, `docs/local-validation.md`, `docs/local-handoff.md` e `docs/v6-progress.md` para entrada pública sem declarar `v1.0.0`.
+
+---
+
+### Modo AionCore local como padrão de abertura (`V6-11`)
+
+- O workspace passa a abrir em **Modo AionCore local** (HTTP/WS real contra o `aioncore.exe v0.2.2`) em vez da simulação determinística. A escolha explícita feita em **Configurações → Modo de operação do workspace** é memorizada (`aion_desk_mode_pref_v1`) e sempre prevalece sobre o padrão.
+- Em modo Core o workspace começa **limpo**, sem o cenário de demonstração semeado; a simulação continua disponível e volta a semear o cenário determinístico quando selecionada.
+- Resolução de modo no arranque coberta por regressão (`executionModePreference.test.ts` e `workspace.test.ts`): preferência explícita → workspace apenas semeado (segue o padrão) → workspaces de simulação legados preservados.
+- A suíte Playwright agora **opta explicitamente** pelo modo de simulação (`addInitScript`), sem depender do padrão do produto.
 
 ---
 

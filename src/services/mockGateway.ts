@@ -222,7 +222,13 @@ export class MockWorkspaceGateway
   }
 
   async loadWorkspace(): Promise<WorkspaceStoreState> {
-    const loaded = await this.persistence.loadInitial(createInitialWorkspaceState);
+    let loaded = await this.persistence.loadInitial(createInitialWorkspaceState);
+    if (Object.keys(loaded.conversations ?? {}).length === 0) {
+      // An empty workspace in simulation mode always gets the deterministic
+      // scenario, so the demo remains usable after working in Core mode.
+      loaded = createInitialWorkspaceState();
+      await this.persistence.resetAndSave(loaded);
+    }
     this.state = loaded;
     this.heldBackMissingEvents.clear();
     if (loaded.simulatedHeldBackEvents) {

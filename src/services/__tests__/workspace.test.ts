@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { WorkspaceStoreState } from '../../domain/types';
-import { AionCoreAdapterSkeleton } from '../aionCoreAdapter';
+import { AionCoreAdapter, AionCoreAdapterSkeleton } from '../aionCoreAdapter';
 import {
   DEMO_CONVERSATION_ID,
   DEMO_PROJECT_ID,
@@ -829,6 +829,33 @@ describe('Workspace gateway, storage failure, reload recovery & export', () => {
     expect(coreConn.authStatus).toBe('unknown');
     expect(coreConn.sessionStatus).toBe('inactive');
     gw2.dispose();
+  });
+
+  it('starts a real Core workspace without the seeded demonstration scenario and keeps the simulation reusable (V6-11)', async () => {
+    const driver = new MemoryOnlyStorageDriver();
+
+    // 1. The simulation persists the seeded demonstration scenario.
+    const p1 = new WorkspacePersistenceManager(driver);
+    const gw1 = new MockWorkspaceGateway(p1);
+    const seeded = await gw1.loadWorkspace();
+    expect(seeded.conversations[DEMO_CONVERSATION_ID]).toBeDefined();
+    gw1.dispose();
+
+    // 2. Core mode drops the simulated seed and starts clean.
+    const p2 = new WorkspacePersistenceManager(driver);
+    const adapter = new AionCoreAdapter(p2);
+    const coreState = await adapter.loadWorkspace();
+    expect(coreState.executionMode).toBe('aion_core');
+    expect(coreState.projects).toEqual([]);
+    expect(Object.keys(coreState.conversations)).toEqual([]);
+    adapter.dispose();
+
+    // 3. Switching back to the simulation re-seeds the scenario.
+    const p3 = new WorkspacePersistenceManager(driver);
+    const gw3 = new MockWorkspaceGateway(p3);
+    const demoState = await gw3.loadWorkspace();
+    expect(demoState.conversations[DEMO_CONVERSATION_ID]).toBeDefined();
+    gw3.dispose();
   });
 
   it('revalidates /health, /api/auth/status and catalog silently on startup without model cost when authenticated (V6-07 P2)', async () => {

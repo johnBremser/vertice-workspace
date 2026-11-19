@@ -11,6 +11,7 @@ Interface em React, TypeScript e Tailwind CSS v4 para **coordenação observáve
 > **Transparência sobre execução**:  
 > - Em **Modo Demonstração** (`MockWorkspaceGateway`), respostas, comandos, testes e testes de conexão são simulados deterministicamente no navegador, sem terminal nem APIs externas.  
 > - Em **Modo AionCore Local** (`AionCoreAdapter`), o aplicativo comunica via HTTP/WebSocket com uma instância real do AionCore (`v0.2.2`), sem nunca recorrer silenciosamente ao mock quando o Core está inacessível.
+> - **Modo de abertura padrão**: o workspace abre em **Modo AionCore local** (HTTP/WS real contra o `aioncore.exe v0.2.2`). A simulação determinística continua disponível em **Configurações → Modo de operação do workspace** e, depois de escolhida explicitamente, é memorizada. Em modo Core o workspace começa limpo, sem o cenário de demonstração semeado.
 > - **Compatibilidade preservada**: o produto adota a marca **Vértice Workspace**, preservando identificadores técnicos internos (`aion-desk/v1`, `aion-desk-json`, banco IndexedDB e formato de backup `2.0.0`).
 
 ---
@@ -109,7 +110,7 @@ VITE_AIONCORE_PROXY_TARGET="http://127.0.0.1:<PORTA_DO_SEU_CORE>"
 ```
 
 4. Inicie `npm run build && npm run server:start` (ou `npm run dev` em desenvolvimento). Tanto o proxy do Vite quanto `scripts/vertice-server.mjs` encaminham `/api`, `/health`, `/login`, `/logout` e `/ws` preservando cookies e tokens CSRF na mesma origem.
-5. Na interface, acesse **Configurações → Modo de operação → Modo AionCore local** e siga a lista de 5 etapas (**Preparação guiada para operação real**).
+5. Na interface, acesse **Configurações → Modo de operação → Modo AionCore local** e siga a lista de 5 etapas (**Preparação guiada para operação real**). O modo de abertura padrão já é *Modo AionCore local*.
 
 Consulte os guias detalhados e licenças:
 - `docs/architecture.md` — Entidades, fluxos, fronteiras, servidor local e persistência.

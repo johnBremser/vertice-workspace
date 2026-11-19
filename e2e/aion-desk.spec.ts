@@ -6,6 +6,15 @@ test.describe('Aion Desk v4 E2E flow', () => {
   test('completes Terra/Sol/Gemini conversation to Concluída without seq gaps, handles denied permission & reload reconciliation, performs real JSON backup export/import, verifies 2,000-event DOM pagination & scroll, and checks themes + viewports', async ({
     page,
   }, testInfo) => {
+    // V6-11: the workspace now defaults to AionCore local mode. The browser
+    // suite explicitly opts into the deterministic simulation instead of relying
+    // on the product default.
+    await page.addInitScript(() => {
+      window.localStorage.setItem(
+        'aion_desk_mode_pref_v1',
+        JSON.stringify({ mode: 'demo' }),
+      );
+    });
     await page.goto('/');
 
     // 1. Initial load shows Portal de demonstração

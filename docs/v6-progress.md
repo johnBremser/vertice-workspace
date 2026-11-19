@@ -369,6 +369,7 @@ Relatório JSON e capturas preservadas no repositório em `docs/screenshots/v6-0
 - V6-08 — Distribuição/operação: **aprovado pelo auditor (18/11/2026)** (`a1f7dd4`; `[P2]` de numeração do `README.md` corrigido e `[P3]` ACL Windows tratado no V6-09).
 - V6-09 — Validação integrada/release: **aprovado pelo auditor (18/11/2026)** (`752deed`).
 - V6-10 — Versionamento/GitHub/documentação: **aprovado com ressalvas pelo auditor (18/11/2026)** (`a52f2c9` já publicado em remoto privado `johnBremser/vertice-workspace.git`; reconciliação documental aplicada; pendências de decisão do usuário antes de abrir como público: `LICENSE`, CI remota, expurgo histórico de `data/` e `public/assets/aistudio/`).
+- V6-11 — Modo de abertura padrão: **concluído e verificado em navegador real (19/11/2026)** — o workspace abre em Modo AionCore local, com workspace limpo e conexão real com o Core (`/health` confirmado, 1/5 etapas da preparação guiada).
 
 ---
 
@@ -543,3 +544,30 @@ Registradas em `docs/screenshots/v6-08/v608_dist_report.json` e capturas em `doc
   2. Enviar os commits locais de ajuste (`git push origin main`) e acompanhar a execução verde do workflow `.github/workflows/ci.yml` no GitHub Actions (`ubuntu-latest` Node 22/24, `windows-latest` Node 24 e E2E), em especial o teste de ACL no runner Windows.
   3. Opcionalmente expurgar `data/aionui-backend.db` dos 5 commits históricos (`1229ebb`..`752deed` — blob único de 774 KB, `0` `INSERT`, sem credenciais/tokens) via `git filter-repo --path data/ --invert-paths` com force-push autorizado caso queira histórico limpo antes de tornar público.
   4. **Não declarar `v1.0.0`** enquanto permanecerem abertos: ciclo completo de 3 tarefas com `Antigravity`, política `Allow always` e promoção de modelo via `PATCH /model` aprovada ao vivo.
+
+---
+
+## Etapa V6-11 — Modo de abertura padrão em AionCore local (concluída)
+
+**Pedido do usuário (19/11/2026)**: "quero um software pronto para meu uso" — o workspace abria em Modo Demonstração, sem qualquer conexão com o Core.
+
+### O que mudou
+
+1. **Padrão de abertura** (`src/services/executionModePreference.ts`):
+   - `DEFAULT_EXECUTION_MODE = 'aion_core'`: um workspace novo abre em **Modo AionCore local** (HTTP/WS real), não na simulação.
+   - A preferência explícita escolhida em **Configurações → Modo de operação do workspace** é persistida em `aion_desk_mode_pref_v1` (`localStorage`) e **sempre prevalece** sobre o padrão.
+2. **Resolução de modo no arranque** (`resolveBootstrapExecutionMode` em `WorkspaceContext.tsx`): preferência explícita → workspace apenas com o cenário semeado (segue o padrão) → workspace de simulação legado (preservado) → modo do próprio estado.
+3. **Workspace Core limpo** (`aionCoreAdapter.loadWorkspace`): o cenário de demonstração semeado é descartado e persistido como workspace Core vazio, evitando conteúdo simulado numa sessão real. A simulação continua disponível e **re-semeia** o cenário determinístico quando selecionada (`mockGateway.loadWorkspace`).
+4. **Sem fallback silencioso**: o modo Core nunca degrada para o mock; se o Core estiver inacessível, a UI mostra o estado real de erro e a preparação guiada permanece em 1/5.
+
+### Verificação independente
+
+- `npm run lint`: **0 erros**.
+- `npx vitest run`: **9 arquivos, 80/80 testes** (inclui `executionModePreference.test.ts` com 9 casos e a regressão de workspace limpo em `workspace.test.ts`).
+- `npm run build`: **OK**; `npm run test:e2e`: **1/1** — a suíte Playwright agora **opta explicitamente** pelo modo de simulação via `addInitScript`, sem depender do padrão do produto.
+- **Navegador real** (Chrome, proxy `http://127.0.0.1:4173` + `aioncore.exe v0.2.2` dedicado): abertura em **"Modo AionCore local"**, workspace vazio ("Nenhum projeto ativo"), Configurações com o painel **"Conexão AionCore Local (WebUI v0.2.2)"** e a preparação guiada em **1/5 etapas confirmadas** (passo 1 "Conectar runtime local" confirmado por `/health` real).
+- `GET /api/auth/status` pelo proxy: `is_authenticated: false` antes do login e `true` após `POST /login` com a conta local `admin` — a autenticação real do Core foi exercitada no mesmo caminho usado pela UI.
+
+### Nota operacional
+
+O `codex` CLI **não está no PATH do sistema**; o Core o detecta apenas quando iniciado com `C:\Users\joao.gonzales\AppData\Local\OpenAI\Codex\bin\5449c1f0f26f1f98` somado ao PATH (idem `agy` e `cursor-agent`). Sem isso, `aioncore doctor` reporta `codex: missing` e a equipe real não forma.

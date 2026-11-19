@@ -26,6 +26,12 @@ import type {
 } from '../../domain/types';
 import { AionCoreAdapter } from '../../services/aionCoreAdapter';
 import {
+  DEFAULT_EXECUTION_MODE,
+  loadExecutionModePreference,
+  resolveBootstrapExecutionMode,
+  saveExecutionModePreference,
+} from '../../services/executionModePreference';
+import {
   GatewayCapabilityError,
   type AgentWorkspaceGateway,
   type CoreDiagnosticEntry,
@@ -280,7 +286,12 @@ export function WorkspaceProvider({
     );
   }
   if (!gatewayRef.current) {
-    gatewayRef.current = gatewayFactory('demo', persistenceRef.current);
+    // V6-11: a fresh workspace opens in "AionCore local" mode by default instead
+    // of the deterministic simulation. The simulation stays available in
+    // Settings and, once explicitly chosen, is persisted and always wins.
+    const preferredMode =
+      loadExecutionModePreference() ?? DEFAULT_EXECUTION_MODE;
+    gatewayRef.current = gatewayFactory(preferredMode, persistenceRef.current);
   }
 
   const initialPrefs = useMemo(() => loadUiPreferences(), []);
@@ -418,18 +429,28 @@ export function WorkspaceProvider({
       .loadWorkspace()
       .then(async (loaded) => {
         if (cancelled) return;
+        // Bootstrap mode resolution (V6-11):
+        // 1. an explicit preference chosen in Settings always wins;
+        // 2. a workspace holding only the seeded demonstration scenario is not an
+        //    explicit choice, so it follows the default (AionCore local);
+        // 3. any other persisted workspace keeps its own mode, so legacy
+        //    simulations are never hijacked.
+        const explicitPreference = loadExecutionModePreference();
+        const effectiveMode: ExecutionMode = resolveBootstrapExecutionMode({
+          explicitPreference,
+          loaded,
+        });
+        const targetKind =
+          effectiveMode === 'aion_core' ? 'aion_core' : 'mock';
         let activeGateway = initialGateway;
-        if (
-          loaded.executionMode === 'aion_core' &&
-          initialGateway.kind !== 'aion_core'
-        ) {
+        if (targetKind !== initialGateway.kind) {
           initialGateway.dispose();
-          const coreGw = gatewayFactory('aion_core', persistence);
-          bindGateway(coreGw);
-          await coreGw.loadWorkspace();
-          activeGateway = coreGw;
+          const nextGw = gatewayFactory(effectiveMode, persistence);
+          bindGateway(nextGw);
+          await nextGw.loadWorkspace();
+          activeGateway = nextGw;
         }
-        if (!cancelled && loaded.executionMode === 'aion_core') {
+        if (!cancelled && effectiveMode === 'aion_core') {
           void probeCoreSessionOnStartup(
             activeGateway,
             () => !cancelled && gatewayRef.current === activeGateway,
@@ -669,6 +690,9 @@ export function WorkspaceProvider({
         const persistence = persistenceRef.current!;
         await currentGw.setExecutionMode(mode);
         await persistence.flushSave();
+        // V6-11: persist the explicit choice so it survives reloads and always
+        // wins over the default operating mode.
+        saveExecutionModePreference(mode);
         const targetKind = mode === 'aion_core' ? 'aion_core' : 'mock';
         if (currentGw.kind !== targetKind) {
           currentGw.dispose();

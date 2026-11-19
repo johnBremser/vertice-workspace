@@ -89,7 +89,10 @@ import {
   type AionCoreTransportOptions,
 } from './aionCoreTransport';
 import { CoreDiagnosticsLog } from './coreDiagnostics';
-import { createInitialWorkspaceState } from './demoScenario';
+import {
+  createInitialWorkspaceState,
+  isDemoSeedOnlyState,
+} from './demoScenario';
 import {
   GatewayCapabilityError,
   type AgentWorkspaceGateway,
@@ -479,6 +482,23 @@ export class AionCoreAdapterSkeleton implements AgentWorkspaceGateway {
   }
 }
 
+/**
+ * Clean starting point for a real Core workspace: no seeded demonstration
+ * project or conversation, so the user works against the local Core instead of
+ * simulated content.
+ */
+function createCleanCoreWorkspaceState(): WorkspaceStoreState {
+  const base = createInitialWorkspaceState();
+  return {
+    ...base,
+    executionMode: 'aion_core',
+    projects: [],
+    conversations: {},
+    activeProjectId: '',
+    activeConversationId: '',
+  };
+}
+
 export class AionCoreAdapter
   implements AgentWorkspaceGateway, CoreGatewayOperations {
   readonly kind = 'aion_core' as const;
@@ -846,13 +866,15 @@ export class AionCoreAdapter
   }
 
   async loadWorkspace(): Promise<WorkspaceStoreState> {
-    const loaded = await this.persistence.loadInitial(() => {
-      const base = createInitialWorkspaceState();
-      return {
-        ...base,
-        executionMode: 'aion_core',
-      };
-    });
+    let loaded = await this.persistence.loadInitial(
+      createCleanCoreWorkspaceState,
+    );
+    if (isDemoSeedOnlyState(loaded)) {
+      // The seeded demonstration scenario is simulated content and does not
+      // belong to a real Core workspace: start clean instead of showing it.
+      loaded = createCleanCoreWorkspaceState();
+      await this.persistence.resetAndSave(loaded);
+    }
     this.httpClient.setBaseUrl(
       normalizeBaseUrl(loaded.coreSettings?.baseUrl ?? ''),
     );

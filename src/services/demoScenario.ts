@@ -20,6 +20,30 @@ import type {
 export const DEMO_PROJECT_ID = 'proj_portal_demo';
 export const DEMO_CONVERSATION_ID = 'conv_busca_listagem';
 
+/**
+ * True when the workspace holds only the seeded demonstration conversation.
+ *
+ * A seeded workspace is not an explicit user choice, so the bootstrap treats it as
+ * "no preference yet" and applies the default operating mode.
+ */
+export function isDemoSeedOnlyState(state: WorkspaceStoreState): boolean {
+  const conversationIds = Object.keys(state.conversations ?? {});
+  if (conversationIds.length === 0) return false;
+  return conversationIds.every((id) => id === DEMO_CONVERSATION_ID);
+}
+
+/**
+ * True when every conversation in the workspace belongs to the deterministic
+ * simulation (legacy demo workspaces). Core conversations keep their own mode.
+ */
+export function isDemoWorkspaceState(state: WorkspaceStoreState): boolean {
+  const conversationIds = Object.keys(state.conversations ?? {});
+  if (conversationIds.length === 0) return false;
+  return conversationIds.every(
+    (id) => state.conversations[id]?.conversation.executionMode !== 'aion_core',
+  );
+}
+
 export const DEFAULT_MODEL_POLICY: ModelPolicy = {
   defaultExecutorTier: 'fast',
   reviewerTier: 'review',

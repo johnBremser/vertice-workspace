@@ -60,10 +60,15 @@ Write-Host "       Node.js encontrado: $nodeVerRaw ($($nodeCmd.Source))" -Foregr
 
 # 3. Instalar dependencias e gerar build
 Write-Host ""
-Write-Host "[2/4] Instalando dependencias (npm install)..." -ForegroundColor White
-& npm install
+if (Test-Path (Join-Path $RootDir "package-lock.json")) {
+  Write-Host "[2/4] Instalando dependencias (npm ci)..." -ForegroundColor White
+  & npm ci
+} else {
+  Write-Host "[2/4] Instalando dependencias (npm install)..." -ForegroundColor White
+  & npm install
+}
 if ($LASTEXITCODE -ne 0) {
-  Write-Host "[ERRO] Falha no npm install." -ForegroundColor Red
+  Write-Host "[ERRO] Falha ao instalar dependencias." -ForegroundColor Red
   exit 1
 }
 

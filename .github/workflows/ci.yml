@@ -1,8 +1,8 @@
 name: CI — Vértice Workspace (Fixtures e Navegador)
 
 # Este workflow valida tipos TypeScript, testes unitários/integração por fixtures,
-# portabilidade Windows/Linux do proxy e suíte Playwright em modo Demonstração.
-# Testes com AionCore v0.2.2 e CLIs autenticados (codex, antigravity) são
+# portabilidade Windows/Linux do proxy e suíte Playwright contra fixtures do AionCore v0.2.2.
+# Testes com AionCore v0.2.2 real e CLIs autenticados (codex, antigravity, cursor-agent) são
 # validação exclusivamente local (sem credenciais ou binários no CI).
 
 on:
@@ -52,7 +52,7 @@ jobs:
         run: npm run server:doctor
 
   e2e-browser:
-    name: Playwright E2E (Chromium headless · Demonstração)
+    name: Playwright E2E (Chromium headless · Fixtures AionCore)
     runs-on: ubuntu-latest
     needs: verify
 

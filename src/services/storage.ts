@@ -386,7 +386,6 @@ export class WorkspacePersistenceManager {
 export function sanitizeLoadedStateAfterReload(
   state: WorkspaceStoreState,
 ): WorkspaceStoreState {
-  const nextProjects = state.projects.filter((p) => p.id !== 'proj_demo_portal');
   const nextConversations: WorkspaceStoreState['conversations'] = {};
   for (const [convId, projection] of Object.entries(state.conversations)) {
     if (convId === 'conv_demo_busca_nome') {
@@ -395,21 +394,30 @@ export function sanitizeLoadedStateAfterReload(
     const wasRunning =
       projection.conversation.executionStatus === 'running' ||
       Boolean(projection.conversation.autoPlayWasRunning);
+    const originalMode = projection.conversation.executionMode;
 
     nextConversations[convId] = {
       ...projection,
       conversation: {
         ...projection.conversation,
-        executionMode: 'aion_core',
+        executionMode: originalMode,
         executionStatus: wasRunning
-          ? 'paused_queue'
-          : projection.conversation.executionStatus === 'paused_demo'
+          ? originalMode === 'aion_core'
             ? 'paused_queue'
-            : projection.conversation.executionStatus,
+            : 'paused_demo'
+          : projection.conversation.executionStatus,
         autoPlayWasRunning: false,
       },
     };
   }
+
+  const referencedProjectIds = new Set(
+    Object.values(nextConversations).map((p) => p.conversation.projectId),
+  );
+  const nextProjects = state.projects.filter(
+    (p) => p.id !== 'proj_demo_portal' || referencedProjectIds.has(p.id),
+  );
+
   const nextConnections = state.connections
     .filter((conn) => conn.mode === 'aion_core')
     .map((conn) => ({

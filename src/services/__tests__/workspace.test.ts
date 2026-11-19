@@ -198,6 +198,116 @@ describe('Workspace gateway, storage failure, reload recovery & export', () => {
     expect(conv.autoPlayWasRunning).toBe(false);
   });
 
+  it('preserves proj_demo_portal when a real conversation still references it and never relabels legacy demo conversations as aion_core', () => {
+    const base = createInitialWorkspaceState();
+    const makeConv = (
+      id: string,
+      projectId: string,
+      mode: 'demo' | 'aion_core',
+      status: 'running' | 'idle' = 'idle',
+    ): ConversationProjection => ({
+      conversation: {
+        id,
+        projectId,
+        title: `Conversa ${id}`,
+        status: 'active',
+        coordinatorParticipantId: 'part_coord',
+        executionMode: mode,
+        executionStatus: status,
+        syncState: 'synced',
+        lastAppliedSeq: 1,
+        scenarioStepIndex: 0,
+        autoPlayWasRunning: status === 'running',
+        createdAt: '2026-11-18T10:00:00.000Z',
+        updatedAt: '2026-11-18T10:00:00.000Z',
+      },
+      participants: [],
+      contextRevisions: [],
+      planRevisions: [],
+      tasks: [],
+      permissions: [],
+      escalations: [],
+      eventLog: [],
+      generalFeed: [],
+      messagesByTab: {},
+      pendingOutOfOrder: {},
+      coordinatorHistory: [],
+      configChanges: [],
+      seenEventIds: [],
+    });
+
+    const state: WorkspaceStoreState = {
+      ...base,
+      projects: [
+        {
+          id: 'proj_demo_portal',
+          name: 'Portal de demonstração',
+          description: 'Projeto antigo com conversa real dentro',
+          workspacePathInfo: 'C:/meu-repo',
+          executionMode: 'demo',
+          status: 'active',
+          createdAt: '2026-11-16T10:00:00.000Z',
+          updatedAt: '2026-11-16T10:00:00.000Z',
+        },
+      ],
+      conversations: {
+        conv_demo_busca_nome: makeConv('conv_demo_busca_nome', 'proj_demo_portal', 'demo'),
+        conv_real_in_demo_proj: makeConv('conv_real_in_demo_proj', 'proj_demo_portal', 'aion_core', 'running'),
+        conv_legacy_simulated: makeConv('conv_legacy_simulated', 'proj_demo_portal', 'demo', 'running'),
+      },
+      activeProjectId: 'proj_demo_portal',
+      activeConversationId: 'conv_real_in_demo_proj',
+    };
+
+    const sanitized = sanitizeLoadedStateAfterReload(state);
+
+    // Seeded demo conversation removed, real & legacy user conversations preserved
+    expect(sanitized.conversations.conv_demo_busca_nome).toBeUndefined();
+    expect(sanitized.conversations.conv_real_in_demo_proj).toBeDefined();
+    expect(sanitized.conversations.conv_legacy_simulated).toBeDefined();
+
+    // proj_demo_portal MUST be preserved because conversations still reference it
+    expect(sanitized.projects.some((p) => p.id === 'proj_demo_portal')).toBe(true);
+
+    // Real conversation pauses as paused_queue; legacy simulated conversation keeps executionMode 'demo'
+    expect(sanitized.conversations.conv_real_in_demo_proj.conversation.executionMode).toBe('aion_core');
+    expect(sanitized.conversations.conv_real_in_demo_proj.conversation.executionStatus).toBe('paused_queue');
+    expect(sanitized.conversations.conv_legacy_simulated.conversation.executionMode).toBe('demo');
+    expect(sanitized.conversations.conv_legacy_simulated.conversation.executionStatus).toBe('paused_demo');
+  });
+
+  it('does not silently bind Gemini preset member to Codex when only Codex is available in AionCore', async () => {
+    const persistence = new WorkspacePersistenceManager(new MemoryOnlyStorageDriver());
+    const gateway = new AionCoreAdapter(persistence);
+    const loaded = await gateway.loadWorkspace();
+    await gateway.importWorkspaceState({
+      ...loaded,
+      connections: [SAMPLE_CORE_CONNECTION], // Codex only
+    });
+    const project = await gateway.createProject({
+      name: 'Projeto Somente Codex',
+      description: 'Teste de fallback explícito',
+      workspacePathInfo: 'C:/codex-only',
+    });
+    const conv = await gateway.createConversation({
+      projectId: project.id,
+      title: 'Conversa Terra Sol Gemini',
+      presetId: 'preset_terra_sol_gemini',
+    });
+
+    const terra = conv.participants.find((p) => p.displayName === 'Terra 6.1')!;
+    const sol = conv.participants.find((p) => p.displayName === 'Sol 6.1')!;
+    const gemini = conv.participants.find((p) => p.displayName === 'Gemini Hydrogen')!;
+
+    expect(terra.connectionId).toBe(SAMPLE_CORE_CONNECTION.id);
+    expect(sol.connectionId).toBe(SAMPLE_CORE_CONNECTION.id);
+    // Gemini Hydrogen must NOT be silently bound to Codex
+    expect(gemini.connectionId).toBe('');
+    expect(gemini.modelRef.confirmation).toBe('unverified_preference');
+
+    gateway.dispose();
+  });
+
   it('serializes concurrent persistence writes so newer state always wins and saved status waits for the latest generation', async () => {
     let savedSnapshots: WorkspaceStoreState[] = [];
     let callCount = 0;

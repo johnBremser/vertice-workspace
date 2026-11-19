@@ -299,10 +299,15 @@ function ParticipantEditorRow({
             }}
             className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]"
           >
+            {(!connectionId || !currentConnection) && (
+              <option value="">
+                Provedor indisponível — selecione uma conexão
+              </option>
+            )}
             {selectableConnectionsForMode(
               connections,
               connectionId,
-              currentConnection?.mode ?? 'demo',
+              currentConnection?.mode ?? 'aion_core',
               workspaceMode,
             ).map((conn) => (
               <option key={conn.id} value={conn.id}>
@@ -310,6 +315,11 @@ function ParticipantEditorRow({
               </option>
             ))}
           </select>
+          {(!connectionId || !currentConnection) && (
+            <span className="mt-1 block text-[11px] text-[var(--status-warning)]">
+              O provedor esperado por este perfil não está disponível no catálogo do AionCore. Escolha explicitamente uma conexão acima antes de criar o time.
+            </span>
+          )}
         </label>
       </div>
 

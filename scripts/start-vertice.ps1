@@ -120,9 +120,17 @@ if (Test-CoreHealth $CoreTarget) {
       "--log-dir", $logDir
     ) -WindowStyle Hidden -PassThru
 
-    $pidFile = Join-Path $RootDir ".vertice\aioncore.pid"
-    New-Item -ItemType Directory -Path (Split-Path -Parent $pidFile) -Force | Out-Null
-    Set-Content -Path $pidFile -Value $proc.Id -Encoding ASCII
+    $metaFile = Join-Path $RootDir ".vertice\aioncore-instance.json"
+    New-Item -ItemType Directory -Path (Split-Path -Parent $metaFile) -Force | Out-Null
+    $instanceMeta = [ordered]@{
+      pid = $proc.Id
+      startTimeUtc = $proc.StartTime.ToUniversalTime().ToString("o")
+      executablePath = [System.IO.Path]::GetFullPath($LocalAionCoreExe)
+      dataDir = [System.IO.Path]::GetFullPath($dataDir)
+      host = $coreHost
+      port = [int]$corePort
+    }
+    $instanceMeta | ConvertTo-Json -Depth 3 | Set-Content -Path $metaFile -Encoding UTF8
 
     $ready = $false
     for ($i = 0; $i -lt 20; $i++) {

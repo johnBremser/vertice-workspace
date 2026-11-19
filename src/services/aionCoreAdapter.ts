@@ -272,13 +272,20 @@ function resolvePresetMembersForCore(
           : member.connectionId.includes('codex') || nameHint.includes('terra') || nameHint.includes('sol') || nameHint.includes('codex')
             ? 'codex'
             : '');
-    const coreConn =
-      coreConns.find((c) => c.backendId === desiredBackend) ??
-      coreConns.find((c) => c.id === member.connectionId) ??
-      coreConns.find((c) => c.configured) ??
-      coreConns[0];
+    const coreConn = desiredBackend
+      ? coreConns.find((c) => c.backendId === desiredBackend)
+      : coreConns.find((c) => c.id === member.connectionId) ??
+        coreConns.find((c) => c.configured) ??
+        coreConns[0];
     if (!coreConn) {
-      return member;
+      return {
+        ...member,
+        connectionId: '',
+        modelRef: {
+          ...member.modelRef,
+          confirmation: 'unverified_preference',
+        },
+      };
     }
 
     let resolvedModelRef = member.modelRef;

@@ -9,9 +9,9 @@ Estado do pacote: `0.4.0` (pré-lançamento `v1.0.0` **não declarada**). A comb
 Interface em React, TypeScript e Tailwind CSS v4 para **coordenação observável entre agentes de programação**, com conversa principal **Geral**, abas individuais configuráveis por participante, **Contexto Compartilhado** versionado com recibos granulares, fluxo formal de planejamento/tarefas/tentativas/revisões, persistência versionada com backup JSON restaurável e transporte desacoplado para o **AionCore Local (`v0.2.2`)**.
 
 > **Transparência sobre execução**:  
-> - Em **Modo Demonstração** (`MockWorkspaceGateway`), respostas, comandos, testes e testes de conexão são simulados deterministicamente no navegador, sem terminal nem APIs externas.  
-> - Em **Modo AionCore Local** (`AionCoreAdapter`), o aplicativo comunica via HTTP/WebSocket com uma instância real do AionCore (`v0.2.2`), sem nunca recorrer silenciosamente ao mock quando o Core está inacessível.
-> - **Modo de abertura padrão**: o workspace abre em **Modo AionCore local** (HTTP/WS real contra o `aioncore.exe v0.2.2`). A simulação determinística continua disponível em **Configurações → Modo de operação do workspace** e, depois de escolhida explicitamente, é memorizada. Em modo Core o workspace começa limpo, sem o cenário de demonstração semeado.
+> - O aplicativo opera exclusivamente em **Modo AionCore Local** (`AionCoreAdapter`), comunicando via HTTP/WebSocket com uma instância real do AionCore (`v0.2.2`), sem simulador interno nem fallback para respostas fictícias quando o Core está inacessível.
+> - **Abertura limpa**: em uma instalação nova o workspace começa vazio, pronto para autenticar no AionCore local, sincronizar o catálogo real de CLIs/modelos e criar projetos reais.
+> - **Configuração padrão sem segredos**: [vertice.config.json](vertice.config.json) define host (`127.0.0.1`), porta (`4173`), alvo do proxy (`http://127.0.0.1:25828`) e versão do AionCore (`v0.2.2`). Overrides locais opcionais continuam suportados via `.env.local`.
 > - **Compatibilidade preservada**: o produto adota a marca **Vértice Workspace**, preservando identificadores técnicos internos (`aion-desk/v1`, `aion-desk-json`, banco IndexedDB e formato de backup `2.0.0`).
 
 ---
@@ -25,6 +25,12 @@ Interface em React, TypeScript e Tailwind CSS v4 para **coordenação observáve
 ---
 
 ## Início rápido (Windows / PowerShell e Linux / macOS)
+
+### Windows (duplo clique)
+
+1. Dê **2 cliques** em `install.cmd` (instala dependências com `npm ci`, gera `dist/` e baixa/valida o `aioncore.exe v0.2.2` oficial com verificação SHA-256 em `.vertice/bin/`).
+2. Dê **2 cliques** em `Iniciar Vertice.cmd` (sobe o AionCore local se não estiver ativo, inicia o servidor em `http://127.0.0.1:4173` e abre o navegador).
+3. Para encerrar, dê **2 cliques** em `Parar Vertice.cmd`.
 
 ### PowerShell (Windows)
 

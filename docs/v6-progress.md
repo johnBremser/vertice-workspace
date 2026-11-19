@@ -371,6 +371,7 @@ Relatório JSON e capturas preservadas no repositório em `docs/screenshots/v6-0
 - V6-10 — Versionamento/GitHub/documentação: **aprovado com ressalvas pelo auditor (18/11/2026)** (`a52f2c9` já publicado em remoto privado `johnBremser/vertice-workspace.git`; reconciliação documental aplicada; pendências de decisão do usuário antes de abrir como público: `LICENSE`, CI remota, expurgo histórico de `data/` e `public/assets/aistudio/`).
 - V6-11 — Modo de abertura padrão: **concluído e verificado em navegador real (19/11/2026)** — o workspace abre em Modo AionCore local, com workspace limpo e conexão real com o Core (`/health` confirmado, 1/5 etapas da preparação guiada).
 - V6-12 — Ligação da equipe com assistentes reais: **concluído e verificado (19/11/2026)** — o seletor "Conexão / adaptador" passou a listar as conexões reais do Core em modo Core (o filtro antigo prendia o participante na conexão de demonstração).
+- V6-13 — Correção da resolução de modo no arranque: **concluído e verificado em navegador real (19/11/2026)** — eliminada a divergência entre badge ("Modo AionCore local") e gateway em uso, que fazia "Verificar /health" responder "Alterne para o Modo AionCore local".
 
 ---
 
@@ -597,3 +598,25 @@ As conexões reais só existem depois de **autenticar a sessão do Core** e **si
 - `npx vitest run`: **10 arquivos, 84/84 testes** (4 casos novos em `src/domain/__tests__/teamValidation.test.ts`).
 - `npm run build`: **OK**; `npm run test:e2e`: **1/1**.
 - **Navegador real**: criação de projeto real ("Meu Workspace" com caminho `v6-test-repo`) e de conversa em modo Core ("Operacao real · Core", "Sem equipe criada no Core"); a seção de equipe renderiza com os três participantes do preset (`Terra 6.1`, `Sol 6.1`, `Gemini Hydrogen`) ligados às conexões de demonstração e aos perfis de tier simulados — exatamente o estado que a correção destrava após autenticação + sincronização do catálogo.
+
+---
+
+## Etapa V6-13 — Correção da resolução de modo no arranque (concluída)
+
+**Relato do usuário (19/11/2026)**: em modo AionCore local, o botão "Verificar /health" respondia com a tarja "Alterne para o Modo AionCore local para executar operações do servidor Core" — embora o badge e o seletor já estivessem em modo Core.
+
+### Diagnóstico
+
+`requireCoreOps()` (WorkspaceContext) falha quando o gateway ativo não expõe as operações do Core. A regra introduzida na V6-11 mantinha workspaces de simulação legados no modo demo sempre que **todas** as conversas do workspace eram de demonstração — mesmo quando o próprio estado já registrava `executionMode: 'aion_core'` (o usuário havia trocado o modo antes). Resultado: gateway de simulação ativo + estado anunciando Core.
+
+### Correção
+
+1. `resolveBootstrapExecutionMode()`: o modo gravado no estado é a fonte **autoritativa** (é o registro da última escolha explícita); apenas o workspace **apenas semeado** — que nunca teve escolha do usuário — segue o padrão.
+2. Trava de consistência no arranque: após a troca de gateway, se o modo persistido divergir do gateway em uso, ele é alinhado e persistido.
+3. `isDemoWorkspaceState()` foi removido (regra que causava a divergência).
+
+### Verificação independente
+
+- `npm run lint`: **0 erros**; `npx vitest run`: **10 arquivos, 85/85 testes** (caso novo "respeita o modo gravado no estado mesmo com conversas de demonstração").
+- `npm run build`: **OK**; `npm run test:e2e`: **1/1**.
+- **Navegador real**: após recarregar, o clique em "Verificar /health" **não** exibe mais a tarja incorreta e passa a reportar "AionCore alcançável (status=ok, versão=0.2.2). Health check não comprova sessão autenticada nem CLIs.", com a preparação guiada avançando para a etapa 4.

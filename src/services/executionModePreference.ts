@@ -1,8 +1,5 @@
 import type { ExecutionMode, WorkspaceStoreState } from '../domain/types';
-import {
-  isDemoSeedOnlyState,
-  isDemoWorkspaceState,
-} from './demoScenario';
+import { isDemoSeedOnlyState } from './demoScenario';
 
 const MODE_PREF_KEY = 'aion_desk_mode_pref_v1';
 
@@ -58,8 +55,10 @@ export function saveExecutionModePreference(mode: ExecutionMode): void {
  * 1. an explicit preference chosen in Settings always wins;
  * 2. a workspace holding only the seeded demonstration scenario is not an explicit
  *    choice, so it follows the default (AionCore local);
- * 3. any other persisted workspace keeps its own mode, so legacy simulations are
- *    never hijacked.
+ * 3. any other persisted workspace keeps the mode recorded in its own state,
+ *    which is the authoritative record of the last explicit choice (including
+ *    workspaces whose conversations were created in the simulation and later
+ *    switched to the Core mode).
  */
 export function resolveBootstrapExecutionMode(input: {
   explicitPreference: ExecutionMode | null;
@@ -67,6 +66,5 @@ export function resolveBootstrapExecutionMode(input: {
 }): ExecutionMode {
   if (input.explicitPreference) return input.explicitPreference;
   if (isDemoSeedOnlyState(input.loaded)) return DEFAULT_EXECUTION_MODE;
-  if (isDemoWorkspaceState(input.loaded)) return 'demo';
   return input.loaded.executionMode;
 }

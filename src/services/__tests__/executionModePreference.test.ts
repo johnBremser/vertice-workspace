@@ -107,6 +107,26 @@ describe('Preferência de modo de operação (V6-11)', () => {
     ).toBe('demo');
   });
 
+  it('respeita o modo gravado no estado mesmo com conversas de demonstração', () => {
+    // Caso real: workspace com o seed de demonstração e uma conversa do usuário,
+    // com o modo Core já gravado no estado. O badge anunciava Core enquanto o
+    // gateway de simulação era usado e as operações do Core recusavam.
+    const seeded = createInitialWorkspaceState();
+    const mixed: WorkspaceStoreState = {
+      ...seeded,
+      executionMode: 'aion_core',
+      conversations: {
+        ...seeded.conversations,
+        conv_meu_demo: structuredClone(
+          seeded.conversations[DEMO_CONVERSATION_ID],
+        ) as ConversationProjection,
+      },
+    };
+    expect(
+      resolveBootstrapExecutionMode({ explicitPreference: null, loaded: mixed }),
+    ).toBe('aion_core');
+  });
+
   it('preserva o modo Core de workspaces reais', () => {
     const seeded = createInitialWorkspaceState();
     const coreConversation = withConversation(seeded, 'conv_core_real', 'aion_core')

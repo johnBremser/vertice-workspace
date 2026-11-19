@@ -32,17 +32,6 @@ export function isDemoSeedOnlyState(state: WorkspaceStoreState): boolean {
   return conversationIds.every((id) => id === DEMO_CONVERSATION_ID);
 }
 
-/**
- * True when every conversation in the workspace belongs to the deterministic
- * simulation (legacy demo workspaces). Core conversations keep their own mode.
- */
-export function isDemoWorkspaceState(state: WorkspaceStoreState): boolean {
-  const conversationIds = Object.keys(state.conversations ?? {});
-  if (conversationIds.length === 0) return false;
-  return conversationIds.every(
-    (id) => state.conversations[id]?.conversation.executionMode !== 'aion_core',
-  );
-}
 
 export const DEFAULT_MODEL_POLICY: ModelPolicy = {
   defaultExecutorTier: 'fast',

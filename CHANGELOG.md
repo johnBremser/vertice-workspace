@@ -68,6 +68,13 @@ Este arquivo registra a evolução técnica do **Vértice Workspace** (*Powered 
 - Aviso explícito no formulário quando ainda não há nenhuma conexão real do Core disponível (falta autenticar a sessão e sincronizar o catálogo).
 - Regressão coberta por `src/domain/__tests__/teamValidation.test.ts` (`selectableConnectionsForMode`).
 
+### Correção da resolução de modo no arranque (`V6-13`)
+
+- **Correção**: a regra que mantinha workspaces de simulação legados no modo demo durante o arranque podia divergir do modo gravado no estado. Resultado: o badge anunciava **"Modo AionCore local"** enquanto o gateway de simulação era o ativo, e **"Verificar /health"** respondia "Alterne para o Modo AionCore local para executar operações do servidor Core".
+- O modo gravado no estado passou a ser a fonte autoritativa (é ele que registra a última escolha explícita do usuário); apenas o workspace **apenas semeado** segue o padrão. A escolha explícita em Configurações continua prevalecendo sobre ambos.
+- Trava adicional: após a troca de gateway, o modo persistido é alinhado ao gateway em uso, de modo que badge e capacidades reais nunca divirjam.
+- Regressão coberta por `src/services/__tests__/executionModePreference.test.ts` (caso "respeita o modo gravado no estado mesmo com conversas de demonstração").
+
 ---
 
 ## [Histórico v5 — Prévia local]

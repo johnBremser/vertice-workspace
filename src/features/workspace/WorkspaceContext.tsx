@@ -450,6 +450,13 @@ export function WorkspaceProvider({
           await nextGw.loadWorkspace();
           activeGateway = nextGw;
         }
+        // The badge and the gateway must never disagree: align the persisted
+        // mode with the gateway actually in use, otherwise the UI would claim
+        // "AionCore local" while Core operations are unavailable.
+        if (activeGateway.getStateSnapshot().executionMode !== effectiveMode) {
+          await activeGateway.setExecutionMode(effectiveMode);
+          await persistence.flushSave();
+        }
         if (!cancelled && effectiveMode === 'aion_core') {
           void probeCoreSessionOnStartup(
             activeGateway,

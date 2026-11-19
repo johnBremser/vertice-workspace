@@ -1,6 +1,6 @@
 # Vértice Workspace
 
-Plano ativo: [Plano v6](docs/implementation_plan_v6_local.md) · Progresso: [docs/v6-progress.md](docs/v6-progress.md) · Candidata funcional: [docs/v6-09-release-candidate.md](docs/v6-09-release-candidate.md) · Avisos e licenças: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).  
+Plano ativo: [Plano v6](docs/implementation_plan_v6_local.md) · Progresso: [docs/v6-progress.md](docs/v6-progress.md) · Candidata funcional: [docs/v6-09-release-candidate.md](docs/v6-09-release-candidate.md) · Licença: [Apache-2.0](LICENSE) · Terceiros: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).  
 Estado do pacote: `0.4.0` (pré-lançamento `v1.0.0` **não declarada**). A combinação suportada (`AionCore v0.2.2` + `Codex CLI` multi-sessão + `Cursor`) possui prontidão funcional validada no Windows 11; consulte as limitações conhecidas em [docs/compatibility-matrix.md](docs/compatibility-matrix.md).
 
 > **Seu time de agentes, do plano à entrega.**  
@@ -118,7 +118,7 @@ Consulte os guias detalhados e licenças:
 - `docs/local-validation.md` — Roteiro passo a passo para validação local com Codex, Cursor e Antigravity.
 - `docs/v6-09-release-candidate.md` — Consolidação dos 10 cenários da candidata funcional e distinção prontidão × publicação × `v1.0.0`.
 - `docs/v6-progress.md` — Progresso completo do ciclo v6 (`V6-00` a `V6-10`), além dos registros históricos `docs/v4-progress.md` e `docs/v5-progress.md`.
-- `CHANGELOG.md` e `THIRD_PARTY_NOTICES.md` — Histórico de mudanças e atribuições Apache-2.0 (`AionUi`, `AionCore`).
+- `LICENSE`, `CHANGELOG.md` e `THIRD_PARTY_NOTICES.md` — Licença Apache-2.0 do projeto, histórico de mudanças e atribuições Apache-2.0 (`AionUi`, `AionCore`).
 
 > **Publicação e CI**: o workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) executa `lint`, `build`, `test` (`70` testes em `ubuntu-latest` Node 22/24 e `windows-latest` Node 24) e Playwright E2E em `ubuntu-latest`. Após publicar em remoto (`git push -u origin main`), observe a execução da CI no GitHub Actions antes de declarar qualquer release ou tag.
 

@@ -33,7 +33,7 @@ export function ModelPolicySection() {
           Política de perfis e escalonamento por qualidade
         </h2>
         <p className="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
-          Perfis genéricos de demonstração (sem IDs inventados de fornecedores nem medições fictícias de custo, tokens ou saldo). Somente reprovações de qualidade contam para sugerir escalonamento; falhas operacionais não consomem tentativas.
+          Perfis de referência para escalonamento automático (sem medições fictícias de custo, tokens ou saldo). Somente reprovações de qualidade contam para sugerir escalonamento; falhas operacionais não consomem tentativas.
         </p>
       </div>
 

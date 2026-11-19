@@ -14,7 +14,6 @@ import {
   getTaskSummaryCounts,
 } from '../../domain/selectors';
 import { PT_BR } from '../../i18n/ptBR';
-import { DemoControlsMenu } from './DemoControlsMenu';
 import { useWorkspace } from './WorkspaceContext';
 
 interface WorkspaceHeaderProps {
@@ -23,7 +22,6 @@ interface WorkspaceHeaderProps {
 
 export function WorkspaceHeader({ onOpenExport }: WorkspaceHeaderProps) {
   const {
-    store,
     activeProject,
     activeConversation,
     storageStatus,
@@ -36,11 +34,10 @@ export function WorkspaceHeader({ onOpenExport }: WorkspaceHeaderProps) {
     sidebarCollapsed,
     mainSurface,
     setMainSurface,
-    hasDemoControls,
   } = useWorkspace();
 
   const conv = activeConversation?.conversation;
-  const isCoreMode = store?.executionMode === 'aion_core';
+  const isCoreMode = true;
   const coordinator = activeConversation?.participants.find(
     (p) => p.id === conv?.coordinatorParticipantId,
   );
@@ -56,21 +53,9 @@ export function WorkspaceHeader({ onOpenExport }: WorkspaceHeaderProps) {
       case 'running':
         return (
           <StatusBadge
-            label={
-              conv.executionMode === 'aion_core'
-                ? 'Em execução (Core)'
-                : 'Em execução · simulação'
-            }
+            label="Em execução (Core)"
             tone="accent"
             iconKind="running"
-          />
-        );
-      case 'paused_demo':
-        return (
-          <StatusBadge
-            label="Demonstração pausada"
-            tone="warning"
-            iconKind="paused"
           />
         );
       case 'paused_queue':
@@ -200,8 +185,6 @@ export function WorkspaceHeader({ onOpenExport }: WorkspaceHeaderProps) {
           {mainSurface === 'conversation' && (
             <>
               <div className="mr-1 hidden sm:block">{execBadge}</div>
-
-              {hasDemoControls && <DemoControlsMenu />}
 
               <button
                 type="button"

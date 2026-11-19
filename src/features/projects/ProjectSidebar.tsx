@@ -324,14 +324,10 @@ export function ProjectSidebar() {
             />
             <div className="min-w-0">
               <div className="truncate text-xs font-medium text-[var(--text-secondary)]">
-                {isCoreMode
-                  ? APP_BRAND.coreBadgeLabel
-                  : APP_BRAND.demoBadgeLabel}
+                {APP_BRAND.coreBadgeLabel}
               </div>
               <div className="truncate text-[10px] text-[var(--text-muted)]">
-                {isCoreMode
-                  ? 'Conexão HTTP/WS com Core local'
-                  : 'Simulação determinística no navegador'}
+                Conexão HTTP/WS com Core local
               </div>
             </div>
           </div>

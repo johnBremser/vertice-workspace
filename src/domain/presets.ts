@@ -1,29 +1,40 @@
+import { APP_BRAND } from '../config/brand';
 import type {
   AgentProfile,
   ConnectionAdapterConfig,
   DemoModelTier,
+  ModelPolicy,
   ModelRef,
   Participant,
   ParticipantProfile,
   ParticipantRole,
   TeamPreset,
+  WorkspaceStoreState,
 } from './types';
 import { getPrimaryRole } from './teamValidation';
+
+export const DEFAULT_MODEL_POLICY: ModelPolicy = {
+  defaultExecutorTier: 'fast',
+  reviewerTier: 'review',
+  escalationTargetTier: 'advanced',
+  qualityRejectionsBeforeSuggest: 2,
+  approvalMode: 'manual',
+};
 
 export function makeDemoModelRef(
   tier: DemoModelTier,
   customLabel?: string,
 ): ModelRef {
   const defaultLabels: Record<DemoModelTier, string> = {
-    fast: 'Rápido (Demonstração)',
-    review: 'Revisão (Demonstração)',
-    advanced: 'Avançado (Demonstração)',
+    fast: 'Rápido',
+    review: 'Revisão',
+    advanced: 'Avançado',
   };
   return {
     displayName: customLabel ?? defaultLabels[tier],
-    source: 'demo_tier',
+    source: 'user_preference',
     tier,
-    confirmation: 'simulated',
+    confirmation: 'unverified_preference',
   };
 }
 
@@ -39,195 +50,50 @@ export function makePreferenceModelRef(
   };
 }
 
-export const DEFAULT_CONNECTIONS: ConnectionAdapterConfig[] = [
-  {
-    id: 'conn_codex_demo',
-    displayName: 'Codex (Demonstração)',
-    vendorLabel: 'Adaptador demonstrativo Codex',
-    mode: 'demo',
-    backendId: 'codex',
-    configured: true,
-    coreReachability: 'unknown',
-    catalogLoaded: false,
-    executableStatus: 'unknown_in_browser',
-    authStatus: 'simulated',
-    sessionStatus: 'active',
-    availableModels: [
-      { externalId: 'demo:fast', displayName: 'Rápido (Demonstração)', source: 'demo_tier', tier: 'fast', confirmed: false },
-      { externalId: 'demo:review', displayName: 'Revisão (Demonstração)', source: 'demo_tier', tier: 'review', confirmed: false },
-      { externalId: 'demo:advanced', displayName: 'Avançado (Demonstração)', source: 'demo_tier', tier: 'advanced', confirmed: false },
-    ],
-    lastConnectionTestAt: '2026-11-16T09:58:00.000Z',
-    lastConnectionTestResult: 'Simulação verificada: protocolo interno pronto no preview.',
-    capabilities: {
-      supportsInterrupt: true,
-      supportsMidRunContextInjection: true,
-      supportsModelSwitchInSession: false,
-      supportsPauseQueue: true,
-      supportsSessionTerminate: true,
-    },
-    isSimulated: true,
-  },
-  {
-    id: 'conn_claude_demo',
-    displayName: 'Claude (Demonstração)',
-    vendorLabel: 'Adaptador demonstrativo Claude',
-    mode: 'demo',
-    backendId: 'claude',
-    configured: true,
-    coreReachability: 'unknown',
-    catalogLoaded: false,
-    executableStatus: 'unknown_in_browser',
-    authStatus: 'simulated',
-    sessionStatus: 'active',
-    availableModels: [
-      { externalId: 'demo:fast', displayName: 'Rápido (Demonstração)', source: 'demo_tier', tier: 'fast', confirmed: false },
-      { externalId: 'demo:review', displayName: 'Revisão (Demonstração)', source: 'demo_tier', tier: 'review', confirmed: false },
-      { externalId: 'demo:advanced', displayName: 'Avançado (Demonstração)', source: 'demo_tier', tier: 'advanced', confirmed: false },
-    ],
-    lastConnectionTestAt: '2026-11-16T09:58:10.000Z',
-    lastConnectionTestResult: 'Simulação verificada: canal de execução simulado ativo.',
-    capabilities: {
-      supportsInterrupt: true,
-      supportsMidRunContextInjection: false,
-      supportsModelSwitchInSession: true,
-      supportsPauseQueue: true,
-      supportsSessionTerminate: true,
-    },
-    isSimulated: true,
-  },
-  {
-    id: 'conn_antigravity_demo',
-    displayName: 'Antigravity (Demonstração)',
-    vendorLabel: 'Adaptador demonstrativo Antigravity',
-    mode: 'demo',
-    backendId: 'antigravity',
-    configured: true,
-    coreReachability: 'unknown',
-    catalogLoaded: false,
-    executableStatus: 'unknown_in_browser',
-    authStatus: 'unknown',
-    sessionStatus: 'active',
-    availableModels: [
-      { externalId: 'demo:fast', displayName: 'Rápido (Demonstração)', source: 'demo_tier', tier: 'fast', confirmed: false },
-      { externalId: 'demo:review', displayName: 'Revisão (Demonstração)', source: 'demo_tier', tier: 'review', confirmed: false },
-      { externalId: 'demo:advanced', displayName: 'Avançado (Demonstração)', source: 'demo_tier', tier: 'advanced', confirmed: false },
-    ],
-    lastConnectionTestAt: '2026-11-16T09:58:15.000Z',
-    lastConnectionTestResult: 'Simulação verificada: perfil demonstrativo pronto sob demanda.',
-    capabilities: {
-      supportsInterrupt: false,
-      supportsMidRunContextInjection: false,
-      supportsModelSwitchInSession: false,
-      supportsPauseQueue: true,
-      supportsSessionTerminate: true,
-    },
-    isSimulated: true,
-  },
-];
+export const DEFAULT_CONNECTIONS: ConnectionAdapterConfig[] = [];
 
 export const DEFAULT_PARTICIPANT_PROFILES: ParticipantProfile[] = [
   {
-    id: 'prof_codex_coord',
-    displayName: 'Codex',
-    connectionId: 'conn_codex_demo',
-    defaultRoles: ['coordinator', 'planner'],
-    modelRef: makeDemoModelRef('review'),
-    instructions: 'Organizar o pedido da Geral em tarefas claras e rastreáveis.',
-    isSimulated: true,
-  },
-  {
-    id: 'prof_claude_exec',
-    displayName: 'Claude',
-    connectionId: 'conn_claude_demo',
-    defaultRoles: ['executor'],
-    modelRef: makeDemoModelRef('fast'),
-    instructions: 'Implementar as tarefas atribuídas respeitando critérios e contexto.',
-    isSimulated: true,
-  },
-  {
-    id: 'prof_antigravity_rev',
-    displayName: 'Antigravity',
-    connectionId: 'conn_antigravity_demo',
-    defaultRoles: ['reviewer'],
-    modelRef: makeDemoModelRef('review'),
-    instructions: 'Auditar entregas contra critérios de aceitação e contexto vigente.',
-    isSimulated: true,
-  },
-  {
     id: 'prof_terra_61',
     displayName: 'Terra 6.1',
-    connectionId: 'conn_codex_demo',
+    connectionId: '',
     defaultRoles: ['coordinator'],
-    modelRef: makePreferenceModelRef('Terra 6.1 (preferência demonstrativa)', 'review'),
+    modelRef: makePreferenceModelRef('Terra 6.1 (preferência)', 'review'),
     instructions: 'Coordenar a equipe, consolidar decisões e aprovar delegações.',
-    isSimulated: true,
+    isSimulated: false,
   },
   {
     id: 'prof_sol_61',
     displayName: 'Sol 6.1',
-    connectionId: 'conn_codex_demo',
+    connectionId: '',
     defaultRoles: ['planner', 'reviewer'],
-    modelRef: makePreferenceModelRef('Sol 6.1 (preferência demonstrativa)', 'review'),
-    instructions: 'Estruturar o plano de tarefas e auditar entregas em sessão dedicada Codex.',
-    isSimulated: true,
+    modelRef: makePreferenceModelRef('Sol 6.1 (preferência)', 'review'),
+    instructions: 'Estruturar o plano de tarefas e auditar entregas em sessão dedicada.',
+    isSimulated: false,
   },
   {
     id: 'prof_gemini_hydrogen',
     displayName: 'Gemini Hydrogen',
-    connectionId: 'conn_antigravity_demo',
+    connectionId: '',
     defaultRoles: ['executor'],
-    modelRef: makePreferenceModelRef('Gemini Hydrogen (preferência demonstrativa)', 'fast'),
-    instructions: 'Executar implementação e registrar evidências via conexão Antigravity.',
-    isSimulated: true,
+    modelRef: makePreferenceModelRef('Gemini Hydrogen (preferência)', 'fast'),
+    instructions: 'Executar implementação e registrar evidências na aba dedicada.',
+    isSimulated: false,
   },
 ];
 
 export const DEFAULT_TEAM_PRESETS: TeamPreset[] = [
   {
-    id: 'preset_demo_original',
-    name: 'Equipe padrão (Demonstração)',
-    description: 'Codex (coordenador), Claude (executor) e Antigravity (auditor/revisor).',
-    mode: 'demo',
-    isBuiltIn: true,
-    members: [
-      {
-        profileId: 'prof_codex_coord',
-        connectionId: 'conn_codex_demo',
-        displayName: 'Codex',
-        roles: ['coordinator', 'planner'],
-        modelRef: makeDemoModelRef('review'),
-        instructions: 'Coordenar a conversa e estruturar o plano.',
-      },
-      {
-        profileId: 'prof_claude_exec',
-        connectionId: 'conn_claude_demo',
-        displayName: 'Claude',
-        roles: ['executor'],
-        modelRef: makeDemoModelRef('fast'),
-        instructions: 'Executar tarefas técnicas conforme contexto compartilhado.',
-      },
-      {
-        profileId: 'prof_antigravity_rev',
-        connectionId: 'conn_antigravity_demo',
-        displayName: 'Antigravity',
-        roles: ['reviewer'],
-        modelRef: makeDemoModelRef('review'),
-        instructions: 'Validar entregas contra critérios de aceitação.',
-      },
-    ],
-  },
-  {
     id: 'preset_terra_sol_gemini',
     name: 'Terra 6.1 / Sol 6.1 / Gemini Hydrogen',
     description:
-      'Duas sessões distintas pela conexão Codex (Terra coordenador; Sol planejador+auditor) e Gemini Hydrogen (executor) via Antigravity — sem Claude.',
-    mode: 'demo',
+      'Coordenador (Terra 6.1), Planejador+Auditor (Sol 6.1) e Executor (Gemini Hydrogen) vinculados aos CLIs reais do AionCore.',
+    mode: 'aion_core',
     isBuiltIn: true,
     members: [
       {
         profileId: 'prof_terra_61',
-        connectionId: 'conn_codex_demo',
+        connectionId: '',
         displayName: 'Terra 6.1',
         roles: ['coordinator'],
         modelRef: makePreferenceModelRef('Terra 6.1 (preferência)', 'review'),
@@ -235,19 +101,19 @@ export const DEFAULT_TEAM_PRESETS: TeamPreset[] = [
       },
       {
         profileId: 'prof_sol_61',
-        connectionId: 'conn_codex_demo',
+        connectionId: '',
         displayName: 'Sol 6.1',
         roles: ['planner', 'reviewer'],
         modelRef: makePreferenceModelRef('Sol 6.1 (preferência)', 'review'),
-        instructions: 'Planejar tarefas e auditar entregas em sessão Codex separada.',
+        instructions: 'Planejar tarefas e auditar entregas em sessão separada.',
       },
       {
         profileId: 'prof_gemini_hydrogen',
-        connectionId: 'conn_antigravity_demo',
+        connectionId: '',
         displayName: 'Gemini Hydrogen',
         roles: ['executor'],
         modelRef: makePreferenceModelRef('Gemini Hydrogen (preferência)', 'fast'),
-        instructions: 'Implementar tarefas delegadas e enviar evidências via Antigravity.',
+        instructions: 'Implementar tarefas delegadas e enviar evidências.',
       },
     ],
   },
@@ -255,27 +121,27 @@ export const DEFAULT_TEAM_PRESETS: TeamPreset[] = [
     id: 'preset_terra_sol_split_gemini',
     name: 'Terra 6.1 / Sol Planejador + Sol Auditor / Gemini Hydrogen',
     description:
-      'Quatro sessões independentes: Terra (coordenador Codex), Sol Planejador (Codex), Sol Auditor (sessão distinta Codex) e Gemini Hydrogen (executor Antigravity).',
-    mode: 'demo',
+      'Quatro sessões independentes vinculadas aos CLIs reais do AionCore: Coordenador, Planejador, Auditor independente e Executor.',
+    mode: 'aion_core',
     isBuiltIn: true,
     members: [
       {
         profileId: 'prof_terra_61',
-        connectionId: 'conn_codex_demo',
+        connectionId: '',
         displayName: 'Terra 6.1',
         roles: ['coordinator'],
         modelRef: makePreferenceModelRef('Terra 6.1 (preferência)', 'review'),
         instructions: 'Coordenar a conversa e delegações.',
       },
       {
-        connectionId: 'conn_codex_demo',
+        connectionId: '',
         displayName: 'Sol Planejador',
         roles: ['planner'],
         modelRef: makePreferenceModelRef('Sol 6.1 (preferência)', 'review'),
         instructions: 'Elaborar plano de tarefas, dependências e critérios.',
       },
       {
-        connectionId: 'conn_codex_demo',
+        connectionId: '',
         displayName: 'Sol Auditor',
         roles: ['reviewer'],
         modelRef: makePreferenceModelRef('Sol 6.1 (preferência)', 'review'),
@@ -283,15 +149,45 @@ export const DEFAULT_TEAM_PRESETS: TeamPreset[] = [
       },
       {
         profileId: 'prof_gemini_hydrogen',
-        connectionId: 'conn_antigravity_demo',
+        connectionId: '',
         displayName: 'Gemini Hydrogen',
         roles: ['executor'],
         modelRef: makePreferenceModelRef('Gemini Hydrogen (preferência)', 'fast'),
-        instructions: 'Implementar tarefas delegadas via conexão Antigravity.',
+        instructions: 'Implementar tarefas delegadas.',
       },
     ],
   },
 ];
+
+export function createInitialWorkspaceState(): WorkspaceStoreState {
+  const defaultCoreBaseUrl =
+    typeof import.meta !== 'undefined' &&
+    import.meta.env &&
+    typeof import.meta.env.VITE_AIONCORE_BASE_URL === 'string'
+      ? import.meta.env.VITE_AIONCORE_BASE_URL
+      : '';
+
+  return {
+    schemaVersion: APP_BRAND.storageSchemaVersion,
+    executionMode: 'aion_core',
+    coreSettings: {
+      baseUrl: defaultCoreBaseUrl,
+      workspacePath: '',
+      authMode: 'cookie_or_bearer',
+    },
+    coreRuntimeStatus: 'unknown',
+    coreSessionAuthenticated: false,
+    projects: [],
+    connections: [],
+    agentProfiles: [],
+    participantProfiles: structuredClone(DEFAULT_PARTICIPANT_PROFILES),
+    teamPresets: structuredClone(DEFAULT_TEAM_PRESETS),
+    modelPolicy: { ...DEFAULT_MODEL_POLICY },
+    conversations: {},
+    activeProjectId: '',
+    activeConversationId: '',
+  };
+}
 
 export function connectionsToAgentProfiles(
   connections: ConnectionAdapterConfig[],

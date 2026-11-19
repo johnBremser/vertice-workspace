@@ -37,7 +37,6 @@ function WorkspaceShell() {
     dismissBanner,
     reconcileConversation,
     controlExecution,
-    resumePausedDemo,
     importWorkspaceState,
   } = useWorkspace();
 
@@ -46,19 +45,9 @@ function WorkspaceShell() {
   const conv = activeConversation?.conversation;
   const hasGap =
     conv?.syncState === 'gap_detected' || conv?.syncState === 'incomplete';
-  const isPausedDemo =
-    store?.executionMode !== 'aion_core' &&
-    conv?.executionMode !== 'aion_core' &&
-    conv?.executionStatus === 'paused_demo' &&
-    mainSurface === 'conversation';
-  const isPausedCoreQueue =
-    conv?.executionMode === 'aion_core' &&
-    conv?.executionStatus === 'paused_queue';
+  const isPausedCoreQueue = conv?.executionStatus === 'paused_queue';
   const needsCoreTeamSetup =
-    store?.executionMode === 'aion_core' &&
-    conv &&
-    !conv.externalTeamId &&
-    mainSurface === 'conversation';
+    Boolean(conv) && !conv?.externalTeamId && mainSurface === 'conversation';
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-[var(--bg-canvas)] text-[var(--text-primary)]">
@@ -170,26 +159,6 @@ function WorkspaceShell() {
                 <span>{PT_BR.resumeCoreQueueAction}</span>
               </button>
             </div>
-          </div>
-        )}
-
-        {/* Paused After Reload Banner */}
-        {isPausedDemo && (
-          <div
-            role="status"
-            className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-hairline)] bg-[var(--bg-elevated)] px-4 py-2 text-xs text-[var(--text-primary)] sm:px-6"
-          >
-            <span>
-              {PT_BR.pausedAfterReloadLabel}: os timers anteriores não foram reiniciados automaticamente.
-            </span>
-            <button
-              type="button"
-              onClick={resumePausedDemo}
-              className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
-            >
-              <Play className="h-3 w-3" aria-hidden="true" />
-              <span>{PT_BR.resumeDemoAction}</span>
-            </button>
           </div>
         )}
 

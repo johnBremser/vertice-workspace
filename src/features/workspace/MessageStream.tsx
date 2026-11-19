@@ -92,7 +92,7 @@ export function MessageStream() {
     controlExecution,
     respondPermission,
     resolveEscalation,
-    triggerDisconnectResume,
+    coreConnectWs,
   } = useWorkspace();
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -183,7 +183,40 @@ export function MessageStream() {
   }, [highlightedEvent, isGeneral, generalItems, tabMessages, totalItems]);
 
   if (!activeConversation || !store) {
-    return null;
+    const coreConns = (store?.connections ?? []).filter((c) => c.mode === 'aion_core');
+    const confirmedModelsCount = coreConns.reduce(
+      (acc, c) => acc + c.availableModels.filter((m) => m.confirmed).length,
+      0,
+    );
+    return (
+      <div className="flex flex-1 items-center justify-center p-6">
+        <div className="w-full max-w-lg rounded-xl border border-[var(--border-hairline)] bg-[var(--bg-surface)] p-6 text-center shadow-sm">
+          <h2 className="text-base font-semibold text-[var(--text-primary)]">
+            Pronto para operar com seus agentes locais
+          </h2>
+          <p className="mt-2 text-xs leading-relaxed text-[var(--text-secondary)]">
+            {store?.coreRuntimeStatus === 'unreachable'
+              ? 'O servidor AionCore local não respondeu ainda. Inicie o aioncore.exe ou confira o endereço em Configurações.'
+              : !store?.coreSessionAuthenticated
+                ? 'O AionCore local exige autenticação WebUI uma vez no navegador para listar e controlar seus CLIs locais.'
+                : coreConns.length > 0
+                  ? `${coreConns.length} assistente(s) e ${confirmedModelsCount} modelo(s) real(is) carregado(s) do AionCore. Clique em "+ Novo projeto" na barra lateral para iniciar sua primeira conversa.`
+                  : 'Sessão autenticada no AionCore. Sincronize o catálogo em Configurações para carregar seus CLIs e modelos disponíveis.'}
+          </p>
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+            <button
+              type="button"
+              onClick={() => setMainSurface('settings')}
+              className="rounded-md bg-[var(--accent)] px-4 py-2 text-xs font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
+            >
+              {!store?.coreSessionAuthenticated
+                ? 'Conectar e autenticar em Configurações'
+                : 'Abrir Configurações e catálogo'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   const activeParticipant = !isGeneral
@@ -354,7 +387,7 @@ export function MessageStream() {
               activeConversation.conversation.executionMode === 'demo' && (
                 <button
                   type="button"
-                  onClick={() => triggerDisconnectResume(activeParticipant.id)}
+                  onClick={() => void coreConnectWs()}
                   className="inline-flex h-7 items-center gap-1 whitespace-nowrap rounded-md bg-[var(--accent)] px-2.5 text-xs font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
                 >
                   <RefreshCw className="h-3 w-3" aria-hidden="true" />

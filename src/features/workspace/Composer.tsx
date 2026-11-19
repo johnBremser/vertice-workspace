@@ -148,10 +148,7 @@ export function Composer() {
         </div>
 
         <div className="mt-2 hidden text-center text-[10px] text-[var(--text-muted)] sm:block">
-          {APP_BRAND.technicalSignature} ·{' '}
-          {isCoreMode
-            ? 'Conexão local HTTP/WS'
-            : 'Simulação determinística no navegador'}
+          {APP_BRAND.technicalSignature} · Conexão local HTTP/WS
         </div>
       </div>
     </div>

@@ -55,13 +55,6 @@ export default defineConfig(({ mode }) => {
             if (normalized.includes('/src/services/aionCore')) {
               return 'aion-core-gateway';
             }
-            if (
-              normalized.includes('/src/services/mockGateway') ||
-              normalized.includes('/src/services/collaborationEngine') ||
-              normalized.includes('/src/services/demoScenario')
-            ) {
-              return 'demo-gateway';
-            }
             return undefined;
           },
         },

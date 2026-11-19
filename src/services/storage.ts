@@ -121,7 +121,7 @@ export class IndexedDbStorageDriver implements StorageDriver {
         db.close();
         reject(
           tx.error ??
-            new Error('Transação de gravação abortada (possível cota excedida).'),
+          new Error('Transação de gravação abortada (possível cota excedida).'),
         );
       };
     });
@@ -379,14 +379,19 @@ export class WorkspacePersistenceManager {
 }
 
 /**
- * Ensures reloading the page never restarts timers or leaves a simulated run
- * pretending to execute in the background. Active runs pause safely.
+ * Ensures reloading the page never leaves active runs pretending to execute in
+ * the background, invalidates live runtime/auth flags until re-verified, and
+ * removes legacy seeded demonstration artifacts from previous builds.
  */
 export function sanitizeLoadedStateAfterReload(
   state: WorkspaceStoreState,
 ): WorkspaceStoreState {
+  const nextProjects = state.projects.filter((p) => p.id !== 'proj_demo_portal');
   const nextConversations: WorkspaceStoreState['conversations'] = {};
   for (const [convId, projection] of Object.entries(state.conversations)) {
+    if (convId === 'conv_demo_busca_nome') {
+      continue;
+    }
     const wasRunning =
       projection.conversation.executionStatus === 'running' ||
       Boolean(projection.conversation.autoPlayWasRunning);
@@ -395,33 +400,47 @@ export function sanitizeLoadedStateAfterReload(
       ...projection,
       conversation: {
         ...projection.conversation,
+        executionMode: 'aion_core',
         executionStatus: wasRunning
-          ? projection.conversation.executionMode === 'aion_core'
+          ? 'paused_queue'
+          : projection.conversation.executionStatus === 'paused_demo'
             ? 'paused_queue'
-            : 'paused_demo'
-          : projection.conversation.executionStatus,
+            : projection.conversation.executionStatus,
         autoPlayWasRunning: false,
       },
     };
   }
-  const nextConnections = state.connections.map((conn) =>
-    conn.mode === 'aion_core'
-      ? {
-          ...conn,
-          coreReachability: 'unknown' as const,
-          catalogLoaded: false,
-          coreAgentStatus: undefined,
-          authStatus: 'unknown' as const,
-          sessionStatus: 'inactive' as const,
-        }
-      : conn,
-  );
+  const nextConnections = state.connections
+    .filter((conn) => conn.mode === 'aion_core')
+    .map((conn) => ({
+      ...conn,
+      coreReachability: 'unknown' as const,
+      catalogLoaded: false,
+      coreAgentStatus: undefined,
+      authStatus: 'unknown' as const,
+      sessionStatus: 'inactive' as const,
+    }));
+
+  const activeConversationId =
+    state.activeConversationId && nextConversations[state.activeConversationId]
+      ? state.activeConversationId
+      : Object.keys(nextConversations)[0] ?? '';
+  const activeProjectId =
+    state.activeProjectId && nextProjects.some((p) => p.id === state.activeProjectId)
+      ? state.activeProjectId
+      : activeConversationId
+        ? nextConversations[activeConversationId].conversation.projectId
+        : nextProjects[0]?.id ?? '';
 
   return {
     ...state,
+    executionMode: 'aion_core',
     coreRuntimeStatus: 'unknown',
     coreSessionAuthenticated: false,
+    projects: nextProjects,
     connections: nextConnections,
     conversations: nextConversations,
+    activeProjectId,
+    activeConversationId,
   };
 }

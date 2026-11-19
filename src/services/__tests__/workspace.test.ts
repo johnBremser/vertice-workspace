@@ -1,18 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import type { WorkspaceStoreState } from '../../domain/types';
+import { createInitialWorkspaceState } from '../../domain/presets';
+import type {
+  ConnectionAdapterConfig,
+  ConversationProjection,
+  WorkspaceStoreState,
+} from '../../domain/types';
+import { probeCoreSessionOnStartup } from '../../features/workspace/WorkspaceContext';
 import { AionCoreAdapter, AionCoreAdapterSkeleton } from '../aionCoreAdapter';
-import {
-  DEMO_CONVERSATION_ID,
-  DEMO_PROJECT_ID,
-  createInitialWorkspaceState,
-} from '../demoScenario';
 import {
   buildConversationMarkdownExport,
   buildWorkspaceJsonExport,
 } from '../exportService';
 import { GatewayCapabilityError, type AgentWorkspaceGateway } from '../gateway';
-import { probeCoreSessionOnStartup } from '../../features/workspace/WorkspaceContext';
-import { MockWorkspaceGateway } from '../mockGateway';
 import {
   MemoryOnlyStorageDriver,
   type StorageDriver,
@@ -20,391 +19,183 @@ import {
   sanitizeLoadedStateAfterReload,
 } from '../storage';
 
-async function advanceScenarioWithManualApprovals(
-  gateway: MockWorkspaceGateway,
-  conversationId: string,
-  escalationChoice: 'approved' | 'dismissed' = 'approved',
-) {
-  for (let i = 0; i < 12; i += 1) {
-    const res = gateway.stepScenario(conversationId);
-    if (res.blocked) {
-      const conv = gateway.getStateSnapshot().conversations[conversationId];
-      const pendingPerm = conv.permissions.find((p) => p.status === 'pending');
-      if (pendingPerm) {
-        await gateway.respondPermission({
-          conversationId,
-          requestId: pendingPerm.id,
-          decision: 'approved',
-        });
-        continue;
-      }
-      const pendingEsc = conv.escalations.find((e) => e.status === 'suggested');
-      if (pendingEsc) {
-        await gateway.resolveEscalation({
-          conversationId,
-          escalationId: pendingEsc.id,
-          resolution: escalationChoice,
-        });
-        continue;
-      }
-    }
-    if (res.finished) break;
-  }
-}
+const SAMPLE_CORE_CONNECTION: ConnectionAdapterConfig = {
+  id: 'conn_core_codex_test',
+  displayName: 'Codex CLI (AionCore)',
+  vendorLabel: 'AionCore · codex',
+  mode: 'aion_core',
+  backendId: 'codex',
+  coreAgentId: 'agent_codex_test',
+  coreAssistantId: 'asst_codex_test',
+  configured: true,
+  coreReachability: 'reachable',
+  catalogLoaded: true,
+  executableStatus: 'verified',
+  coreAgentStatus: 'online',
+  authStatus: 'authenticated',
+  sessionStatus: 'active',
+  availableModels: [
+    {
+      externalId: 'gpt-5.4',
+      displayName: 'gpt-5.4',
+      source: 'core_catalog',
+      confirmed: true,
+    },
+  ],
+  capabilities: {
+    supportsInterrupt: false,
+    supportsMidRunContextInjection: false,
+    supportsModelSwitchInSession: true,
+    supportsPauseQueue: true,
+    supportsSessionTerminate: false,
+  },
+  isSimulated: false,
+};
 
 describe('Workspace gateway, storage failure, reload recovery & export', () => {
   it('switches to session_only mode on QuotaExceededError without silent data loss and keeps export functional', async () => {
     const failingDriver = new MemoryOnlyStorageDriver({ failOnWrite: true });
     const persistence = new WorkspacePersistenceManager(failingDriver);
-    const gateway = new MockWorkspaceGateway(persistence);
+    const gateway = new AionCoreAdapter(persistence);
 
-    await gateway.loadWorkspace();
+    const loaded = await gateway.loadWorkspace();
     expect(persistence.getInfo().status).toBe('session_only');
 
-    await gateway.sendMessage({
-      conversationId: DEMO_CONVERSATION_ID,
-      targetTab: 'general',
-      bodyMarkdown: 'Mensagem mantida apenas na sessão',
+    await gateway.importWorkspaceState({
+      ...loaded,
+      connections: [SAMPLE_CORE_CONNECTION],
+    });
+    const project = await gateway.createProject({
+      name: 'Projeto em Sessão',
+      description: 'Mantido em memória quando armazenamento falha',
+      workspacePathInfo: 'C:/session-only',
+    });
+    const conv = await gateway.createConversation({
+      projectId: project.id,
+      title: 'Conversa em Sessão',
+      presetId: 'preset_terra_sol_gemini',
+    });
+    await gateway.publishContextRevision({
+      conversationId: conv.conversation.id,
+      authorLabel: 'Você',
+      summaryOfChange: 'Contexto mantido apenas na sessão',
+      objective: 'Objetivo preservado para exportação',
+      permanentInstructions: [],
+      constraints: [],
+      acceptanceCriteria: ['Exportar JSON e Markdown'],
+      confirmedDecisions: [],
     });
 
     const snapshot = gateway.getStateSnapshot();
-    const conv = snapshot.conversations[DEMO_CONVERSATION_ID];
+    const updatedConv = snapshot.conversations[conv.conversation.id];
     const md = buildConversationMarkdownExport(
       snapshot.projects[0],
-      conv,
+      updatedConv,
       snapshot.modelPolicy,
     );
     const json = buildWorkspaceJsonExport(snapshot);
 
-    expect(md).toContain('Mensagem mantida apenas na sessão');
+    expect(md).toContain('Objetivo preservado para exportação');
     expect(json).toContain('"exportSchemaVersion": "2.0.0"');
-    expect(json).toContain(conv.eventLog[0].id);
+    expect(json).toContain(updatedConv.conversation.id);
 
     gateway.dispose();
   });
 
-  it('recovers persisted runs as paused_demo after reload without restarting timers', () => {
-    const state = createInitialWorkspaceState();
-    state.conversations[DEMO_CONVERSATION_ID].conversation.executionStatus =
-      'running';
-    state.conversations[DEMO_CONVERSATION_ID].conversation.autoPlayWasRunning =
-      true;
+  it('strips legacy demo entities and recovers persisted running conversations as paused_queue after reload', () => {
+    const base = createInitialWorkspaceState();
+    const realConv: ConversationProjection = {
+      conversation: {
+        id: 'conv_real_1',
+        projectId: 'proj_real_1',
+        title: 'Conversa Real',
+        status: 'active',
+        coordinatorParticipantId: 'part_coord',
+        executionMode: 'aion_core',
+        executionStatus: 'running',
+        syncState: 'synced',
+        lastAppliedSeq: 2,
+        scenarioStepIndex: 0,
+        autoPlayWasRunning: true,
+        createdAt: '2026-11-18T10:00:00.000Z',
+        updatedAt: '2026-11-18T10:00:00.000Z',
+      },
+      participants: [],
+      contextRevisions: [],
+      planRevisions: [],
+      tasks: [],
+      permissions: [],
+      escalations: [],
+      eventLog: [],
+      generalFeed: [],
+      messagesByTab: {},
+      pendingOutOfOrder: {},
+      coordinatorHistory: [],
+      configChanges: [],
+      seenEventIds: [],
+    };
 
-    const sanitized = sanitizeLoadedStateAfterReload(state);
-    const conv = sanitized.conversations[DEMO_CONVERSATION_ID].conversation;
+    const legacyState: WorkspaceStoreState = {
+      ...base,
+      executionMode: 'demo',
+      projects: [
+        {
+          id: 'proj_demo_portal',
+          name: 'Portal de demonstração',
+          description: 'Legado',
+          workspacePathInfo: '',
+          executionMode: 'demo',
+          status: 'active',
+          createdAt: '2026-11-16T10:00:00.000Z',
+          updatedAt: '2026-11-16T10:00:00.000Z',
+        },
+        {
+          id: 'proj_real_1',
+          name: 'Projeto Real',
+          description: 'Mantido',
+          workspacePathInfo: 'C:/real',
+          executionMode: 'aion_core',
+          status: 'active',
+          createdAt: '2026-11-18T10:00:00.000Z',
+          updatedAt: '2026-11-18T10:00:00.000Z',
+        },
+      ],
+      connections: [
+        {
+          ...SAMPLE_CORE_CONNECTION,
+          id: 'conn_codex_demo',
+          mode: 'demo',
+          isSimulated: true,
+        },
+        SAMPLE_CORE_CONNECTION,
+      ],
+      conversations: {
+        conv_demo_busca_nome: {
+          ...structuredClone(realConv),
+          conversation: {
+            ...realConv.conversation,
+            id: 'conv_demo_busca_nome',
+            projectId: 'proj_demo_portal',
+            executionMode: 'demo',
+          },
+        },
+        conv_real_1: realConv,
+      },
+      activeProjectId: 'proj_demo_portal',
+      activeConversationId: 'conv_demo_busca_nome',
+    };
 
-    expect(conv.executionStatus).toBe('paused_demo');
+    const sanitized = sanitizeLoadedStateAfterReload(legacyState);
+    expect(sanitized.executionMode).toBe('aion_core');
+    expect(sanitized.projects.map((p) => p.id)).toEqual(['proj_real_1']);
+    expect(Object.keys(sanitized.conversations)).toEqual(['conv_real_1']);
+    expect(sanitized.connections.every((c) => c.mode === 'aion_core')).toBe(true);
+    expect(sanitized.activeProjectId).toBe('proj_real_1');
+    expect(sanitized.activeConversationId).toBe('conv_real_1');
+
+    const conv = sanitized.conversations.conv_real_1.conversation;
+    expect(conv.executionStatus).toBe('paused_queue');
     expect(conv.autoPlayWasRunning).toBe(false);
-  });
-
-  it('sends General messages to coordinator only unless explicitly promoted to Shared Context', async () => {
-    const persistence = new WorkspacePersistenceManager(
-      new MemoryOnlyStorageDriver(),
-    );
-    const gateway = new MockWorkspaceGateway(persistence);
-    await gateway.loadWorkspace();
-
-    const beforeRevs =
-      gateway.getStateSnapshot().conversations[DEMO_CONVERSATION_ID]
-        .contextRevisions.length;
-
-    await gateway.sendMessage({
-      conversationId: DEMO_CONVERSATION_ID,
-      targetTab: 'general',
-      bodyMarkdown: 'Pergunta apenas ao coordenador',
-      promoteToSharedContext: false,
-    });
-
-    const afterNoPromote =
-      gateway.getStateSnapshot().conversations[DEMO_CONVERSATION_ID];
-    expect(afterNoPromote.contextRevisions).toHaveLength(beforeRevs);
-    expect(
-      afterNoPromote.participants.find((p) => p.id === 'part_antigravity')
-        ?.unreadCount,
-    ).toBe(0);
-
-    await gateway.sendMessage({
-      conversationId: DEMO_CONVERSATION_ID,
-      targetTab: 'general',
-      bodyMarkdown: 'Restrição promovida explicitamente',
-      promoteToSharedContext: true,
-    });
-
-    const afterPromote =
-      gateway.getStateSnapshot().conversations[DEMO_CONVERSATION_ID];
-    expect(afterPromote.contextRevisions).toHaveLength(beforeRevs + 1);
-    const rev2 =
-      afterPromote.contextRevisions[afterPromote.contextRevisions.length - 1];
-    expect(rev2.receipts.part_codex.status).toBe('applied');
-    expect(rev2.receipts.part_claude.status).toBe('sent');
-
-    gateway.dispose();
-  });
-
-  it('completes full deterministic scenario in manual mode only after explicit permission and escalation decisions', async () => {
-    const persistence = new WorkspacePersistenceManager(
-      new MemoryOnlyStorageDriver(),
-    );
-    const gateway = new MockWorkspaceGateway(persistence);
-    await gateway.loadWorkspace();
-
-    // Step 6 (context v2) & Step 7 (permission requested)
-    expect(gateway.stepScenario(DEMO_CONVERSATION_ID).blocked).toBeFalsy();
-    expect(gateway.stepScenario(DEMO_CONVERSATION_ID).blocked).toBeFalsy();
-
-    // Must block at step 7 -> 8 until perm_test_suite_1 is explicitly resolved
-    const blockedOnPerm = gateway.stepScenario(DEMO_CONVERSATION_ID);
-    expect(blockedOnPerm.blocked).toBe(true);
-
-    await gateway.respondPermission({
-      conversationId: DEMO_CONVERSATION_ID,
-      requestId: 'perm_test_suite_1',
-      decision: 'approved',
-    });
-
-    // Step 8 (Att #1 rejected #1), Step 9 (Att #2 operational failure), Step 10 (Att #3 rejected #2 + escalation suggested)
-    expect(gateway.stepScenario(DEMO_CONVERSATION_ID).blocked).toBeFalsy();
-    expect(gateway.stepScenario(DEMO_CONVERSATION_ID).blocked).toBeFalsy();
-    expect(gateway.stepScenario(DEMO_CONVERSATION_ID).blocked).toBeFalsy();
-
-    // In manual mode, step 10 -> 11 MUST block until user approves or dismisses escalation
-    const blockedOnEsc = gateway.stepScenario(DEMO_CONVERSATION_ID);
-    expect(blockedOnEsc.blocked).toBe(true);
-
-    const esc =
-      gateway.getStateSnapshot().conversations[DEMO_CONVERSATION_ID]
-        .escalations[0];
-    expect(esc?.status).toBe('suggested');
-
-    await gateway.resolveEscalation({
-      conversationId: DEMO_CONVERSATION_ID,
-      escalationId: esc.id,
-      resolution: 'approved',
-    });
-
-    expect(gateway.stepScenario(DEMO_CONVERSATION_ID).blocked).toBeFalsy();
-    expect(gateway.stepScenario(DEMO_CONVERSATION_ID).finished).toBe(true);
-
-    const proj =
-      gateway.getStateSnapshot().conversations[DEMO_CONVERSATION_ID];
-    const mainTask = proj.tasks.find((t) => t.id === 'task_busca_nome');
-    const depTask = proj.tasks.find((t) => t.id === 'task_validacao_final');
-
-    expect(mainTask?.status).toBe('completed');
-    expect(mainTask?.qualityRejectionCount).toBe(2);
-    expect(mainTask?.operationalFailureCount).toBe(1);
-    expect(depTask?.status).toBe('completed');
-    expect(proj.escalations[0]?.status).toBe('approved');
-    expect(proj.conversation.executionStatus).toBe('completed');
-
-    gateway.dispose();
-  });
-
-  it('preserves active conversation selection across sendMessage and keeps unreadCount at 0 for the currently open agent tab', async () => {
-    const persistence = new WorkspacePersistenceManager(
-      new MemoryOnlyStorageDriver(),
-    );
-    const gateway = new MockWorkspaceGateway(persistence);
-    await gateway.loadWorkspace();
-
-    const convB = await gateway.createConversation({
-      projectId: DEMO_PROJECT_ID,
-      title: 'Conversa secundária',
-    });
-    expect(gateway.getStateSnapshot().activeConversationId).toBe(
-      convB.conversation.id,
-    );
-
-    // Switch back to Conversation A and send a message
-    gateway.setActiveView({
-      projectId: DEMO_PROJECT_ID,
-      conversationId: DEMO_CONVERSATION_ID,
-      tabId: 'general',
-    });
-    expect(gateway.getStateSnapshot().activeConversationId).toBe(
-      DEMO_CONVERSATION_ID,
-    );
-
-    await gateway.sendMessage({
-      conversationId: DEMO_CONVERSATION_ID,
-      targetTab: 'general',
-      bodyMarkdown: 'Mensagem na conversa A',
-    });
-    expect(gateway.getStateSnapshot().activeConversationId).toBe(
-      DEMO_CONVERSATION_ID,
-    );
-
-    // Open Claude tab -> clears initial unreadCount to 0 and keeps it 0 on incoming replies/system records
-    gateway.setActiveView({
-      projectId: DEMO_PROJECT_ID,
-      conversationId: DEMO_CONVERSATION_ID,
-      tabId: 'part_claude',
-    });
-    expect(
-      gateway
-        .getStateSnapshot()
-        .conversations[DEMO_CONVERSATION_ID].participants.find(
-          (p) => p.id === 'part_claude',
-        )?.unreadCount,
-    ).toBe(0);
-
-    await gateway.sendMessage({
-      conversationId: DEMO_CONVERSATION_ID,
-      targetTab: 'part_claude',
-      bodyMarkdown: 'Mensagem direta com a aba Claude aberta',
-    });
-    gateway.stepScenario(DEMO_CONVERSATION_ID);
-    gateway.stepScenario(DEMO_CONVERSATION_ID);
-
-    expect(
-      gateway
-        .getStateSnapshot()
-        .conversations[DEMO_CONVERSATION_ID].participants.find(
-          (p) => p.id === 'part_claude',
-        )?.unreadCount,
-    ).toBe(0);
-
-    gateway.dispose();
-  });
-
-  it('respects dismissed escalations, custom rejection threshold (5), and denied permissions', async () => {
-    const persistence = new WorkspacePersistenceManager(
-      new MemoryOnlyStorageDriver(),
-    );
-    const gateway = new MockWorkspaceGateway(persistence);
-    await gateway.loadWorkspace();
-
-    // 1. Dismissed escalation must keep executor on fast tier for Attempt #4
-    await advanceScenarioWithManualApprovals(
-      gateway,
-      DEMO_CONVERSATION_ID,
-      'dismissed',
-    );
-    const dismissedConv =
-      gateway.getStateSnapshot().conversations[DEMO_CONVERSATION_ID];
-    const att4 = dismissedConv.tasks
-      .find((t) => t.id === 'task_busca_nome')
-      ?.attempts.find((a) => a.id === 'att_4');
-    expect(dismissedConv.escalations[0]?.status).toBe('dismissed');
-    expect(att4?.modelTierUsed).toBe('fast');
-
-    // 2. Threshold of 5 quality rejections must NOT suggest escalation after 2 rejections
-    await gateway.resetDemo();
-    await gateway.updateModelPolicy({
-      defaultExecutorTier: 'fast',
-      reviewerTier: 'review',
-      escalationTargetTier: 'advanced',
-      qualityRejectionsBeforeSuggest: 5,
-      approvalMode: 'manual',
-    });
-    await advanceScenarioWithManualApprovals(gateway, DEMO_CONVERSATION_ID);
-    const highThresholdConv =
-      gateway.getStateSnapshot().conversations[DEMO_CONVERSATION_ID];
-    expect(highThresholdConv.escalations).toHaveLength(0);
-    expect(highThresholdConv.conversation.executionStatus).toBe('completed');
-
-    // 3. Denied permission must permanently block scenario progression (including autoPlay)
-    await gateway.resetDemo();
-    gateway.stepScenario(DEMO_CONVERSATION_ID);
-    gateway.stepScenario(DEMO_CONVERSATION_ID);
-    await gateway.respondPermission({
-      conversationId: DEMO_CONVERSATION_ID,
-      requestId: 'perm_test_suite_1',
-      decision: 'denied',
-    });
-    const deniedStep = gateway.stepScenario(DEMO_CONVERSATION_ID);
-    expect(deniedStep.blocked).toBe(true);
-    const att1 = gateway
-      .getStateSnapshot()
-      .conversations[DEMO_CONVERSATION_ID].tasks.find(
-        (t) => t.id === 'task_busca_nome',
-      )
-      ?.attempts.find((a) => a.id === 'att_1');
-    expect(att1?.status).toBe('running');
-
-    gateway.dispose();
-  });
-
-  it('blocks scenario advancement during gap_detected and resumes cleanly after reconciliation without losing buffered events', async () => {
-    const persistence = new WorkspacePersistenceManager(
-      new MemoryOnlyStorageDriver(),
-    );
-    const gateway = new MockWorkspaceGateway(persistence);
-    await gateway.loadWorkspace();
-
-    gateway.triggerOutOfOrderGapScenario(DEMO_CONVERSATION_ID);
-    const gapped =
-      gateway.getStateSnapshot().conversations[DEMO_CONVERSATION_ID];
-    expect(gapped.conversation.syncState).toBe('gap_detected');
-    const stepBefore = gapped.conversation.scenarioStepIndex;
-
-    const blockedStep = gateway.stepScenario(DEMO_CONVERSATION_ID);
-    expect(blockedStep.blocked).toBe(true);
-    expect(
-      gateway.getStateSnapshot().conversations[DEMO_CONVERSATION_ID]
-        .conversation.scenarioStepIndex,
-    ).toBe(stepBefore);
-
-    await gateway.reconcileConversation(DEMO_CONVERSATION_ID);
-    const reconciled =
-      gateway.getStateSnapshot().conversations[DEMO_CONVERSATION_ID];
-    expect(reconciled.conversation.syncState).toBe('synced');
-    expect(Object.keys(reconciled.pendingOutOfOrder)).toHaveLength(0);
-
-    const resumedStep = gateway.stepScenario(DEMO_CONVERSATION_ID);
-    expect(resumedStep.blocked).toBeFalsy();
-    expect(
-      gateway.getStateSnapshot().conversations[DEMO_CONVERSATION_ID]
-        .conversation.scenarioStepIndex,
-    ).toBe(stepBefore + 1);
-
-    gateway.dispose();
-  });
-
-  it('avoids context version collisions when user publishes manual revision before step 6 and keeps traceability links intact', async () => {
-    const persistence = new WorkspacePersistenceManager(
-      new MemoryOnlyStorageDriver(),
-    );
-    const gateway = new MockWorkspaceGateway(persistence);
-    await gateway.loadWorkspace();
-
-    const manualRev = await gateway.publishContextRevision({
-      conversationId: DEMO_CONVERSATION_ID,
-      authorLabel: 'Você',
-      summaryOfChange: 'Revisão manual antes do passo 6',
-      objective: 'Objetivo atualizado manualmente',
-      permanentInstructions: ['Instrução manual'],
-      constraints: ['Restrição manual'],
-      acceptanceCriteria: ['Critério manual'],
-      confirmedDecisions: [],
-    });
-    expect(manualRev.versionNumber).toBe(2);
-
-    await advanceScenarioWithManualApprovals(gateway, DEMO_CONVERSATION_ID);
-    const conv =
-      gateway.getStateSnapshot().conversations[DEMO_CONVERSATION_ID];
-    const versionNumbers = conv.contextRevisions.map((r) => r.versionNumber);
-    expect(versionNumbers).toEqual([1, 2, 3]);
-
-    const mainTask = conv.tasks.find((t) => t.id === 'task_busca_nome');
-    const att2 = mainTask?.attempts.find((a) => a.id === 'att_2');
-    expect(att2?.contextRevisionNumber).toBe(3);
-
-    // Every Ver execução link in Geral must resolve to a renderable message in the target tab
-    for (const item of conv.generalFeed) {
-      if (
-        item.targetTabId &&
-        item.targetTabId !== 'general' &&
-        item.targetEventId
-      ) {
-        const tabMessages = conv.messagesByTab[item.targetTabId] ?? [];
-        expect(
-          tabMessages.some((m) => m.sourceEventId === item.targetEventId),
-        ).toBe(true);
-      }
-    }
-
-    gateway.dispose();
   });
 
   it('serializes concurrent persistence writes so newer state always wins and saved status waits for the latest generation', async () => {
@@ -432,9 +223,9 @@ describe('Workspace gateway, storage failure, reload recovery & export', () => {
 
     const initial = await persistence.loadInitial(createInitialWorkspaceState);
     const stateA = structuredClone(initial);
-    stateA.projects[0].name = 'Versão A (antiga)';
+    stateA.activeProjectId = 'proj_versao_a';
     const stateB = structuredClone(initial);
-    stateB.projects[0].name = 'Versão B (mais recente)';
+    stateB.activeProjectId = 'proj_versao_b';
 
     persistence.scheduleSave(stateA, 0);
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -443,165 +234,11 @@ describe('Workspace gateway, storage failure, reload recovery & export', () => {
     await persistence.flushSave();
 
     const lastSaved = savedSnapshots[savedSnapshots.length - 1];
-    expect(lastSaved.projects[0].name).toBe('Versão B (mais recente)');
+    expect(lastSaved.activeProjectId).toBe('proj_versao_b');
     expect(persistence.getInfo().status).toBe('saved');
     expect(statuses[statuses.length - 1]).toBe('saved');
 
     persistence.dispose();
-  });
-
-  it('blocks manual and automatic scenario progression when a menu-triggered permission is pending or denied', async () => {
-    const persistence = new WorkspacePersistenceManager(
-      new MemoryOnlyStorageDriver(),
-    );
-    const gateway = new MockWorkspaceGateway(persistence);
-    await gateway.loadWorkspace();
-
-    // Advance past main permission (step 6 -> step 7 -> approve -> step 8)
-    gateway.stepScenario(DEMO_CONVERSATION_ID);
-    gateway.stepScenario(DEMO_CONVERSATION_ID);
-    await gateway.respondPermission({
-      conversationId: DEMO_CONVERSATION_ID,
-      requestId: 'perm_test_suite_1',
-      decision: 'approved',
-    });
-    gateway.stepScenario(DEMO_CONVERSATION_ID);
-
-    // Trigger dynamic permission from menu and deny it
-    gateway.triggerPermissionScenario(DEMO_CONVERSATION_ID);
-    const pending = gateway
-      .getStateSnapshot()
-      .conversations[DEMO_CONVERSATION_ID].permissions.find(
-        (p) => p.status === 'pending',
-      );
-    expect(pending).toBeDefined();
-
-    // Pending menu permission blocks both step and autoPlay
-    expect(gateway.stepScenario(DEMO_CONVERSATION_ID).blocked).toBe(true);
-    let stopReason: string | undefined;
-    gateway.subscribeAutoPlayStop((r) => {
-      stopReason = r;
-    });
-    expect(gateway.startAutoPlay(DEMO_CONVERSATION_ID, 50)).toBe(false);
-    expect(stopReason).toBeTruthy();
-
-    await gateway.respondPermission({
-      conversationId: DEMO_CONVERSATION_ID,
-      requestId: pending!.id,
-      decision: 'denied',
-    });
-
-    // Denied menu permission must continue blocking Attempt #2 in both manual step and autoPlay
-    const stepAfterDeny = gateway.stepScenario(DEMO_CONVERSATION_ID);
-    expect(stepAfterDeny.blocked).toBe(true);
-    expect(gateway.startAutoPlay(DEMO_CONVERSATION_ID, 50)).toBe(false);
-    const conv =
-      gateway.getStateSnapshot().conversations[DEMO_CONVERSATION_ID];
-    expect(conv.conversation.executionStatus).toBe('blocked');
-    expect(
-      conv.tasks
-        .find((t) => t.id === 'task_busca_nome')
-        ?.attempts.some((a) => a.id === 'att_2'),
-    ).toBe(false);
-
-    gateway.dispose();
-  });
-
-  it('reconciles a persisted gap cleanly after a full gateway reload without requiring demo reset', async () => {
-    const sharedDriver = new MemoryOnlyStorageDriver();
-    const persistence1 = new WorkspacePersistenceManager(sharedDriver);
-    const gateway1 = new MockWorkspaceGateway(persistence1);
-    await gateway1.loadWorkspace();
-
-    gateway1.triggerOutOfOrderGapScenario(DEMO_CONVERSATION_ID);
-    await persistence1.flushSave();
-    gateway1.dispose();
-
-    // Simulate page reload with a fresh gateway and fresh persistence manager
-    const persistence2 = new WorkspacePersistenceManager(sharedDriver);
-    const gateway2 = new MockWorkspaceGateway(persistence2);
-    await gateway2.loadWorkspace();
-
-    const beforeReconcile =
-      gateway2.getStateSnapshot().conversations[DEMO_CONVERSATION_ID];
-    expect(beforeReconcile.conversation.syncState).toBe('gap_detected');
-
-    const reconcileRes =
-      await gateway2.reconcileConversation(DEMO_CONVERSATION_ID);
-    expect(reconcileRes.synced).toBe(true);
-    expect(reconcileRes.events?.length).toBeGreaterThanOrEqual(1);
-
-    const afterReconcile =
-      gateway2.getStateSnapshot().conversations[DEMO_CONVERSATION_ID];
-    expect(afterReconcile.conversation.syncState).toBe('synced');
-    expect(Object.keys(afterReconcile.pendingOutOfOrder)).toHaveLength(0);
-
-    // Scenario advancement resumes cleanly after post-reload reconciliation
-    const nextStep = gateway2.stepScenario(DEMO_CONVERSATION_ID);
-    expect(nextStep.blocked).toBeFalsy();
-
-    gateway2.dispose();
-  });
-
-  it('increments unreadCount on a background conversation even when that agent tab was previously open', async () => {
-    const persistence = new WorkspacePersistenceManager(
-      new MemoryOnlyStorageDriver(),
-    );
-    const gateway = new MockWorkspaceGateway(persistence);
-    await gateway.loadWorkspace();
-
-    // Open Claude tab in conversation A (clears initial unreadCount to 0)
-    gateway.setActiveView({
-      projectId: DEMO_PROJECT_ID,
-      conversationId: DEMO_CONVERSATION_ID,
-      tabId: 'part_claude',
-    });
-    expect(
-      gateway
-        .getStateSnapshot()
-        .conversations[DEMO_CONVERSATION_ID].participants.find(
-          (p) => p.id === 'part_claude',
-        )?.unreadCount,
-    ).toBe(0);
-
-    // Switch active view to conversation B
-    const convB = await gateway.createConversation({
-      projectId: DEMO_PROJECT_ID,
-      title: 'Conversa visível B',
-    });
-    expect(gateway.getStateSnapshot().activeConversationId).toBe(
-      convB.conversation.id,
-    );
-
-    // Deliver a message to Claude in hidden conversation A
-    await gateway.sendMessage({
-      conversationId: DEMO_CONVERSATION_ID,
-      targetTab: 'part_claude',
-      bodyMarkdown: 'Atualização em conversa oculta',
-    });
-
-    const unreadInHiddenA = gateway
-      .getStateSnapshot()
-      .conversations[DEMO_CONVERSATION_ID].participants.find(
-        (p) => p.id === 'part_claude',
-      )?.unreadCount;
-    expect(unreadInHiddenA).toBe(1);
-
-    // Returning to conversation A on Claude tab marks it read again
-    gateway.setActiveView({
-      projectId: DEMO_PROJECT_ID,
-      conversationId: DEMO_CONVERSATION_ID,
-      tabId: 'part_claude',
-    });
-    expect(
-      gateway
-        .getStateSnapshot()
-        .conversations[DEMO_CONVERSATION_ID].participants.find(
-          (p) => p.id === 'part_claude',
-        )?.unreadCount,
-    ).toBe(0);
-
-    gateway.dispose();
   });
 
   it('transitions persistence status to saved when a debounced write is drained by the active write loop before timer expiry', async () => {
@@ -614,7 +251,6 @@ describe('Workspace gateway, storage failure, reload recovery & export', () => {
       },
       async save(state: WorkspaceStoreState) {
         callCount += 1;
-        // Write #2 (state A) is slow (60ms); Write #3 (state B) is fast (10ms)
         const delay = callCount === 2 ? 60 : 10;
         await new Promise((resolve) => setTimeout(resolve, delay));
         savedSnapshots.push(structuredClone(state));
@@ -628,26 +264,22 @@ describe('Workspace gateway, storage failure, reload recovery & export', () => {
     const initial = await persistence.loadInitial(createInitialWorkspaceState);
 
     const stateA = structuredClone(initial);
-    stateA.projects[0].name = 'Gravação A lenta';
+    stateA.activeProjectId = 'proj_gravacao_a_lenta';
     const stateB = structuredClone(initial);
-    stateB.projects[0].name = 'Gravação B com debounce';
+    stateB.activeProjectId = 'proj_gravacao_b_debounce';
 
-    // Start slow write A immediately
     persistence.scheduleSave(stateA, 0);
     await new Promise((resolve) => setTimeout(resolve, 15));
 
-    // Schedule B with a 180ms debounce while A is still writing
     persistence.scheduleSave(stateB, 180);
     expect(persistence.getInfo().status).toBe('saving');
 
-    // Wait 100ms: A finishes at ~60ms, loop drains B at ~70ms (BEFORE 180ms timer)
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(persistence.getInfo().status).toBe('saved');
-    expect(savedSnapshots[savedSnapshots.length - 1].projects[0].name).toBe(
-      'Gravação B com debounce',
+    expect(savedSnapshots[savedSnapshots.length - 1].activeProjectId).toBe(
+      'proj_gravacao_b_debounce',
     );
 
-    // Let original 180ms window pass and confirm status stays saved cleanly
     await new Promise((resolve) => setTimeout(resolve, 120));
     expect(persistence.getInfo().status).toBe('saved');
 
@@ -658,14 +290,28 @@ describe('Workspace gateway, storage failure, reload recovery & export', () => {
     const persistence = new WorkspacePersistenceManager(
       new MemoryOnlyStorageDriver(),
     );
-    const gateway = new MockWorkspaceGateway(persistence);
-    await gateway.loadWorkspace();
+    const gateway = new AionCoreAdapter(persistence);
+    const loaded = await gateway.loadWorkspace();
+    await gateway.importWorkspaceState({
+      ...loaded,
+      connections: [SAMPLE_CORE_CONNECTION],
+    });
+    const project = await gateway.createProject({
+      name: 'Projeto Interrupção',
+      description: 'Teste de capacidade',
+      workspacePathInfo: 'C:/cap',
+    });
+    const conv = await gateway.createConversation({
+      projectId: project.id,
+      title: 'Conversa Interrupção',
+      presetId: 'preset_terra_sol_gemini',
+    });
 
     await expect(
       gateway.controlExecution({
-        conversationId: DEMO_CONVERSATION_ID,
+        conversationId: conv.conversation.id,
         action: 'request_interrupt',
-        participantId: 'part_antigravity',
+        participantId: conv.participants[0].id,
       }),
     ).rejects.toBeInstanceOf(GatewayCapabilityError);
 
@@ -689,7 +335,7 @@ describe('Workspace gateway, storage failure, reload recovery & export', () => {
       async clear() {},
     };
     const pFailLoad = new WorkspacePersistenceManager(failingLoadDriver);
-    const gwFailLoad = new MockWorkspaceGateway(pFailLoad);
+    const gwFailLoad = new AionCoreAdapter(pFailLoad);
     await gwFailLoad.loadWorkspace();
     expect(pFailLoad.getInfo().status).toBe('session_only');
     expect(pFailLoad.getInfo().errorMessage).toContain('IndexedDB bloqueada');
@@ -711,7 +357,7 @@ describe('Workspace gateway, storage failure, reload recovery & export', () => {
       async clear() {},
     };
     const pFuture = new WorkspacePersistenceManager(futureSchemaDriver);
-    const gwFuture = new MockWorkspaceGateway(pFuture);
+    const gwFuture = new AionCoreAdapter(pFuture);
     await gwFuture.loadWorkspace();
     expect(pFuture.getInfo().status).toBe('session_only');
     expect(pFuture.getInfo().errorMessage).toContain('Schema incompatível');
@@ -747,9 +393,10 @@ describe('Workspace gateway, storage failure, reload recovery & export', () => {
       async clear() {},
     };
     const pMig = new WorkspacePersistenceManager(v1Driver);
-    const gwMig = new MockWorkspaceGateway(pMig);
+    const gwMig = new AionCoreAdapter(pMig);
     const migrated = await gwMig.loadWorkspace();
     expect(migrated.schemaVersion).toBe(2);
+    expect(migrated.executionMode).toBe('aion_core');
     expect(savedAfterMigration).not.toBeNull();
     expect(savedAfterMigration!.schemaVersion).toBe(2);
     expect(pMig.getInfo().status).toBe('saved');
@@ -773,18 +420,10 @@ describe('Workspace gateway, storage failure, reload recovery & export', () => {
       async clear() {},
     };
     const pQueue = new WorkspacePersistenceManager(slowDriver);
-    const baseState = await (async () => {
-      const tmp = new MockWorkspaceGateway(
-        new WorkspacePersistenceManager(new MemoryOnlyStorageDriver()),
-      );
-      const loaded = await tmp.loadWorkspace();
-      tmp.dispose();
-      return loaded;
-    })();
+    const baseState = createInitialWorkspaceState();
     pQueue.scheduleSave({ ...baseState, activeProjectId: 'p_1' }, 0);
     const firstFlush = pQueue.flushSave();
     await new Promise((r) => setTimeout(r, 10));
-    // Enqueue newer state while first write is in flight, then flush again
     pQueue.scheduleSave({ ...baseState, activeProjectId: 'p_2' }, 200);
     const secondFlush = pQueue.flushSave();
     releaseFirstWrite!();
@@ -794,33 +433,22 @@ describe('Workspace gateway, storage failure, reload recovery & export', () => {
     pQueue.dispose();
   });
 
-  it('clears stale Core runtime/auth confirmations on reload so demo or previous-runtime state cannot confirm guided setup steps (V6-07)', async () => {
+  it('clears stale Core runtime/auth confirmations on reload so previous-runtime state cannot confirm guided setup steps (V6-07)', async () => {
     const driver = new MemoryOnlyStorageDriver();
     const p1 = new WorkspacePersistenceManager(driver);
-    const gw1 = new MockWorkspaceGateway(p1);
+    const gw1 = new AionCoreAdapter(p1);
     const initial = await gw1.loadWorkspace();
     const staleCoreState: WorkspaceStoreState = {
       ...structuredClone(initial),
       executionMode: 'aion_core',
       coreSessionAuthenticated: true,
-      connections: initial.connections.map((c, idx) =>
-        idx === 0
-          ? {
-              ...c,
-              mode: 'aion_core',
-              coreReachability: 'reachable',
-              catalogLoaded: true,
-              authStatus: 'authenticated',
-              sessionStatus: 'active',
-            }
-          : c,
-      ),
+      connections: [SAMPLE_CORE_CONNECTION],
     };
     await gw1.importWorkspaceState(staleCoreState);
     gw1.dispose();
 
     const p2 = new WorkspacePersistenceManager(driver);
-    const gw2 = new MockWorkspaceGateway(p2);
+    const gw2 = new AionCoreAdapter(p2);
     const reloaded = await gw2.loadWorkspace();
     expect(reloaded.coreSessionAuthenticated).toBe(false);
     const coreConn = reloaded.connections.find((c) => c.mode === 'aion_core')!;
@@ -831,31 +459,17 @@ describe('Workspace gateway, storage failure, reload recovery & export', () => {
     gw2.dispose();
   });
 
-  it('starts a real Core workspace without the seeded demonstration scenario and keeps the simulation reusable (V6-11)', async () => {
+  it('starts a real Core workspace cleanly without seeded demonstration data', async () => {
     const driver = new MemoryOnlyStorageDriver();
-
-    // 1. The simulation persists the seeded demonstration scenario.
-    const p1 = new WorkspacePersistenceManager(driver);
-    const gw1 = new MockWorkspaceGateway(p1);
-    const seeded = await gw1.loadWorkspace();
-    expect(seeded.conversations[DEMO_CONVERSATION_ID]).toBeDefined();
-    gw1.dispose();
-
-    // 2. Core mode drops the simulated seed and starts clean.
-    const p2 = new WorkspacePersistenceManager(driver);
-    const adapter = new AionCoreAdapter(p2);
+    const persistence = new WorkspacePersistenceManager(driver);
+    const adapter = new AionCoreAdapter(persistence);
     const coreState = await adapter.loadWorkspace();
+
     expect(coreState.executionMode).toBe('aion_core');
     expect(coreState.projects).toEqual([]);
     expect(Object.keys(coreState.conversations)).toEqual([]);
+    expect(coreState.connections).toEqual([]);
     adapter.dispose();
-
-    // 3. Switching back to the simulation re-seeds the scenario.
-    const p3 = new WorkspacePersistenceManager(driver);
-    const gw3 = new MockWorkspaceGateway(p3);
-    const demoState = await gw3.loadWorkspace();
-    expect(demoState.conversations[DEMO_CONVERSATION_ID]).toBeDefined();
-    gw3.dispose();
   });
 
   it('revalidates /health, /api/auth/status and catalog silently on startup without model cost when authenticated (V6-07 P2)', async () => {
@@ -869,7 +483,12 @@ describe('Workspace gateway, storage failure, reload recovery & export', () => {
         checkHealth: async () => {
           calls.push('health');
           if (healthFails) throw new Error('ECONNREFUSED');
-          return { reachable: true, version: '0.2.2', buildTime: '2026-11-18T00:00:00Z', message: 'ok' };
+          return {
+            reachable: true,
+            version: '0.2.2',
+            buildTime: '2026-11-18T00:00:00Z',
+            message: 'ok',
+          };
         },
         checkAuthStatus: async () => {
           calls.push('auth');
@@ -877,7 +496,12 @@ describe('Workspace gateway, storage failure, reload recovery & export', () => {
         },
         refreshCoreCatalog: async () => {
           calls.push('catalog');
-          return { connectionsUpdated: 2, assistantsCount: 2, agentsCount: 2, message: 'ok' };
+          return {
+            connectionsUpdated: 2,
+            assistantsCount: 2,
+            agentsCount: 2,
+            message: 'ok',
+          };
         },
       },
     } as unknown as AgentWorkspaceGateway;
@@ -895,7 +519,9 @@ describe('Workspace gateway, storage failure, reload recovery & export', () => {
     // 3. Unreachable Core -> swallows silently without throwing or calling auth/catalog
     calls.length = 0;
     healthFails = true;
-    await expect(probeCoreSessionOnStartup(fakeCoreGateway, () => true)).resolves.toBeUndefined();
+    await expect(
+      probeCoreSessionOnStartup(fakeCoreGateway, () => true),
+    ).resolves.toBeUndefined();
     expect(calls).toEqual(['health']);
 
     // 4. Unmounted / cancelled guard -> aborts cleanly

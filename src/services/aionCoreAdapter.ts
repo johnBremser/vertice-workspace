@@ -6,6 +6,7 @@ import {
 } from '../domain/internalProtocol';
 import {
   connectionsToAgentProfiles,
+  createInitialWorkspaceState,
   DEFAULT_PARTICIPANT_PROFILES,
   DEFAULT_TEAM_PRESETS,
   instantiateParticipantsFromPreset,
@@ -89,10 +90,6 @@ import {
   type AionCoreTransportOptions,
 } from './aionCoreTransport';
 import { CoreDiagnosticsLog } from './coreDiagnostics';
-import {
-  createInitialWorkspaceState,
-  isDemoSeedOnlyState,
-} from './demoScenario';
 import {
   GatewayCapabilityError,
   type AgentWorkspaceGateway,
@@ -265,16 +262,21 @@ function resolvePresetMembersForCore(
       return member;
     }
 
+    const nameHint = member.displayName.toLowerCase();
     const desiredBackend =
       existingConn?.backendId ??
-      (member.connectionId.includes('antigravity')
+      (member.connectionId.includes('antigravity') || nameHint.includes('gemini') || nameHint.includes('antigravity')
         ? 'antigravity'
-        : member.connectionId.includes('codex')
-          ? 'codex'
-          : '');
+        : member.connectionId.includes('cursor') || nameHint.includes('cursor')
+          ? 'cursor-agent'
+          : member.connectionId.includes('codex') || nameHint.includes('terra') || nameHint.includes('sol') || nameHint.includes('codex')
+            ? 'codex'
+            : '');
     const coreConn =
       coreConns.find((c) => c.backendId === desiredBackend) ??
-      coreConns.find((c) => c.id === member.connectionId);
+      coreConns.find((c) => c.id === member.connectionId) ??
+      coreConns.find((c) => c.configured) ??
+      coreConns[0];
     if (!coreConn) {
       return member;
     }
@@ -488,15 +490,7 @@ export class AionCoreAdapterSkeleton implements AgentWorkspaceGateway {
  * simulated content.
  */
 function createCleanCoreWorkspaceState(): WorkspaceStoreState {
-  const base = createInitialWorkspaceState();
-  return {
-    ...base,
-    executionMode: 'aion_core',
-    projects: [],
-    conversations: {},
-    activeProjectId: '',
-    activeConversationId: '',
-  };
+  return createInitialWorkspaceState();
 }
 
 export class AionCoreAdapter
@@ -866,15 +860,9 @@ export class AionCoreAdapter
   }
 
   async loadWorkspace(): Promise<WorkspaceStoreState> {
-    let loaded = await this.persistence.loadInitial(
+    const loaded = await this.persistence.loadInitial(
       createCleanCoreWorkspaceState,
     );
-    if (isDemoSeedOnlyState(loaded)) {
-      // The seeded demonstration scenario is simulated content and does not
-      // belong to a real Core workspace: start clean instead of showing it.
-      loaded = createCleanCoreWorkspaceState();
-      await this.persistence.resetAndSave(loaded);
-    }
     this.httpClient.setBaseUrl(
       normalizeBaseUrl(loaded.coreSettings?.baseUrl ?? ''),
     );

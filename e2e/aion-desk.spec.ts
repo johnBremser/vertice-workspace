@@ -1,38 +1,118 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
+import {
+  REAL_CORE_AGENTS_MANAGEMENT_V022,
+  REAL_CORE_ASSISTANTS_V022,
+  REAL_CORE_HEALTH_V022,
+} from '../src/services/__tests__/fixtures/coreV022RealPayloads';
 
-test.describe('Aion Desk v4 E2E flow', () => {
-  test('completes Terra/Sol/Gemini conversation to Concluída without seq gaps, handles denied permission & reload reconciliation, performs real JSON backup export/import, verifies 2,000-event DOM pagination & scroll, and checks themes + viewports', async ({
+test.describe('Vértice Workspace — AionCore Local E2E', () => {
+  test('starts cleanly in AionCore local mode without demo seeds, authenticates and auto-loads real CLI models, manages project/conversation/tasks/context/backup, and preserves layout across themes and viewports', async ({
     page,
   }, testInfo) => {
-    // V6-11: the workspace now defaults to AionCore local mode. The browser
-    // suite explicitly opts into the deterministic simulation instead of relying
-    // on the product default.
-    await page.addInitScript(() => {
-      window.localStorage.setItem(
-        'aion_desk_mode_pref_v1',
-        JSON.stringify({ mode: 'demo' }),
-      );
+    let authenticated = false;
+
+    await page.route('**/health', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(REAL_CORE_HEALTH_V022),
+      });
     });
+
+    await page.route('**/api/auth/status', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          is_authenticated: authenticated,
+          needs_setup: false,
+          user: authenticated ? { id: 'usr_e2e', username: 'admin' } : null,
+        }),
+      });
+    });
+
+    await page.route('**/login', async (route) => {
+      authenticated = true;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: true,
+          message: 'Login realizado com sucesso',
+          user: { id: 'usr_e2e', username: 'admin' },
+        }),
+      });
+    });
+
+    await page.route('**/api/agents/management', async (route) => {
+      if (!authenticated) {
+        await route.fulfill({ status: 401, body: JSON.stringify({ error: 'Unauthorized' }) });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, data: REAL_CORE_AGENTS_MANAGEMENT_V022 }),
+      });
+    });
+
+    await page.route('**/api/assistants', async (route) => {
+      if (!authenticated) {
+        await route.fulfill({ status: 401, body: JSON.stringify({ error: 'Unauthorized' }) });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, data: REAL_CORE_ASSISTANTS_V022 }),
+      });
+    });
+
+    await page.route('**/api/teams', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, data: [] }),
+      });
+    });
+
     await page.goto('/');
 
-    // 1. Initial load shows Portal de demonstração
-    await expect(page.getByText('Portal de demonstração').first()).toBeVisible();
-
-    // 2. Open Settings and inspect 6-state catalog + configurable team
-    await page.getByRole('button', { name: /Configurações/i }).click();
+    // 1. Starts directly in AionCore local mode with ZERO demonstration data
+    await expect(page.getByText('Portal de demonstração')).toHaveCount(0);
+    await expect(page.getByText(/\(Demonstração\)/i)).toHaveCount(0);
+    await expect(page.getByText(/AionCore local/i).first()).toBeVisible();
     await expect(
-      page.getByText('Equipe configurável, papéis e presets da conversa ativa'),
+      page.getByText('Pronto para operar com seus agentes locais'),
     ).toBeVisible();
-    await expect(page.getByText('1. Configurada').first()).toBeVisible();
 
-    // 3. Create new conversation with Terra 6.1 / Sol 6.1 / Gemini Hydrogen
+    // 2. Open Settings, log in to AionCore, and verify real CLI catalog auto-loads
+    await page.getByRole('button', { name: /Configurações/i }).first().click();
+    await expect(page.getByLabel('Usuário WebUI')).toBeVisible();
+    await page.getByLabel('Usuário WebUI').fill('admin');
+    await page.getByLabel('Senha (não persistida)').fill('senha-teste');
+    await page.getByRole('button', { name: /Autenticar \(\/login\)/i }).click();
+
+    // Login form collapses into authenticated bar and real CLI catalog auto-loads
+    await expect(
+      page.getByText(/Sessão WebUI autenticada no navegador/i),
+    ).toBeVisible();
+    await expect(page.getByText('Codex (AionCore)').first()).toBeVisible();
+    await expect(page.getByText('Carregado (1)').first()).toBeVisible();
+
+    // 3. Create a real project and conversation using the discovered Core CLIs
     await page.getByRole('button', { name: /Voltar às conversas/i }).click();
+    await page.getByRole('button', { name: /Novo projeto/i }).first().click();
+    await page.getByLabel('Nome do projeto').fill('Projeto Real E2E');
+    await page.getByRole('button', { name: 'Salvar' }).click();
+    await expect(page.getByText('Projeto Real E2E').first()).toBeVisible();
+
     await page
-      .getByRole('button', { name: /Nova conversa em Portal de demonstração/i })
+      .getByRole('button', { name: /Nova conversa em Projeto Real E2E/i })
       .click();
-    await page.getByLabel('Título da conversa').fill('Fluxo Terra Sol Gemini E2E');
+    await page.getByLabel('Título da conversa').fill('Fluxo Real AionCore E2E');
     await page
       .getByLabel('Preset inicial de equipe')
       .selectOption('preset_terra_sol_gemini');
@@ -41,119 +121,37 @@ test.describe('Aion Desk v4 E2E flow', () => {
     await expect(page.getByRole('tab', { name: /Terra 6\.1/i })).toBeVisible();
     await expect(page.getByRole('tab', { name: /Sol 6\.1/i })).toBeVisible();
     await expect(page.getByRole('tab', { name: /Gemini Hydrogen/i })).toBeVisible();
+    await expect(page.getByText(/\(Demonstração\)/i)).toHaveCount(0);
 
-    const openDemoMenuItem = async (itemPattern: RegExp) => {
-      await page.getByRole('button', { name: /Controles de simulação/i }).click();
-      await page.getByRole('menuitem', { name: itemPattern }).click();
-    };
-
-    // 4. Send initial message in General + Step forward -> MUST NOT create a seq gap (Fix 1)
-    const composer = page.getByPlaceholder(
-      /Enviar pedido ou orientação ao coordenador/i,
-    );
-    await composer.fill('Organizar plano inicial da equipe configurável');
-    await page.getByRole('button', { name: 'Enviar' }).click();
+    // 3b. Verify real CLI models appear in the conversation's participant settings
+    await page.getByRole('button', { name: /Configurações/i }).first().click();
     await expect(
-      page.getByText('Organizar plano inicial da equipe configurável'),
-    ).toBeVisible();
+      page.locator('option', { hasText: /GPT-5\.6-Luna/i }).first(),
+    ).toBeAttached();
+    await page.getByRole('button', { name: /Voltar às conversas/i }).click();
 
-    await openDemoMenuItem(/Avançar cenário/i);
-    await expect(page.getByText(/Lacuna detectada/i)).toHaveCount(0);
-
-    // 5. Ensure Trabalho drawer is open (or open it), create a manual 3rd task, and publish Context v1
-    await openDemoMenuItem(/Avançar cenário/i);
+    // 4. Open Trabalho drawer if closed, create a task, and publish Shared Context v1
     const tasksTab = page.getByRole('tab', { name: /Tarefas/i });
     if (!(await tasksTab.isVisible().catch(() => false))) {
       await page.getByRole('button', { name: /Trabalho/i }).click();
     }
     await tasksTab.click();
     await page.getByRole('button', { name: /Nova tarefa/i }).click();
-    await page.getByLabel('Título').fill('Auditar exportação JSON');
+    await page.getByLabel('Título').fill('Validar catálogo real do CLI');
     await page.getByRole('button', { name: 'Criar tarefa' }).click();
     await expect(
-      page.getByRole('heading', { name: 'Auditar exportação JSON' }),
+      page.getByRole('heading', { name: 'Validar catálogo real do CLI' }),
     ).toBeVisible();
 
     await page.getByRole('tab', { name: /Contexto compartilhado/i }).click();
     await page.getByRole('button', { name: /Nova revisão/i }).click();
-    await page.getByLabel('Resumo da alteração').fill('Revisão E2E publicada');
+    await page.getByLabel('Resumo da alteração').fill('Revisão E2E AionCore');
     await page.getByRole('button', { name: /Publicar revisão/i }).click();
-    await expect(page.getByText('Revisão E2E publicada').first()).toBeVisible();
+    await expect(page.getByText('Revisão E2E AionCore').first()).toBeVisible();
 
-    // Close right drawer so main stream stays unobscured
     await page.getByRole('button', { name: 'Fechar painel lateral' }).click();
 
-    // 6. Advance Terra/Sol/Gemini + 3rd manual task step-by-step all the way to Concluída
-    for (let i = 0; i < 35; i += 1) {
-      if (
-        await page
-          .locator('header')
-          .getByText('Concluída', { exact: true })
-          .first()
-          .isVisible()
-          .catch(() => false)
-      ) {
-        break;
-      }
-      const approvePermBtn = page
-        .getByRole('button', { name: /Aprovar no escopo simulado/i })
-        .first();
-      if (await approvePermBtn.isVisible().catch(() => false)) {
-        await approvePermBtn.click();
-        continue;
-      }
-      const approveEscBtn = page
-        .getByRole('button', { name: /Aprovar promoção para/i })
-        .first();
-      if (await approveEscBtn.isVisible().catch(() => false)) {
-        await approveEscBtn.click();
-        continue;
-      }
-      await page.getByRole('button', { name: /Controles de simulação/i }).click();
-      const stepItem = page.getByRole('menuitem', { name: /Avançar cenário/i });
-      if (
-        !(await stepItem.isVisible().catch(() => false)) ||
-        (await stepItem.isDisabled().catch(() => false))
-      ) {
-        await page.keyboard.press('Escape');
-        break;
-      }
-      await stepItem.click();
-    }
-
-    await expect(
-      page.locator('header').getByText('Concluída', { exact: true }).first(),
-    ).toBeVisible();
-    await expect(page.getByRole('button', { name: /Trabalho/i })).toContainText('3/3');
-
-    // 7. Create another conversation to test denied permission blocking + gap across reload
-    await page
-      .getByRole('button', { name: /Nova conversa em Portal de demonstração/i })
-      .click();
-    await page.getByLabel('Título da conversa').fill('Permissão e Reconciliação E2E');
-    await page.getByRole('button', { name: 'Salvar' }).click();
-
-    await openDemoMenuItem(/Solicitar permissão simulada/i);
-    await expect(page.getByRole('button', { name: 'Recusar' }).first()).toBeVisible();
-    await page.getByRole('button', { name: 'Recusar' }).first().click();
-
-    await openDemoMenuItem(/Executar automaticamente/i);
-    await expect(page.getByText(/recusada/i).first()).toBeVisible();
-
-    await openDemoMenuItem(/Simular evento fora de ordem/i);
-    await expect(
-      page.getByRole('button', { name: /Reconciliar agora/i }),
-    ).toBeVisible();
-    await expect(page.getByText('Salvo', { exact: true })).toBeVisible();
-
-    await page.reload();
-    await expect(
-      page.getByRole('button', { name: /Reconciliar agora/i }),
-    ).toBeVisible();
-    await page.getByRole('button', { name: /Reconciliar agora/i }).click();
-    await expect(page.getByText(/Reconciliação concluída/i)).toBeVisible();
-
-    // 8. Real JSON Backup Export -> Upload -> Validate -> Import as Copy -> Assert UI updates
+    // 5. Real JSON Backup Export -> Upload -> Validate -> Import as Copy (preserving live Core session)
     await page.getByRole('button', { name: /Exportar \/ Backup/i }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
 
@@ -167,7 +165,7 @@ test.describe('Aion Desk v4 E2E flow', () => {
 
     const exportedJsonText = await fs.readFile(savedBackupPath, 'utf8');
     expect(exportedJsonText).toContain('"exportSchemaVersion": "2.0.0"');
-    expect(exportedJsonText).toContain('Fluxo Terra Sol Gemini E2E');
+    expect(exportedJsonText).toContain('Fluxo Real AionCore E2E');
     expect(exportedJsonText).not.toContain('aionui-csrf-token');
 
     await page.locator('#backup-file-input').setInputFiles(savedBackupPath);
@@ -180,25 +178,7 @@ test.describe('Aion Desk v4 E2E flow', () => {
     await page.keyboard.press('Escape');
     await expect(page.getByText(/\(cópia\)/i).first()).toBeVisible();
 
-    // 9. 2,000-event performance stress test: verify real mounted DOM cap + load-older scroll
-    await openDemoMenuItem(/Carregar teste de desempenho \(2\.000 eventos\)/i);
-
-    await page.getByRole('tab', { name: /Executor/i }).click();
-
-    const loadOlderBtn = page.getByRole('button', {
-      name: /Carregar eventos anteriores/i,
-    });
-    await expect(loadOlderBtn).toBeVisible();
-    const mountedCountBefore = await page.locator('main article').count();
-    expect(mountedCountBefore).toBeLessThanOrEqual(45);
-    expect(mountedCountBefore).toBeGreaterThan(0);
-
-    await loadOlderBtn.click();
-    const mountedCountAfter = await page.locator('main article').count();
-    expect(mountedCountAfter).toBeGreaterThan(mountedCountBefore);
-    expect(mountedCountAfter).toBeLessThanOrEqual(90);
-
-    // 10. Toggle theme and check responsive layout (1440, 1024, 390) + mobile drawers
+    // 6. Toggle theme and check responsive layout (1440, 1024, 390) + mobile drawers
     await page.getByRole('button', { name: /Mudar para tema (claro|escuro)/i }).click();
     for (const vp of [
       { width: 1440, height: 900 },

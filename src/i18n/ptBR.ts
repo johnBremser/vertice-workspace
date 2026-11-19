@@ -88,9 +88,9 @@ export const PT_BR = {
     failed_needs_action: 'Falhou ou requer intervenção',
   } satisfies Record<ContextReceiptStatus, string>,
   modelTierLabels: {
-    fast: 'Rápido (Demonstração)',
-    review: 'Revisão (Demonstração)',
-    advanced: 'Avançado (Demonstração)',
+    fast: 'Rápido',
+    review: 'Revisão',
+    advanced: 'Avançado',
   } satisfies Record<DemoModelTier, string>,
   receiptHonestyNote:
     'A fonte de verdade do projeto (Contexto Compartilhado no Vértice) não equivale à janela de contexto interna do modelo. Recibos "Enviada", "Recebida" e "Aplicada à execução" exigem evidências distintas — enviar uma mensagem não comprova aplicação.',

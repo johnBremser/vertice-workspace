@@ -141,7 +141,7 @@ function ParticipantEditorRow({
         displayName: found.displayName,
         source: found.source,
         tier: found.tier ?? participant.modelTier,
-        confirmation: found.confirmed ? 'confirmed' : 'simulated',
+        confirmation: found.confirmed ? 'confirmed' : 'unverified_preference',
       };
     }
     return participant.modelRef;
@@ -490,7 +490,7 @@ export function ParticipantsSection() {
               displayName: matchedModel.displayName,
               source: matchedModel.source,
               tier: matchedModel.tier ?? 'fast',
-              confirmation: matchedModel.confirmed ? 'confirmed' : 'simulated',
+              confirmation: matchedModel.confirmed ? 'confirmed' : 'unverified_preference',
             }
         : trimmedPref
           ? makePreferenceModelRef(trimmedPref, 'fast')
@@ -713,18 +713,14 @@ export function ParticipantsSection() {
                     className="mt-1 w-full rounded border border-[var(--border-strong)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]"
                   >
                     {store.connections
-                      .filter(
-                        (c) =>
-                          c.mode === activeConversation.conversation.executionMode,
-                      )
+                      .filter((c) => c.mode === 'aion_core')
                       .map((c) => (
                         <option key={c.id} value={c.id}>
                           {c.displayName}
                         </option>
                       ))}
                   </select>
-                  {activeConversation.conversation.executionMode === 'aion_core' &&
-                    !store.connections.some((c) => c.mode === 'aion_core') && (
+                  {!store.connections.some((c) => c.mode === 'aion_core') && (
                       <span className="mt-1 block text-[11px] text-[var(--status-warning)]">
                         Nenhuma conexão real do Core disponível ainda: autentique a
                         sessão no painel "Conexão AionCore Local" acima e clique em

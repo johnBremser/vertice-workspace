@@ -47,6 +47,26 @@ export function parseDotEnv(content) {
 
 export function loadEnvFiles(rootDir) {
   const merged = {};
+  const configPath = path.join(rootDir, 'vertice.config.json');
+  if (fs.existsSync(configPath)) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      if (typeof cfg.host === 'string' && cfg.host.trim()) {
+        merged.VERTICE_HOST = cfg.host.trim();
+      }
+      if (cfg.port !== undefined && cfg.port !== null && String(cfg.port).trim()) {
+        merged.VERTICE_PORT = String(cfg.port).trim();
+      }
+      if (typeof cfg.aioncoreBaseUrl === 'string') {
+        merged.VITE_AIONCORE_BASE_URL = cfg.aioncoreBaseUrl.trim();
+      }
+      if (typeof cfg.aioncoreProxyTarget === 'string' && cfg.aioncoreProxyTarget.trim()) {
+        merged.VITE_AIONCORE_PROXY_TARGET = cfg.aioncoreProxyTarget.trim();
+      }
+    } catch {
+      // Ignore malformed optional config here; doctor/startup validates separately
+    }
+  }
   for (const filename of ['.env', '.env.local']) {
     const filePath = path.join(rootDir, filename);
     if (fs.existsSync(filePath)) {

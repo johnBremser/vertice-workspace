@@ -6,7 +6,6 @@ import {
 } from '../internalProtocol';
 import { IncompatibleSchemaError, migrateWorkspaceState } from '../migration';
 import {
-  DEFAULT_CONNECTIONS,
   DEFAULT_TEAM_PRESETS,
   instantiateParticipantsFromPreset,
   makeDemoModelRef,
@@ -17,16 +16,48 @@ import {
   sortParticipantsByTabOrder,
   validateTeamConfiguration,
 } from '../teamValidation';
-import type { PermissionRequest, Task, WorkspaceStoreState } from '../types';
-import { DEMO_CONVERSATION_ID, DEMO_PROJECT_ID } from '../../services/demoScenario';
+import type {
+  ConnectionAdapterConfig,
+  PermissionRequest,
+  Task,
+  WorkspaceStoreState,
+} from '../types';
+import { AionCoreAdapter } from '../../services/aionCoreAdapter';
 import {
   applyImportedWorkspaceBackup,
   buildWorkspaceJsonExport,
   parseAndValidateWorkspaceBackup,
 } from '../../services/exportService';
 import { GatewayCapabilityError } from '../../services/gateway';
-import { MockWorkspaceGateway } from '../../services/mockGateway';
 import { MemoryOnlyStorageDriver, WorkspacePersistenceManager } from '../../services/storage';
+
+const SAMPLE_CORE_CONNECTION: ConnectionAdapterConfig = {
+  id: 'conn_core_codex_1',
+  displayName: 'Codex CLI (AionCore)',
+  vendorLabel: 'AionCore · codex',
+  mode: 'aion_core',
+  backendId: 'codex',
+  coreAgentId: 'agent_remote_1',
+  coreAssistantId: 'asst_remote_1',
+  configured: true,
+  coreReachability: 'reachable',
+  catalogLoaded: true,
+  executableStatus: 'verified',
+  coreAgentStatus: 'online',
+  authStatus: 'authenticated',
+  sessionStatus: 'active',
+  availableModels: [
+    { externalId: 'gpt-5.6-luna', displayName: 'GPT-5.6-Luna', source: 'core_catalog', confirmed: true },
+  ],
+  capabilities: {
+    supportsInterrupt: true,
+    supportsMidRunContextInjection: false,
+    supportsModelSwitchInSession: true,
+    supportsPauseQueue: true,
+    supportsSessionTerminate: false,
+  },
+  isSimulated: false,
+};
 
 describe('V4 Domain, Migration, Configurable Teams, Protocol & Backup', () => {
   it('migrates schema v1 payloads to v2 preserving IDs and rejecting unsupported future versions', () => {
@@ -147,11 +178,11 @@ describe('V4 Domain, Migration, Configurable Teams, Protocol & Backup', () => {
       preset: presetCombined,
       conversationId: 'conv_tsg',
       idGenerator: gen,
-      isSimulated: true,
-    });
+      isSimulated: false,
+    }).map((p) => ({ ...p, connectionId: SAMPLE_CORE_CONNECTION.id }));
     expect(terraSolGemini.some((p) => p.connectionId.includes('claude'))).toBe(false);
 
-    const validCombined = validateTeamConfiguration(terraSolGemini, DEFAULT_CONNECTIONS);
+    const validCombined = validateTeamConfiguration(terraSolGemini, [SAMPLE_CORE_CONNECTION]);
     expect(validCombined.valid).toBe(true);
     expect(
       validCombined.warnings.some((w) => w.includes('auditoria independente')),
@@ -175,9 +206,9 @@ describe('V4 Domain, Migration, Configurable Teams, Protocol & Backup', () => {
       preset: presetSplit,
       conversationId: 'conv_split',
       idGenerator: gen,
-      isSimulated: true,
-    });
-    const splitValid = validateTeamConfiguration(splitTeam, DEFAULT_CONNECTIONS);
+      isSimulated: false,
+    }).map((p) => ({ ...p, connectionId: SAMPLE_CORE_CONNECTION.id }));
+    const splitValid = validateTeamConfiguration(splitTeam, [SAMPLE_CORE_CONNECTION]);
     expect(splitValid.valid).toBe(true);
     const splitExecutor = splitTeam.find((p) => p.roles.includes('executor'))!;
     const splitReviewer = splitTeam.find((p) => p.roles.includes('reviewer'))!;
@@ -193,91 +224,38 @@ describe('V4 Domain, Migration, Configurable Teams, Protocol & Backup', () => {
       role: 'executor' as const,
       roles: ['executor' as const],
     }));
-    expect(validateTeamConfiguration(noCoord, DEFAULT_CONNECTIONS).valid).toBe(false);
+    expect(validateTeamConfiguration(noCoord, [SAMPLE_CORE_CONNECTION]).valid).toBe(false);
 
     // 2 coordinators -> error
     const twoCoords = terraSolGemini.map((p, idx) =>
       idx < 2 ? { ...p, role: 'coordinator' as const, roles: ['coordinator' as const] } : p,
     );
-    expect(validateTeamConfiguration(twoCoords, DEFAULT_CONNECTIONS).valid).toBe(false);
+    expect(validateTeamConfiguration(twoCoords, [SAMPLE_CORE_CONNECTION]).valid).toBe(false);
 
     // Duplicate session -> error
     const dupSession = terraSolGemini.map((p) => ({
       ...p,
       sessionRef: { ...terraSolGemini[0].sessionRef },
     }));
-    expect(validateTeamConfiguration(dupSession, DEFAULT_CONNECTIONS).valid).toBe(false);
+    expect(validateTeamConfiguration(dupSession, [SAMPLE_CORE_CONNECTION]).valid).toBe(false);
   });
 
-  it('runs config-driven collaboration on a new Terra 6.1 / Sol 6.1 / Gemini Hydrogen conversation without Claude', async () => {
+  it('rejects dependency cycles and supports task creation/update + plan revision + tab reordering', async () => {
     const persistence = new WorkspacePersistenceManager(new MemoryOnlyStorageDriver());
-    const gateway = new MockWorkspaceGateway(persistence);
-    await gateway.loadWorkspace();
-
-    const conv = await gateway.createConversation({
-      projectId: DEMO_PROJECT_ID,
-      title: 'Pipeline Terra/Sol/Gemini',
-      presetId: 'preset_terra_sol_gemini',
+    const gateway = new AionCoreAdapter(persistence);
+    const loaded = await gateway.loadWorkspace();
+    await gateway.importWorkspaceState({
+      ...loaded,
+      connections: [SAMPLE_CORE_CONNECTION],
+    });
+    const project = await gateway.createProject({
+      name: 'Projeto Core Real',
+      description: 'Teste de tarefas e dependências',
+      workspacePathInfo: 'C:/core',
     });
 
-    expect(conv.participants.some((p) => p.id === 'part_claude')).toBe(false);
-    expect(conv.participants.map((p) => p.displayName)).toEqual([
-      'Terra 6.1',
-      'Sol 6.1',
-      'Gemini Hydrogen',
-    ]);
-
-    // Step through full scenario with manual approvals
-    for (let i = 0; i < 20; i += 1) {
-      const res = gateway.stepScenario(conv.conversation.id);
-      if (res.blocked) {
-        const snap = gateway.getStateSnapshot().conversations[conv.conversation.id];
-        const pendingPerm = snap.permissions.find((p) => p.status === 'pending');
-        if (pendingPerm) {
-          await gateway.respondPermission({
-            conversationId: conv.conversation.id,
-            requestId: pendingPerm.id,
-            decision: 'approved',
-          });
-          continue;
-        }
-        const pendingEsc = snap.escalations.find((e) => e.status === 'suggested');
-        if (pendingEsc) {
-          await gateway.resolveEscalation({
-            conversationId: conv.conversation.id,
-            escalationId: pendingEsc.id,
-            resolution: 'approved',
-          });
-          continue;
-        }
-      }
-      if (res.finished) break;
-    }
-
-    const finalConv = gateway.getStateSnapshot().conversations[conv.conversation.id];
-    expect(finalConv.conversation.executionStatus).toBe('completed');
-    expect(finalConv.tasks.length).toBeGreaterThanOrEqual(2);
-    expect(finalConv.tasks.every((t) => t.status === 'completed')).toBe(true);
-    expect(finalConv.tasks[0].reviews[0]?.independentReview).toBe(false);
-
-    // Reorder tabs & verify sortParticipantsByTabOrder
-    const reversedIds = [...finalConv.participants].reverse().map((p) => p.id);
-    await gateway.reorderParticipantTabs(conv.conversation.id, reversedIds);
-    const reordered = sortParticipantsByTabOrder(
-      gateway.getStateSnapshot().conversations[conv.conversation.id].participants,
-    );
-    expect(reordered.map((p) => p.id)).toEqual(reversedIds);
-
-    gateway.dispose();
-  });
-
-  it('rejects dependency cycles and supports task creation/update + plan revision + preserving aion_core work on resetDemo', async () => {
-    const persistence = new WorkspacePersistenceManager(new MemoryOnlyStorageDriver());
-    const gateway = new MockWorkspaceGateway(persistence);
-    await gateway.loadWorkspace();
-
     const conv = await gateway.createConversation({
-      projectId: DEMO_PROJECT_ID,
+      projectId: project.id,
       title: 'Tarefas & Dependências',
       presetId: 'preset_terra_sol_split_gemini',
     });
@@ -334,35 +312,13 @@ describe('V4 Domain, Migration, Configurable Teams, Protocol & Backup', () => {
     });
     expect(plan.versionNumber).toBe(1);
 
-    // Simulate an imported/stored aion_core project + conversation; resetDemo() must preserve it!
-    const snapshot = structuredClone(gateway.getStateSnapshot());
-    snapshot.projects.push({
-      id: 'proj_core_keep',
-      name: 'Projeto Core Preservado',
-      description: 'Real',
-      workspacePathInfo: 'C:/core',
-      executionMode: 'aion_core',
-      status: 'active',
-      createdAt: '2026-11-16T10:00:00.000Z',
-      updatedAt: '2026-11-16T10:00:00.000Z',
-    });
-    snapshot.conversations.conv_core_keep = {
-      ...structuredClone(snapshot.conversations[DEMO_CONVERSATION_ID]),
-      conversation: {
-        ...snapshot.conversations[DEMO_CONVERSATION_ID].conversation,
-        id: 'conv_core_keep',
-        projectId: 'proj_core_keep',
-        title: 'Conversa Core Real',
-        executionMode: 'aion_core',
-        externalTeamId: 'team_real_1',
-      },
-    };
-    await gateway.importWorkspaceState(snapshot);
-    await gateway.resetDemo();
-
-    const afterReset = gateway.getStateSnapshot();
-    expect(afterReset.projects.some((p) => p.id === 'proj_core_keep')).toBe(true);
-    expect(afterReset.conversations.conv_core_keep).toBeDefined();
+    // Reorder tabs & verify sortParticipantsByTabOrder
+    const reversedIds = [...conv.participants].reverse().map((p) => p.id);
+    await gateway.reorderParticipantTabs(conv.conversation.id, reversedIds);
+    const reordered = sortParticipantsByTabOrder(
+      gateway.getStateSnapshot().conversations[conv.conversation.id].participants,
+    );
+    expect(reordered.map((p) => p.id)).toEqual(reversedIds);
 
     gateway.dispose();
   });
@@ -462,8 +418,23 @@ describe('V4 Domain, Migration, Configurable Teams, Protocol & Backup', () => {
 
   it('validates backup JSON exports/imports cleanly without credentials or mutating state on errors', async () => {
     const persistence = new WorkspacePersistenceManager(new MemoryOnlyStorageDriver());
-    const gateway = new MockWorkspaceGateway(persistence);
-    const initial = await gateway.loadWorkspace();
+    const gateway = new AionCoreAdapter(persistence);
+    const loaded = await gateway.loadWorkspace();
+    await gateway.importWorkspaceState({
+      ...loaded,
+      connections: [SAMPLE_CORE_CONNECTION],
+    });
+    const project = await gateway.createProject({
+      name: 'Projeto Backup',
+      description: 'Backup sem credenciais',
+      workspacePathInfo: 'C:/backup',
+    });
+    await gateway.createConversation({
+      projectId: project.id,
+      title: 'Conversa Backup',
+      presetId: 'preset_terra_sol_gemini',
+    });
+    const initial = gateway.getStateSnapshot();
 
     const snapshotWithSensitiveConnection: WorkspaceStoreState = {
       ...structuredClone(initial),
@@ -510,178 +481,7 @@ describe('V4 Domain, Migration, Configurable Teams, Protocol & Backup', () => {
       );
       expect(copied.projects.length).toBe(2);
       expect(Object.keys(copied.conversations).length).toBe(2);
-      expect(makeDemoModelRef('fast').confirmation).toBe('simulated');
-    }
-
-    gateway.dispose();
-  });
-
-  it('keeps contiguous seq without gaps when sending an initial General message on a new Terra/Sol/Gemini conversation before stepping forward (Fix 1)', async () => {
-    const persistence = new WorkspacePersistenceManager(new MemoryOnlyStorageDriver());
-    const gateway = new MockWorkspaceGateway(persistence);
-    await gateway.loadWorkspace();
-
-    const conv = await gateway.createConversation({
-      projectId: DEMO_PROJECT_ID,
-      title: 'Nova conversa sem lacuna',
-      presetId: 'preset_terra_sol_gemini',
-    });
-    expect(conv.conversation.lastAppliedSeq).toBe(0);
-
-    await gateway.sendMessage({
-      conversationId: conv.conversation.id,
-      targetTab: 'general',
-      bodyMarkdown: 'Iniciar plano completo da nova conversa',
-    });
-
-    const afterSend = gateway.getStateSnapshot().conversations[conv.conversation.id];
-    expect(afterSend.conversation.syncState).toBe('synced');
-    expect(afterSend.conversation.lastAppliedSeq).toBe(2);
-    expect(Object.keys(afterSend.pendingOutOfOrder)).toHaveLength(0);
-
-    const stepOut = gateway.stepScenario(conv.conversation.id);
-    expect(Boolean(stepOut.blocked)).toBe(false);
-    expect(stepOut.finished).toBe(false);
-
-    const afterStep = gateway.getStateSnapshot().conversations[conv.conversation.id];
-    expect(afterStep.conversation.syncState).toBe('synced');
-    expect(afterStep.conversation.lastAppliedSeq).toBe(3);
-    expect(Object.keys(afterStep.pendingOutOfOrder)).toHaveLength(0);
-    expect(afterStep.conversation.scenarioStepIndex).toBe(2);
-    // Strict contiguous sequence audit across eventLog
-    const seqs = afterStep.eventLog.map((e) => e.seq);
-    expect(seqs).toEqual([1, 2, 3]);
-
-    gateway.dispose();
-  });
-
-  it('processes 3+ tasks (chained dependencies & parallel tasks, custom IDs) without premature completion and blocks false completion on rejections/failures (Fix 2)', async () => {
-    const persistence = new WorkspacePersistenceManager(new MemoryOnlyStorageDriver());
-    const gateway = new MockWorkspaceGateway(persistence);
-    await gateway.loadWorkspace();
-
-    const conv = await gateway.createConversation({
-      projectId: DEMO_PROJECT_ID,
-      title: 'Três+ tarefas encadeadas e paralelas',
-      presetId: 'preset_terra_sol_split_gemini',
-    });
-    const executor = conv.participants.find((p) => p.roles.includes('executor'))!;
-    const reviewer = conv.participants.find((p) => p.roles.includes('reviewer'))!;
-
-    const taskAlpha = await gateway.createTask({
-      conversationId: conv.conversation.id,
-      title: 'Alpha base',
-      description: 'Primeira entrega base',
-      assigneeParticipantId: executor.id,
-      reviewerParticipantId: reviewer.id,
-      dependencyTaskIds: [],
-      acceptanceCriteria: ['Alpha pronta'],
-    });
-    const taskBeta = await gateway.createTask({
-      conversationId: conv.conversation.id,
-      title: 'Beta paralela',
-      description: 'Entrega paralela independente',
-      assigneeParticipantId: executor.id,
-      reviewerParticipantId: reviewer.id,
-      dependencyTaskIds: [],
-      acceptanceCriteria: ['Beta pronta'],
-    });
-    const taskGamma = await gateway.createTask({
-      conversationId: conv.conversation.id,
-      title: 'Gamma dependente',
-      description: 'Depende de Alpha e Beta',
-      assigneeParticipantId: executor.id,
-      reviewerParticipantId: reviewer.id,
-      dependencyTaskIds: [taskAlpha.id, taskBeta.id],
-      acceptanceCriteria: ['Gamma pronta'],
-    });
-    const taskDelta = await gateway.createTask({
-      conversationId: conv.conversation.id,
-      title: 'Delta final',
-      description: 'Depende de Gamma',
-      assigneeParticipantId: executor.id,
-      reviewerParticipantId: reviewer.id,
-      dependencyTaskIds: [taskGamma.id],
-      acceptanceCriteria: ['Delta pronta'],
-    });
-
-    // Step through entire flow approving permissions/escalations cleanly
-    let finishedFlag = false;
-    for (let i = 0; i < 40; i += 1) {
-      const snapBefore = gateway.getStateSnapshot().conversations[conv.conversation.id];
-      const hasUnfinished = snapBefore.tasks.some(
-        (t) => t.status !== 'completed' && t.status !== 'cancelled',
-      );
-      const stepRes = gateway.stepScenario(conv.conversation.id);
-      if (stepRes.finished && hasUnfinished) {
-        const snapAfter = gateway.getStateSnapshot().conversations[conv.conversation.id];
-        const stillUnfinished = snapAfter.tasks.some(
-          (t) => t.status !== 'completed' && t.status !== 'cancelled',
-        );
-        expect(stillUnfinished).toBe(false);
-      }
-
-      if (stepRes.blocked) {
-        const snap = gateway.getStateSnapshot().conversations[conv.conversation.id];
-        const pendingPerm = snap.permissions.find((p) => p.status === 'pending');
-        if (pendingPerm) {
-          await gateway.respondPermission({
-            conversationId: conv.conversation.id,
-            requestId: pendingPerm.id,
-            decision: 'approved',
-          });
-          continue;
-        }
-        const pendingEsc = snap.escalations.find((e) => e.status === 'suggested');
-        if (pendingEsc) {
-          await gateway.resolveEscalation({
-            conversationId: conv.conversation.id,
-            escalationId: pendingEsc.id,
-            resolution: 'approved',
-          });
-          continue;
-        }
-      }
-      if (stepRes.finished) {
-        finishedFlag = true;
-        break;
-      }
-    }
-
-    expect(finishedFlag).toBe(true);
-    const finalConv = gateway.getStateSnapshot().conversations[conv.conversation.id];
-    expect(finalConv.conversation.executionStatus).toBe('completed');
-    expect(finalConv.tasks.length).toBeGreaterThanOrEqual(4);
-    expect(finalConv.tasks.every((t) => t.status === 'completed')).toBe(true);
-    expect(finalConv.tasks.find((t) => t.id === taskAlpha.id)?.status).toBe('completed');
-    expect(finalConv.tasks.find((t) => t.id === taskBeta.id)?.status).toBe('completed');
-    expect(finalConv.tasks.find((t) => t.id === taskGamma.id)?.status).toBe('completed');
-    expect(finalConv.tasks.find((t) => t.id === taskDelta.id)?.status).toBe('completed');
-
-    // Negative check: denied permission blocks execution and NEVER finishes
-    const convDenied = await gateway.createConversation({
-      projectId: DEMO_PROJECT_ID,
-      title: 'Permissão recusada não conclui',
-      presetId: 'preset_terra_sol_gemini',
-    });
-    for (let i = 0; i < 12; i += 1) {
-      const r = gateway.stepScenario(convDenied.conversation.id);
-      const snap = gateway.getStateSnapshot().conversations[convDenied.conversation.id];
-      const perm = snap.permissions.find((p) => p.status === 'pending');
-      if (perm) {
-        await gateway.respondPermission({
-          conversationId: convDenied.conversation.id,
-          requestId: perm.id,
-          decision: 'denied',
-        });
-        const nextStep = gateway.stepScenario(convDenied.conversation.id);
-        expect(nextStep.blocked).toBe(true);
-        expect(nextStep.finished).toBe(false);
-        const afterDenied = gateway.getStateSnapshot().conversations[convDenied.conversation.id];
-        expect(afterDenied.conversation.executionStatus).not.toBe('completed');
-        break;
-      }
-      expect(r.finished).toBe(false);
+      expect(makeDemoModelRef('fast').confirmation).toBe('unverified_preference');
     }
 
     gateway.dispose();
@@ -689,9 +489,24 @@ describe('V4 Domain, Migration, Configurable Teams, Protocol & Backup', () => {
 
   it('detaches live Core external bindings on backup import (copy & replace), preserves historical provenance, never assumes login or auto-starts execution (V6-06)', async () => {
     const persistence = new WorkspacePersistenceManager(new MemoryOnlyStorageDriver());
-    const gateway = new MockWorkspaceGateway(persistence);
-    const initial = await gateway.loadWorkspace();
-    const convId = Object.keys(initial.conversations)[0];
+    const gateway = new AionCoreAdapter(persistence);
+    const loaded = await gateway.loadWorkspace();
+    await gateway.importWorkspaceState({
+      ...loaded,
+      connections: [SAMPLE_CORE_CONNECTION],
+    });
+    const project = await gateway.createProject({
+      name: 'Projeto Core Backup',
+      description: 'Proveniência',
+      workspacePathInfo: 'C:/core',
+    });
+    const createdConv = await gateway.createConversation({
+      projectId: project.id,
+      title: 'Conversa Core',
+      presetId: 'preset_terra_sol_gemini',
+    });
+    const initial = gateway.getStateSnapshot();
+    const convId = createdConv.conversation.id;
     const baseProj = initial.conversations[convId];
 
     const coreRichState: WorkspaceStoreState = {

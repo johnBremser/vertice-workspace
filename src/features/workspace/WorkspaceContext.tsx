@@ -26,17 +26,10 @@ import type {
 } from '../../domain/types';
 import { AionCoreAdapter } from '../../services/aionCoreAdapter';
 import {
-  DEFAULT_EXECUTION_MODE,
-  loadExecutionModePreference,
-  resolveBootstrapExecutionMode,
-  saveExecutionModePreference,
-} from '../../services/executionModePreference';
-import {
   GatewayCapabilityError,
   type AgentWorkspaceGateway,
   type CoreDiagnosticEntry,
 } from '../../services/gateway';
-import { MockWorkspaceGateway } from '../../services/mockGateway';
 import {
   IndexedDbStorageDriver,
   loadUiPreferences,
@@ -56,17 +49,13 @@ export interface HighlightTarget {
 }
 
 export type GatewayFactory = (
-  mode: ExecutionMode,
   persistence: WorkspacePersistenceManager,
 ) => AgentWorkspaceGateway;
 
 function defaultGatewayFactory(
-  mode: ExecutionMode,
   persistence: WorkspacePersistenceManager,
 ): AgentWorkspaceGateway {
-  return mode === 'aion_core'
-    ? new AionCoreAdapter(persistence)
-    : new MockWorkspaceGateway(persistence);
+  return new AionCoreAdapter(persistence);
 }
 
 export async function probeCoreSessionOnStartup(
@@ -106,8 +95,6 @@ interface WorkspaceContextValue {
   selectedTaskId: string | null;
   highlightedEvent: HighlightTarget | null;
   actionBanner: ActionBanner | null;
-  autoPlaying: boolean;
-  hasDemoControls: boolean;
   hasCoreOperations: boolean;
   getDraft: (conversationId: string, tabId: string) => string;
   setDraft: (conversationId: string, tabId: string, value: string) => void;
@@ -246,18 +233,6 @@ interface WorkspaceContextValue {
   coreConnectWs: () => Promise<void>;
   coreDisconnectWs: () => void;
   coreGetDiagnostics: () => CoreDiagnosticEntry[];
-
-  // Demo-only simulation controls
-  stepScenario: () => void;
-  toggleAutoPlay: () => void;
-  resumePausedDemo: () => void;
-  resetDemo: () => Promise<void>;
-  triggerDisconnectResume: (participantId?: string) => void;
-  triggerPermission: () => void;
-  triggerDuplicateEvent: () => void;
-  triggerOutOfOrderGap: () => void;
-  triggerOperationalFailure: () => void;
-  triggerStress2000: () => void;
 }
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
@@ -286,12 +261,7 @@ export function WorkspaceProvider({
     );
   }
   if (!gatewayRef.current) {
-    // V6-11: a fresh workspace opens in "AionCore local" mode by default instead
-    // of the deterministic simulation. The simulation stays available in
-    // Settings and, once explicitly chosen, is persisted and always wins.
-    const preferredMode =
-      loadExecutionModePreference() ?? DEFAULT_EXECUTION_MODE;
-    gatewayRef.current = gatewayFactory(preferredMode, persistenceRef.current);
+    gatewayRef.current = gatewayFactory(persistenceRef.current);
   }
 
   const initialPrefs = useMemo(() => loadUiPreferences(), []);
@@ -337,7 +307,6 @@ export function WorkspaceProvider({
   const [highlightedEvent, setHighlightedEvent] =
     useState<HighlightTarget | null>(null);
   const [actionBanner, setActionBanner] = useState<ActionBanner | null>(null);
-  const [autoPlaying, setAutoPlaying] = useState(false);
   const [gatewayGeneration, setGatewayGeneration] = useState(0);
 
   const draftsRef = useRef<Record<string, string>>({});
@@ -396,18 +365,6 @@ export function WorkspaceProvider({
     });
     unsubGatewayRef.current.push(unsubState);
 
-    if (gateway.demo) {
-      const unsubAutoStop = gateway.demo.subscribeAutoPlayStop((reason) => {
-        setAutoPlaying(false);
-        if (reason) {
-          setActionBanner({ tone: 'warning', message: reason });
-        }
-      });
-      unsubGatewayRef.current.push(unsubAutoStop);
-    } else {
-      setAutoPlaying(false);
-    }
-
     gatewayRef.current = gateway;
     setGatewayGeneration((g) => g + 1);
   }, []);
@@ -427,42 +384,12 @@ export function WorkspaceProvider({
 
     void initialGateway
       .loadWorkspace()
-      .then(async (loaded) => {
+      .then(() => {
         if (cancelled) return;
-        // Bootstrap mode resolution (V6-11):
-        // 1. an explicit preference chosen in Settings always wins;
-        // 2. a workspace holding only the seeded demonstration scenario is not an
-        //    explicit choice, so it follows the default (AionCore local);
-        // 3. any other persisted workspace keeps its own mode, so legacy
-        //    simulations are never hijacked.
-        const explicitPreference = loadExecutionModePreference();
-        const effectiveMode: ExecutionMode = resolveBootstrapExecutionMode({
-          explicitPreference,
-          loaded,
-        });
-        const targetKind =
-          effectiveMode === 'aion_core' ? 'aion_core' : 'mock';
-        let activeGateway = initialGateway;
-        if (targetKind !== initialGateway.kind) {
-          initialGateway.dispose();
-          const nextGw = gatewayFactory(effectiveMode, persistence);
-          bindGateway(nextGw);
-          await nextGw.loadWorkspace();
-          activeGateway = nextGw;
-        }
-        // The badge and the gateway must never disagree: align the persisted
-        // mode with the gateway actually in use, otherwise the UI would claim
-        // "AionCore local" while Core operations are unavailable.
-        if (activeGateway.getStateSnapshot().executionMode !== effectiveMode) {
-          await activeGateway.setExecutionMode(effectiveMode);
-          await persistence.flushSave();
-        }
-        if (!cancelled && effectiveMode === 'aion_core') {
-          void probeCoreSessionOnStartup(
-            activeGateway,
-            () => !cancelled && gatewayRef.current === activeGateway,
-          );
-        }
+        void probeCoreSessionOnStartup(
+          initialGateway,
+          () => !cancelled && gatewayRef.current === initialGateway,
+        );
       })
       .finally(() => {
         setLoading(false);
@@ -615,25 +542,12 @@ export function WorkspaceProvider({
     [],
   );
 
-  const requireDemoControls = useCallback(() => {
-    const demo = gatewayRef.current?.demo;
-    if (!demo || store?.executionMode === 'aion_core') {
-      setActionBanner({
-        tone: 'warning',
-        message:
-          'Controles de simulação e timers ficam desativados no modo AionCore local.',
-      });
-      return null;
-    }
-    return demo;
-  }, [store?.executionMode]);
-
   const requireCoreOps = useCallback(() => {
     const core = gatewayRef.current?.core;
     if (!core) {
       throw new GatewayCapabilityError(
         'CAPABILITY_UNSUPPORTED',
-        'Alterne para o Modo AionCore local para executar operações do servidor Core.',
+        'Conexão AionCore local indisponível.',
       );
     }
     return core;
@@ -659,10 +573,6 @@ export function WorkspaceProvider({
     selectedTaskId,
     highlightedEvent,
     actionBanner,
-    autoPlaying,
-    hasDemoControls: Boolean(
-      gatewayRef.current?.demo && store?.executionMode !== 'aion_core',
-    ),
     hasCoreOperations: Boolean(gatewayRef.current?.core),
     getDraft,
     setDraft,
@@ -691,29 +601,9 @@ export function WorkspaceProvider({
     dismissBanner: () => setActionBanner(null),
     setBanner: setActionBanner,
 
-    setExecutionMode: async (mode) =>
+    setExecutionMode: async () =>
       runAction(async () => {
-        const currentGw = gatewayRef.current!;
-        const persistence = persistenceRef.current!;
-        await currentGw.setExecutionMode(mode);
-        await persistence.flushSave();
-        // V6-11: persist the explicit choice so it survives reloads and always
-        // wins over the default operating mode.
-        saveExecutionModePreference(mode);
-        const targetKind = mode === 'aion_core' ? 'aion_core' : 'mock';
-        if (currentGw.kind !== targetKind) {
-          currentGw.dispose();
-          const nextGw = gatewayFactory(mode, persistence);
-          bindGateway(nextGw);
-          await nextGw.loadWorkspace();
-        }
-        setActionBanner({
-          tone: 'info',
-          message:
-            mode === 'aion_core'
-              ? 'Modo alterado para AionCore local. Simulação automática desativada.'
-              : 'Modo alterado para Simulação determinística local.',
-        });
+        await gatewayRef.current!.setExecutionMode('aion_core');
       }),
 
     updateCoreSettings: async (settings) =>
@@ -971,18 +861,10 @@ export function WorkspaceProvider({
       }),
     importWorkspaceState: async (nextState) =>
       runAction(async () => {
-        const currentGw = gatewayRef.current!;
-        if (nextState.executionMode !== currentGw.kind) {
-          currentGw.dispose();
-          const nextGw = gatewayFactory(
-            nextState.executionMode,
-            persistenceRef.current!,
-          );
-          bindGateway(nextGw);
-          await nextGw.importWorkspaceState(nextState);
-        } else {
-          await currentGw.importWorkspaceState(nextState);
-        }
+        await gatewayRef.current!.importWorkspaceState({
+          ...nextState,
+          executionMode: 'aion_core',
+        });
         setActiveTabByConv({});
         draftsRef.current = {};
         setDraftVersion((v) => v + 1);
@@ -1011,7 +893,20 @@ export function WorkspaceProvider({
       }),
     coreLogin: async (username, password) =>
       runAction(async () => {
-        const res = await requireCoreOps().login(username, password);
+        const core = requireCoreOps();
+        const res = await core.login(username, password);
+        if (res.authenticated) {
+          try {
+            const cat = await core.refreshCoreCatalog();
+            setActionBanner({
+              tone: 'success',
+              message: `${res.message} ${cat.message}`,
+            });
+            return;
+          } catch {
+            // Login succeeded; catalog can still be retried explicitly
+          }
+        }
         setActionBanner({ tone: 'success', message: res.message });
       }),
     coreLogout: async () =>
@@ -1053,108 +948,6 @@ export function WorkspaceProvider({
     },
     coreGetDiagnostics: () => {
       return gatewayRef.current?.core?.getDiagnostics() ?? [];
-    },
-
-    stepScenario: () => {
-      const demo = requireDemoControls();
-      if (!demo || !activeConversationId) return;
-      const res = demo.stepScenario(activeConversationId);
-      if (res.blocked && res.blockedReason) {
-        setActionBanner({
-          tone: 'warning',
-          message: res.blockedReason,
-        });
-        return;
-      }
-      if (res.finished) {
-        setAutoPlaying(false);
-        setActionBanner({
-          tone: 'success',
-          message:
-            'Cenário demonstrativo concluído. Você pode reiniciar ou testar cenários de borda.',
-        });
-      }
-    },
-    toggleAutoPlay: () => {
-      const demo = requireDemoControls();
-      if (!demo || !activeConversationId) return;
-      if (autoPlaying) {
-        demo.pauseAutoPlay(activeConversationId);
-        setAutoPlaying(false);
-      } else {
-        const started = demo.startAutoPlay(activeConversationId, 1600);
-        setAutoPlaying(started);
-      }
-    },
-    resumePausedDemo: () => {
-      const demo = requireDemoControls();
-      if (!demo || !activeConversationId) return;
-      const started = demo.startAutoPlay(activeConversationId, 1600);
-      setAutoPlaying(started);
-    },
-    resetDemo: async () => {
-      const demo = requireDemoControls();
-      if (!demo) return;
-      setAutoPlaying(false);
-      await demo.resetDemo();
-      setActiveTabByConv({});
-      draftsRef.current = {};
-      setDraftVersion((v) => v + 1);
-      setActionBanner({
-        tone: 'info',
-        message:
-          'Demonstração reiniciada para o ponto inicial (trabalhos em modo Core preservados).',
-      });
-    },
-    triggerDisconnectResume: (participantId) => {
-      const demo = requireDemoControls();
-      if (!demo || !activeConversationId) return;
-      demo.triggerDisconnectResumeScenario(activeConversationId, participantId);
-    },
-    triggerPermission: () => {
-      const demo = requireDemoControls();
-      if (!demo || !activeConversationId) return;
-      demo.triggerPermissionScenario(activeConversationId);
-    },
-    triggerDuplicateEvent: () => {
-      const demo = requireDemoControls();
-      if (!demo || !activeConversationId) return;
-      const res = demo.triggerDuplicateEventScenario(activeConversationId);
-      setActionBanner({
-        tone: 'info',
-        message: res.duplicatePrevented
-          ? `Evento duplicado (${res.replayedEventId}) recebido na reconexão e descartado de forma idempotente sem duplicar mensagens.`
-          : 'Nenhum evento anterior disponível para simular duplicação.',
-      });
-    },
-    triggerOutOfOrderGap: () => {
-      const demo = requireDemoControls();
-      if (!demo || !activeConversationId) return;
-      demo.triggerOutOfOrderGapScenario(activeConversationId);
-      setActionBanner({
-        tone: 'warning',
-        message:
-          'Evento posterior recebido antes do anterior: lacuna detectada e evento retido no buffer. Clique em "Reconciliar agora" para recuperar sem perda.',
-      });
-    },
-    triggerOperationalFailure: () => {
-      const demo = requireDemoControls();
-      if (!demo || !activeConversationId) return;
-      demo.triggerOperationalFailureScenario(activeConversationId);
-      setActionBanner({
-        tone: 'warning',
-        message:
-          'Falha operacional registrada: apenas o contador operacional aumentou (reprovações de qualidade não foram afetadas).',
-      });
-    },
-    triggerStress2000: () => {
-      const demo = requireDemoControls();
-      if (!demo || !activeConversationId) return;
-      const count = demo.triggerStress2000Scenario(activeConversationId);
-      setActionBanner({
-        tone: 'info',
-        message: `${count} eventos simulados injetados na aba do executor com paginação incremental ativa.`,
-      });
     },
   };
 

@@ -79,29 +79,6 @@ export interface ReconcileResult {
   remainingGapSeq?: number;
 }
 
-export interface StepScenarioResult {
-  finished: boolean;
-  blocked?: boolean;
-  blockedReason?: string;
-}
-
-export interface DemoGatewayControls {
-  stepScenario(conversationId: string): StepScenarioResult;
-  startAutoPlay(conversationId: string, intervalMs?: number): boolean;
-  pauseAutoPlay(conversationId?: string, stopReason?: string): void;
-  subscribeAutoPlayStop(listener: (reason?: string) => void): () => void;
-  resetDemo(): Promise<void>;
-  triggerDisconnectResumeScenario(conversationId: string, participantId?: string): void;
-  triggerPermissionScenario(conversationId: string): void;
-  triggerDuplicateEventScenario(conversationId: string): {
-    duplicatePrevented: boolean;
-    replayedEventId?: string;
-  };
-  triggerOutOfOrderGapScenario(conversationId: string): void;
-  triggerOperationalFailureScenario(conversationId: string): void;
-  triggerStress2000Scenario(conversationId: string): number;
-}
-
 export interface CoreDiagnosticEntry {
   timestamp: string;
   operation: string;
@@ -161,8 +138,7 @@ export interface ConfigureParticipantInput {
 }
 
 export interface AgentWorkspaceGateway {
-  readonly kind: 'mock' | 'aion_core';
-  readonly demo?: DemoGatewayControls;
+  readonly kind: 'aion_core';
   readonly core?: CoreGatewayOperations;
 
   loadWorkspace(): Promise<WorkspaceStoreState>;

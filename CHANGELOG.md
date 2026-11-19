@@ -61,6 +61,13 @@ Este arquivo registra a evolução técnica do **Vértice Workspace** (*Powered 
 - Resolução de modo no arranque coberta por regressão (`executionModePreference.test.ts` e `workspace.test.ts`): preferência explícita → workspace apenas semeado (segue o padrão) → workspaces de simulação legados preservados.
 - A suíte Playwright agora **opta explicitamente** pelo modo de simulação (`addInitScript`), sem depender do padrão do produto.
 
+### Ligação da equipe com assistentes reais do Core (`V6-12`)
+
+- **Correção**: o seletor "Conexão / adaptador" filtrava as conexões pelo modo da conexão **atual** do participante. Um participante semeado na conexão de demonstração ficava preso nela e **não conseguia listar as conexões reais do Core** — impeditivo para sair da demonstração.
+- Em **Modo AionCore local** o seletor agora oferece apenas as conexões reais do Core (mais a conexão atual, para o controle manter valor válido), e a lista de perfis salvos no formulário de novo participante só apresenta perfis vinculados ao Core.
+- Aviso explícito no formulário quando ainda não há nenhuma conexão real do Core disponível (falta autenticar a sessão e sincronizar o catálogo).
+- Regressão coberta por `src/domain/__tests__/teamValidation.test.ts` (`selectableConnectionsForMode`).
+
 ---
 
 ## [Histórico v5 — Prévia local]

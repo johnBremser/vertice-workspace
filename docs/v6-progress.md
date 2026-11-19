@@ -370,6 +370,7 @@ Relatório JSON e capturas preservadas no repositório em `docs/screenshots/v6-0
 - V6-09 — Validação integrada/release: **aprovado pelo auditor (18/11/2026)** (`752deed`).
 - V6-10 — Versionamento/GitHub/documentação: **aprovado com ressalvas pelo auditor (18/11/2026)** (`a52f2c9` já publicado em remoto privado `johnBremser/vertice-workspace.git`; reconciliação documental aplicada; pendências de decisão do usuário antes de abrir como público: `LICENSE`, CI remota, expurgo histórico de `data/` e `public/assets/aistudio/`).
 - V6-11 — Modo de abertura padrão: **concluído e verificado em navegador real (19/11/2026)** — o workspace abre em Modo AionCore local, com workspace limpo e conexão real com o Core (`/health` confirmado, 1/5 etapas da preparação guiada).
+- V6-12 — Ligação da equipe com assistentes reais: **concluído e verificado (19/11/2026)** — o seletor "Conexão / adaptador" passou a listar as conexões reais do Core em modo Core (o filtro antigo prendia o participante na conexão de demonstração).
 
 ---
 
@@ -571,3 +572,28 @@ Registradas em `docs/screenshots/v6-08/v608_dist_report.json` e capturas em `doc
 ### Nota operacional
 
 O `codex` CLI **não está no PATH do sistema**; o Core o detecta apenas quando iniciado com `C:\Users\joao.gonzales\AppData\Local\OpenAI\Codex\bin\5449c1f0f26f1f98` somado ao PATH (idem `agy` e `cursor-agent`). Sem isso, `aioncore doctor` reporta `codex: missing` e a equipe real não forma.
+
+---
+
+## Etapa V6-12 — Ligação da equipe com assistentes reais do Core (concluída)
+
+**Relato do usuário (19/11/2026)**: a configuração aparecia cheia de "(Demonstração)" e não havia como usar a equipe real.
+
+### Diagnóstico
+
+O seletor **"Conexão / adaptador"** filtrava as conexões por `conn.mode === currentConnection.mode`. Como os participantes semeados ficam ligados às conexões de demonstração (`Codex (Demonstração)`, `Claude (Demonstração)`, `Antigravity (Demonstração)`), a lista mostravapenas adaptadores de simulação — e o participante **não tinha como** ser migrado para um assistente real do Core. Os modelos listados eram os perfis de tier simulados ("Rápido/Revisão/Avançado (Demonstração)").
+
+As conexões reais só existem depois de **autenticar a sessão do Core** e **sincronizar o catálogo** (`refreshCoreCatalog` cria conexões com `mode: 'aion_core'` + `coreAssistantId`, em `aionCoreAdapter.ts:1246`).
+
+### Correção
+
+1. `selectableConnectionsForMode()` (`src/domain/teamValidation.ts`): em modo AionCore local oferece apenas conexões reais do Core, mantendo a conexão atual para o controle não ficar sem valor válido; o modo de simulação mantém o comportamento anterior.
+2. `ParticipantsSection.tsx`: o seletor do participante usa o novo helper; a lista de perfis salvos do formulário de novo participante só mostra perfis vinculados ao Core; e aparece um aviso quando ainda não há conexão real do Core disponível.
+3. **Caminho alternativo já existente e agora descoberto**: `applyTeamPreset` no adaptador do Core remapeia automaticamente os membros do preset para as conexões reais (`resolvePresetMembersForCore`, `aionCoreAdapter.ts:249`) e resolve o modelo real pela preferência ("Terra 6.1" → `gpt-6.1-terra`, "Sol 6.1" → `gpt-6.1-sol`, "Gemini Hydrogen" → `gemini-4-hydrogen-xhigh`).
+
+### Verificação independente
+
+- `npm run lint`: **0 erros**.
+- `npx vitest run`: **10 arquivos, 84/84 testes** (4 casos novos em `src/domain/__tests__/teamValidation.test.ts`).
+- `npm run build`: **OK**; `npm run test:e2e`: **1/1**.
+- **Navegador real**: criação de projeto real ("Meu Workspace" com caminho `v6-test-repo`) e de conversa em modo Core ("Operacao real · Core", "Sem equipe criada no Core"); a seção de equipe renderiza com os três participantes do preset (`Terra 6.1`, `Sol 6.1`, `Gemini Hydrogen`) ligados às conexões de demonstração e aos perfis de tier simulados — exatamente o estado que a correção destrava após autenticação + sincronização do catálogo.

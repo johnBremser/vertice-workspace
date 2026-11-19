@@ -368,7 +368,7 @@ Relatório JSON e capturas preservadas no repositório em `docs/screenshots/v6-0
 - V6-07 — Acabamento/primeiro uso: **aprovado pelo auditor (18/11/2026)** (checkpoint `68dfb73`; adendo de defasagem registrado em `docs/screenshots/v6-07/v607_report.json`).
 - V6-08 — Distribuição/operação: **aprovado pelo auditor (18/11/2026)** (`a1f7dd4`; `[P2]` de numeração do `README.md` corrigido e `[P3]` ACL Windows tratado no V6-09).
 - V6-09 — Validação integrada/release: **aprovado pelo auditor (18/11/2026)** (`752deed`).
-- V6-10 — Versionamento/GitHub/documentação: **concluído localmente e pronto para publicação** (`origin` em `johnBremser/vertice-workspace.git` configurado; aguardando confirmação do usuário para `git push` e observação da CI remota).
+- V6-10 — Versionamento/GitHub/documentação: **aprovado com ressalvas pelo auditor (18/11/2026)** (`a52f2c9` já publicado em remoto privado `johnBremser/vertice-workspace.git`; reconciliação documental aplicada; pendências de decisão do usuário antes de abrir como público: `LICENSE`, CI remota, expurgo histórico de `data/` e `public/assets/aistudio/`).
 
 ---
 
@@ -534,8 +534,12 @@ Registradas em `docs/screenshots/v6-08/v608_dist_report.json` e capturas em `doc
    - Criado `THIRD_PARTY_NOTICES.md` preservando atribuições **Apache-2.0** (`AionUi 2.2.2` `e108b6b5`, `AionCore v0.2.2` `503a8719`) e inventário de licenças npm/Node.
    - Atualizados `README.md`, `CHANGELOG.md`, `docs/architecture.md`, `docs/aioncore-integration.md`, `docs/compatibility-matrix.md`, `docs/local-validation.md` e `docs/local-handoff.md` alinhando com o estado real verificado (`0.4.0`, `v1.0.0` não declarada, `70/70` Vitest, `data/` excluído).
 
-### Estado do remoto GitHub e pendências administrativas (`Node v24.11.0`)
+### Estado do remoto GitHub e reconciliação pós-auditoria (`18/11/2026`)
 
-- Histórico Git local verificado e contínuo: `1229ebb` → `40f39f8` → `68dfb73` → `a1f7dd4` → `752deed` → checkpoint V6-10.
-- Remoto configurado: `origin = https://johnBremser@github.com/johnBremser/vertice-workspace.git` (`git ls-remote --heads origin` alcançável; `origin/main` atualmente em `1229ebb`).
-- `gh` CLI não está instalado neste terminal; conforme regra do plano, o push para o remoto (`git push -u origin main`) e a observação subsequente da CI no GitHub Actions (`.github/workflows/ci.yml`: `ubuntu-latest` Node 22/24, `windows-latest` Node 24 e E2E) ficam prontos aguardando confirmação explícita do usuário para publicar no remoto. (Nota: caso deseje expurgar `data/aionui-backend.db` também do histórico anterior `1229ebb`, será necessário `git filter-repo` antes ou com force-push explícito autorizado pelo usuário.)
+- Histórico Git local verificado e contínuo: `1229ebb` → `40f39f8` → `68dfb73` → `a1f7dd4` → `752deed` → `a52f2c9` (seguido do commit de reconciliação documental).
+- Remoto configurado: `origin = https://johnBremser@github.com/johnBremser/vertice-workspace.git` (**repositório privado**, resposta 404 anônima). A auditoria confirmou que `origin/main` já foi atualizado para `a52f2c9` (sem exposição pública e sem segredos em nenhum dos 6 commits).
+- **Decisões pendentes do usuário antes de tornar o repositório público ou emitir tag**:
+  1. Adicionar `LICENSE` do projeto (recomendação: **Apache-2.0**, coerente com `THIRD_PARTY_NOTICES.md`).
+  2. Acompanhar a execução verde do workflow `.github/workflows/ci.yml` no GitHub Actions (`ubuntu-latest` Node 22/24, `windows-latest` Node 24 e E2E), em especial o teste de ACL no runner Windows.
+  3. Opcionalmente expurgar `data/aionui-backend.db` dos 5 commits históricos (`1229ebb`..`752deed` — blob único de 774 KB, `0` `INSERT`, sem credenciais/tokens) via `git filter-repo --path data/ --invert-paths` com force-push autorizado, e decidir pela remoção de `public/assets/aistudio/` (~1,98 MB, não referenciado em `src/`).
+  4. **Não declarar `v1.0.0`** enquanto permanecerem abertos: ciclo completo de 3 tarefas com `Antigravity`, política `Allow always` e promoção de modelo via `PATCH /model` aprovada ao vivo.

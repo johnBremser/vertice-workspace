@@ -30,6 +30,29 @@ export function getPrimaryRole(roles: ParticipantRole[]): ParticipantRole {
   return 'executor';
 }
 
+/**
+ * Connections that can be bound to a participant in the current operating mode.
+ *
+ * In AionCore local mode only Core-backed connections are offered (plus the
+ * current one, so the control keeps a valid value while it is being changed).
+ * Without this, a participant still bound to a seeded demo connection could
+ * never be migrated to a real assistant from the Core catalog.
+ */
+export function selectableConnectionsForMode<
+  T extends { id: string; mode: 'demo' | 'aion_core' },
+>(
+  connections: T[],
+  currentConnectionId: string,
+  currentConnectionMode: 'demo' | 'aion_core',
+  workspaceMode: 'demo' | 'aion_core',
+): T[] {
+  return connections.filter((conn) => {
+    if (conn.id === currentConnectionId) return true;
+    if (workspaceMode === 'aion_core') return conn.mode === 'aion_core';
+    return conn.mode === currentConnectionMode;
+  });
+}
+
 export function sortParticipantsByTabOrder(
   participants: Participant[],
 ): Participant[] {

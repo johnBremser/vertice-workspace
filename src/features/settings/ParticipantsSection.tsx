@@ -13,6 +13,7 @@ import {
 } from '../../domain/presets';
 import {
   getParticipantRoles,
+  selectableConnectionsForMode,
   sortParticipantsByTabOrder,
   validateTeamConfiguration,
 } from '../../domain/teamValidation';
@@ -36,6 +37,7 @@ function ParticipantEditorRow({
   index,
   total,
   connections,
+  workspaceMode,
   canRemove,
   transitionReason,
   onMove,
@@ -45,6 +47,7 @@ function ParticipantEditorRow({
   participant: Participant;
   index: number;
   total: number;
+  workspaceMode: 'demo' | 'aion_core';
   connections: {
     id: string;
     displayName: string;
@@ -296,17 +299,16 @@ function ParticipantEditorRow({
             }}
             className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]"
           >
-            {connections
-              .filter(
-                (conn) =>
-                  conn.id === connectionId ||
-                  conn.mode === (currentConnection?.mode ?? 'demo'),
-              )
-              .map((conn) => (
-                <option key={conn.id} value={conn.id}>
-                  {conn.displayName}
-                </option>
-              ))}
+            {selectableConnectionsForMode(
+              connections,
+              connectionId,
+              currentConnection?.mode ?? 'demo',
+              workspaceMode,
+            ).map((conn) => (
+              <option key={conn.id} value={conn.id}>
+                {conn.displayName}
+              </option>
+            ))}
           </select>
         </label>
       </div>
@@ -621,6 +623,7 @@ export function ParticipantsSection() {
               index={index}
               total={activeParticipants.length}
               connections={store.connections}
+              workspaceMode={activeConversation.conversation.executionMode}
               canRemove={!isCurrentCoord}
               transitionReason={transitionReason}
               onMove={(dir) => handleMove(index, dir)}
@@ -671,7 +674,16 @@ export function ParticipantsSection() {
             >
               <option value="">Configurar participante personalizado</option>
               {store.participantProfiles
-                .filter((prof) => !prof.archived)
+                .filter(
+                  (prof) =>
+                    !prof.archived &&
+                    (activeConversation.conversation.executionMode !==
+                      'aion_core' ||
+                      store.connections.some(
+                        (c) =>
+                          c.id === prof.connectionId && c.mode === 'aion_core',
+                      )),
+                )
                 .map((prof) => (
                   <option key={prof.id} value={prof.id}>
                     {prof.displayName} ({prof.defaultRoles.map((r) => PT_BR.roleLabels[r]).join(' + ')})
@@ -711,6 +723,14 @@ export function ParticipantsSection() {
                         </option>
                       ))}
                   </select>
+                  {activeConversation.conversation.executionMode === 'aion_core' &&
+                    !store.connections.some((c) => c.mode === 'aion_core') && (
+                      <span className="mt-1 block text-[11px] text-[var(--status-warning)]">
+                        Nenhuma conexão real do Core disponível ainda: autentique a
+                        sessão no painel "Conexão AionCore Local" acima e clique em
+                        "Sincronizar catálogo" para trazer os assistentes do Core.
+                      </span>
+                    )}
                 </label>
               </div>
               <div className="flex flex-wrap gap-3">

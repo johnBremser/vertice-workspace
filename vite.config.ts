@@ -2,7 +2,26 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import fs from 'fs';
 import path from 'path';
-import { defineConfig, loadEnv } from 'vite';
+import { defineConfig, loadEnv, type Plugin } from 'vite';
+import { handleLocalFolderRequest } from './scripts/vertice-folder-picker.mjs';
+import { handleAssistantSourceRequest } from './scripts/vertice-source-reader.mjs';
+
+function verticeAssistantSourcePlugin(rootDir: string): Plugin {
+  return {
+    name: 'vertice-assistant-source-reader',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if (handleAssistantSourceRequest(req, res, rootDir)) {
+          return;
+        }
+        if (handleLocalFolderRequest(req, res)) {
+          return;
+        }
+        next();
+      });
+    },
+  };
+}
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
@@ -16,6 +35,7 @@ export default defineConfig(({ mode }) => {
     plugins: [
       react(),
       tailwindcss(),
+      verticeAssistantSourcePlugin(import.meta.dirname),
       // Copies src/assets into dist/ so root-relative URLs like
       // "/src/assets/images/..." (e.g. generate_image output) still resolve
       // in production builds. Do not remove.

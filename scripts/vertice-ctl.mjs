@@ -58,6 +58,22 @@ function getPaths(rootDir = defaultRootDir) {
   return { rootDir, stateDir, logsDir, pidFile };
 }
 
+function computeServerScriptFingerprint(rootDir = defaultRootDir) {
+  const hash = crypto.createHash('sha256');
+  for (const rel of [
+    path.join('scripts', 'vertice-server.mjs'),
+    path.join('scripts', 'vertice-source-reader.mjs'),
+    path.join('scripts', 'vertice-folder-picker.mjs'),
+  ]) {
+    const abs = path.join(rootDir, rel);
+    hash.update(rel);
+    if (fs.existsSync(abs)) {
+      hash.update(fs.readFileSync(abs));
+    }
+  }
+  return hash.digest('hex').slice(0, 16);
+}
+
 function formatOrigin(host, port) {
   const hostPart =
     host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
@@ -438,19 +454,27 @@ async function cmdStart(rootDir = defaultRootDir) {
     process.exit(1);
   }
 
+  const currentFingerprint = computeServerScriptFingerprint(rootDir);
   const inspection = await inspectTrackedServer(rootDir);
   if (inspection.status === 'verified_active') {
     const { tracked } = inspection;
     if (tracked.host === host && tracked.port === port) {
+      if (tracked.scriptFingerprint === currentFingerprint) {
+        console.log(
+          `Servidor já está em execução e verificado (PID ${tracked.pid}, instância ${tracked.instanceId}) em ${tracked.origin}.`,
+        );
+        return;
+      }
       console.log(
-        `Servidor já está em execução e verificado (PID ${tracked.pid}, instância ${tracked.instanceId}) em ${tracked.origin}.`,
+        `Instância ativa (PID ${tracked.pid}) usa versão anterior do servidor; reiniciando com os scripts atuais...`,
       );
-      return;
+      await cmdStop(rootDir);
+    } else {
+      console.error(
+        `Erro: outra instância verificada já está ativa em ${tracked.origin} (PID ${tracked.pid}). Encerre-a antes de iniciar em ${formatOrigin(host, port)}.`,
+      );
+      process.exit(1);
     }
-    console.error(
-      `Erro: outra instância verificada já está ativa em ${tracked.origin} (PID ${tracked.pid}). Encerre-a antes de iniciar em ${formatOrigin(host, port)}.`,
-    );
-    process.exit(1);
   }
 
   if (await checkPortInUse(host, port)) {
@@ -516,6 +540,7 @@ async function cmdStart(rootDir = defaultRootDir) {
     controlToken,
     startedAt,
     script: SCRIPT_MARKER,
+    scriptFingerprint: currentFingerprint,
   };
 
   let ready = false;

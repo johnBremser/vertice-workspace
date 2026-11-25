@@ -18,6 +18,7 @@ import type {
   ParticipantProfile,
   Project,
   TeamPreset,
+  VerticeAssistantState,
   WorkspaceStoreState,
 } from '../domain/types';
 import { PT_BR } from '../i18n/ptBR';
@@ -37,6 +38,7 @@ export interface VersionedWorkspaceExport {
   modelPolicy: ModelPolicy;
   projects: Project[];
   conversations: ConversationProjection[];
+  assistantState?: VerticeAssistantState;
 }
 
 export interface BackupValidationPreview {
@@ -358,6 +360,26 @@ export function buildConversationMarkdownExport(
   return lines.join('\n');
 }
 
+function sanitizeAssistantStateForExport(
+  assistantState: VerticeAssistantState | undefined,
+): VerticeAssistantState | undefined {
+  if (!assistantState) return undefined;
+  return {
+    ...assistantState,
+    status: 'idle',
+    config: assistantState.config
+      ? {
+          ...assistantState.config,
+          workspaceRoot: undefined,
+          externalTeamId: undefined,
+          externalSlotId: undefined,
+          externalConversationId: undefined,
+          nativeSessionId: undefined,
+        }
+      : undefined,
+  };
+}
+
 export function buildWorkspaceJsonExport(
   state: WorkspaceStoreState,
   onlyConversationId?: string,
@@ -393,6 +415,9 @@ export function buildWorkspaceJsonExport(
     modelPolicy: state.modelPolicy,
     projects,
     conversations,
+    assistantState: onlyConversationId
+      ? undefined
+      : sanitizeAssistantStateForExport(state.assistantState),
   };
 
   return JSON.stringify(payload, null, 2);
@@ -490,6 +515,7 @@ export function parseAndValidateWorkspaceBackup(
     conversations: conversationsMap,
     activeProjectId: firstProjectId,
     activeConversationId: firstConvId,
+    assistantState: record.assistantState,
   };
 
   try {
@@ -570,6 +596,7 @@ export function applyImportedWorkspaceBackup(
       coreSessionAuthenticated: false,
       connections: importedState.connections.map(sanitizeConnectionForImport),
       conversations: detachedConversations,
+      assistantState: sanitizeAssistantStateForExport(importedState.assistantState),
     });
   }
 

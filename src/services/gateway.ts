@@ -91,6 +91,16 @@ export interface CoreDiagnosticEntry {
   detail: string;
 }
 
+export interface CoreTeamSummary {
+  id: string;
+  name: string;
+  workspace?: string;
+  agentsCount: number;
+  createdAt: number;
+  linkedConversationId?: string;
+  isInternalAssistant?: boolean;
+}
+
 export interface CoreGatewayOperations {
   checkHealth(): Promise<{
     reachable: boolean;
@@ -114,14 +124,65 @@ export interface CoreGatewayOperations {
     agentsCount: number;
     message: string;
   }>;
-  syncCoreTeams(): Promise<{ teamsCount: number; message: string }>;
-  createCoreTeamForConversation(conversationId: string): Promise<{
+  syncCoreTeams(): Promise<{
+    teamsCount: number;
+    teams: CoreTeamSummary[];
+    message: string;
+  }>;
+  deleteCoreTeam(teamId: string): Promise<{
+    teams: CoreTeamSummary[];
+    message: string;
+  }>;
+  cleanupOrphanCoreTeams(): Promise<{
+    deletedCount: number;
+    failedCount: number;
+    teams: CoreTeamSummary[];
+    message: string;
+  }>;
+  createCoreTeamForConversation(
+    conversationId: string,
+    teamName?: string,
+  ): Promise<{
     externalTeamId: string;
     message: string;
   }>;
   connectWebSocket(conversationId?: string): Promise<void>;
+  ensureWebSocketConnected?(conversationId?: string): Promise<void>;
   disconnectWebSocket(): void;
   getDiagnostics(): CoreDiagnosticEntry[];
+
+  configureVerticeAssistant(input: {
+    connectionId: string;
+    modelExternalId: string;
+    modelDisplayName: string;
+    includeLiveDiagnostics?: boolean;
+    includeSourceContext?: boolean;
+  }): Promise<{ externalTeamId: string; message: string }>;
+  updateVerticeAssistantPreferences(input: {
+    includeLiveDiagnostics?: boolean;
+    includeSourceContext?: boolean;
+  }): void;
+  sendVerticeAssistantMessage(input: {
+    prompt: string;
+    sourceQuery?: string;
+    attachments?: VerticeAssistantAttachmentInput[];
+  }): Promise<void>;
+  respondVerticeAssistantPermission(input: {
+    requestId: string;
+    decision: 'approved' | 'denied';
+  }): Promise<void>;
+  clearVerticeAssistantHistory(): Promise<void>;
+}
+
+export interface VerticeAssistantAttachmentInput {
+  id: string;
+  name: string;
+  kind: 'image' | 'text';
+  mimeType: string;
+  sizeBytes: number;
+  textContent?: string;
+  truncated?: boolean;
+  file?: File;
 }
 
 export interface ConfigureParticipantInput {
@@ -161,6 +222,12 @@ export interface AgentWorkspaceGateway {
     workspacePathInfo: string;
   }): Promise<Project>;
   renameProject(projectId: string, name: string): Promise<void>;
+  updateProject(input: {
+    projectId: string;
+    name: string;
+    description?: string;
+    workspacePathInfo?: string;
+  }): Promise<void>;
   setProjectArchived(projectId: string, archived: boolean): Promise<void>;
 
   createConversation(input: {

@@ -23,7 +23,7 @@ export const PT_BR = {
   emptyMessagesTitle: 'Nenhum evento registrado nesta visão',
   emptyMessagesBody: 'Envie uma orientação pelo campo abaixo ou avance o fluxo configurável para acompanhar a execução.',
   previewWorkspaceDisclaimer:
-    'No navegador, o caminho do workspace é informativo; acesso real a disco ocorre apenas via AionCore local.',
+    'Selecione a pasta pelo botão acima (quando executado via Iniciar Vertice.cmd / servidor local) ou digite/cole o caminho completo. Acesso real a disco ocorre apenas via AionCore local.',
   simulationNotice:
     'Demonstração local: respostas, comandos e testes exibidos aqui são simulados deterministicamente, sem execução em terminal nem chamadas a APIs externas.',
   storageStatusLabel: {

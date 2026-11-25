@@ -7,18 +7,22 @@ import {
   Info,
   Palette,
   Server,
+  Trash2,
 } from 'lucide-react';
 import { useEffect, useState, type FormEvent } from 'react';
+import { WorkspacePathInput } from '../../components/WorkspacePathInput';
 import { APP_BRAND } from '../../config/brand';
 import { PT_BR } from '../../i18n/ptBR';
 import { useWorkspace } from '../workspace/WorkspaceContext';
 import { AgentCatalogSection } from './AgentCatalogSection';
+import { AssistantSettingsSection } from './AssistantSettingsSection';
 import { ModelPolicySection } from './ModelPolicySection';
 import { ParticipantsSection } from './ParticipantsSection';
 
 export function SettingsView() {
   const {
     store,
+    activeProject,
     activeConversation,
     setMainSurface,
     themePreference,
@@ -32,6 +36,9 @@ export function SettingsView() {
     coreLogout,
     coreRefreshCatalog,
     coreSyncTeams,
+    coreDeleteTeam,
+    coreCleanupOrphanTeams,
+    coreTeamsList,
     coreCreateTeamForActiveConversation,
     coreConnectWs,
     coreDisconnectWs,
@@ -42,9 +49,15 @@ export function SettingsView() {
   const [workspacePath, setWorkspacePath] = useState(
     store?.coreSettings.workspacePath ?? '',
   );
+  const [teamNameDraft, setTeamNameDraft] = useState(
+    activeConversation?.conversation.title ?? '',
+  );
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [confirmOrphanCleanup, setConfirmOrphanCleanup] = useState(false);
+  const [cleaningTeams, setCleaningTeams] = useState(false);
+  const [deletingTeamId, setDeletingTeamId] = useState<string | null>(null);
 
   useEffect(() => {
     if (store?.coreSettings) {
@@ -52,6 +65,10 @@ export function SettingsView() {
       setWorkspacePath(store.coreSettings.workspacePath);
     }
   }, [store?.coreSettings]);
+
+  useEffect(() => {
+    setTeamNameDraft(activeConversation?.conversation.title ?? '');
+  }, [activeConversation?.conversation.id, activeConversation?.conversation.title]);
 
   const mode = store?.executionMode ?? 'demo';
   const diagnostics = hasCoreOperations ? coreGetDiagnostics() : [];
@@ -106,7 +123,10 @@ export function SettingsView() {
       label: '4. Escolher workspace e criar equipe',
       done:
         isCoreModeActive &&
-        Boolean(store?.coreSettings.workspacePath.trim()) &&
+        Boolean(
+          store?.coreSettings.workspacePath.trim() ||
+          activeProject?.workspacePathInfo.trim(),
+        ) &&
         Boolean(
           activeConversation?.conversation.executionMode === 'aion_core' &&
           activeConversation.conversation.externalTeamId,
@@ -296,7 +316,11 @@ export function SettingsView() {
                         <button
                           type="button"
                           disabled={!activeConversation}
-                          onClick={() => void coreCreateTeamForActiveConversation()}
+                          onClick={() =>
+                            void coreCreateTeamForActiveConversation(
+                              teamNameDraft.trim() || undefined,
+                            )
+                          }
                           className="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50"
                         >
                           Criar time no Core
@@ -339,16 +363,34 @@ export function SettingsView() {
                   />
                 </label>
 
-                <label className="block text-xs font-medium text-[var(--text-primary)]">
-                  Caminho de workspace no Core
-                  <input
-                    type="text"
+                <div>
+                  <label
+                    htmlFor="aion-core-workspace-path"
+                    className="mb-1 block text-xs font-medium text-[var(--text-primary)]"
+                  >
+                    Caminho de workspace no Core
+                  </label>
+                  <WorkspacePathInput
+                    id="aion-core-workspace-path"
                     value={workspacePath}
-                    onChange={(e) => setWorkspacePath(e.target.value)}
+                    onChange={setWorkspacePath}
                     placeholder="Ex.: C:/projetos/meu-app"
-                    className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 font-mono text-xs text-[var(--text-primary)]"
+                    suggestions={(store?.projects ?? []).map((p) => p.workspacePathInfo)}
                   />
-                </label>
+                </div>
+
+                {activeConversation && (
+                  <label className="sm:col-span-2 block text-xs font-medium text-[var(--text-primary)]">
+                    Nome da equipe no Core (por padrão usa o título da conversa ativa)
+                    <input
+                      type="text"
+                      value={teamNameDraft}
+                      onChange={(e) => setTeamNameDraft(e.target.value)}
+                      placeholder={activeConversation.conversation.title}
+                      className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 text-xs text-[var(--text-primary)]"
+                    />
+                  </label>
+                )}
 
                 <div className="sm:col-span-2 flex flex-wrap items-center gap-2 pt-1">
                   <button
@@ -387,8 +429,13 @@ export function SettingsView() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => void coreCreateTeamForActiveConversation()}
-                    className="rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]"
+                    disabled={!activeConversation}
+                    onClick={() =>
+                      void coreCreateTeamForActiveConversation(
+                        teamNameDraft.trim() || undefined,
+                      )
+                    }
+                    className="rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] disabled:opacity-50"
                   >
                     Criar time da conversa no Core
                   </button>
@@ -457,7 +504,141 @@ export function SettingsView() {
                 </form>
               )}
 
-              <div className="mt-4 border-t border-[var(--border-hairline)] pt-3">
+              <div className="mt-4 border-t border-[var(--border-hairline)] pt-3 space-y-3">
+                {coreTeamsList.length > 0 && (() => {
+                  const orphanTeams = coreTeamsList.filter(
+                    (t) =>
+                      !t.linkedConversationId &&
+                      !t.isInternalAssistant &&
+                      activeConversation?.conversation.externalTeamId !== t.id,
+                  );
+                  const linkedCount = coreTeamsList.length - orphanTeams.length;
+                  return (
+                    <div className="rounded-md border border-[var(--border-hairline)] bg-[var(--bg-canvas)] p-3 text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <div className="font-semibold text-[var(--text-primary)]">
+                            Equipes criadas no AionCore ({coreTeamsList.length})
+                          </div>
+                          <div className="text-[11px] text-[var(--text-muted)]">
+                            {linkedCount} vinculada(s) · {orphanTeams.length} sem vínculo local
+                          </div>
+                        </div>
+                        {orphanTeams.length > 0 && (
+                          <div className="flex items-center gap-1.5">
+                            {confirmOrphanCleanup ? (
+                              <>
+                                <button
+                                  type="button"
+                                  disabled={cleaningTeams}
+                                  onClick={() => {
+                                    setCleaningTeams(true);
+                                    void coreCleanupOrphanTeams().finally(() => {
+                                      setCleaningTeams(false);
+                                      setConfirmOrphanCleanup(false);
+                                    });
+                                  }}
+                                  className="inline-flex items-center gap-1 rounded-md bg-[var(--status-danger)] px-2.5 py-1 text-[11px] font-semibold text-white hover:opacity-90 disabled:opacity-50"
+                                >
+                                  <Trash2 className="h-3 w-3" aria-hidden="true" />
+                                  <span>
+                                    {cleaningTeams
+                                      ? 'Limpando...'
+                                      : `Confirmar exclusão (${orphanTeams.length})`}
+                                  </span>
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={cleaningTeams}
+                                  onClick={() => setConfirmOrphanCleanup(false)}
+                                  className="rounded-md border border-[var(--border-hairline)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-secondary)]"
+                                >
+                                  Cancelar
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setConfirmOrphanCleanup(true)}
+                                className="inline-flex items-center gap-1.5 rounded-md border border-[var(--border-strong)] bg-[var(--bg-surface)] px-2.5 py-1 text-[11px] font-medium text-[var(--status-danger)] hover:border-[var(--status-danger)]"
+                              >
+                                <Trash2 className="h-3 w-3" aria-hidden="true" />
+                                <span>Limpar sem vínculo ({orphanTeams.length})</span>
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+
+                      <ul className="mt-2 max-h-80 space-y-1.5 overflow-y-auto pr-1">
+                        {coreTeamsList.map((team) => {
+                          const isLinkedToActive =
+                            activeConversation?.conversation.externalTeamId === team.id;
+                          return (
+                            <li
+                              key={team.id}
+                              className="flex flex-wrap items-center justify-between gap-2 rounded border border-[var(--border-hairline)] bg-[var(--bg-surface)] px-2.5 py-1.5"
+                            >
+                              <div className="min-w-0 flex-1">
+                                <span className="font-medium text-[var(--text-primary)]">
+                                  {team.name}
+                                </span>{' '}
+                                <span className="text-[11px] text-[var(--text-secondary)]">
+                                  · {team.agentsCount} agente(s)
+                                  {team.workspace ? ` · ${team.workspace}` : ''}
+                                </span>
+                                <div className="font-mono text-[10px] text-[var(--text-muted)]">
+                                  id: {team.id}
+                                </div>
+                              </div>
+                              <div className="flex shrink-0 items-center gap-1.5">
+                                {isLinkedToActive ? (
+                                  <span className="rounded bg-[var(--accent-soft)] px-2 py-0.5 text-[10px] font-semibold text-[var(--accent)]">
+                                    Conversa ativa
+                                  </span>
+                                ) : team.isInternalAssistant ? (
+                                  <span className="rounded bg-[var(--bg-elevated)] px-2 py-0.5 text-[10px] text-[var(--text-secondary)]">
+                                    Assistente interno
+                                  </span>
+                                ) : team.linkedConversationId ? (
+                                  <span className="rounded bg-[var(--bg-elevated)] px-2 py-0.5 text-[10px] text-[var(--text-secondary)]">
+                                    Vinculada a conversa local
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    disabled={
+                                      deletingTeamId === team.id || cleaningTeams
+                                    }
+                                    onClick={() => {
+                                      setDeletingTeamId(team.id);
+                                      void coreDeleteTeam(team.id).finally(() =>
+                                        setDeletingTeamId((curr) =>
+                                          curr === team.id ? null : curr,
+                                        ),
+                                      );
+                                    }}
+                                    title={`Excluir equipe sem vínculo "${team.name}" no AionCore`}
+                                    aria-label={`Excluir equipe ${team.name}`}
+                                    className="inline-flex items-center gap-1 rounded border border-[var(--border-hairline)] bg-[var(--bg-canvas)] px-2 py-0.5 text-[10px] font-medium text-[var(--text-secondary)] hover:border-[var(--status-danger)] hover:text-[var(--status-danger)] disabled:opacity-50"
+                                  >
+                                    <Trash2 className="h-2.5 w-2.5" aria-hidden="true" />
+                                    <span>
+                                      {deletingTeamId === team.id
+                                        ? 'Excluindo...'
+                                        : 'Excluir'}
+                                    </span>
+                                  </button>
+                                )}
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  );
+                })()}
+
                 <button
                   type="button"
                   onClick={() => setShowDiagnostics((s) => !s)}
@@ -504,16 +685,19 @@ export function SettingsView() {
             </div>
         </section>
 
-        {/* 2. Team & Roles */}
+        {/* 2. Floating Assistant & Knowledge Base (above team/catalog for fast access) */}
+        <AssistantSettingsSection />
+
+        {/* 3. Team & Roles */}
         <ParticipantsSection />
 
-        {/* 3. Policy */}
+        {/* 4. Policy */}
         <ModelPolicySection />
 
-        {/* 4. Catalog & Capabilities */}
+        {/* 5. Catalog & Capabilities */}
         <AgentCatalogSection />
 
-        {/* 5. Appearance & About */}
+        {/* 6. Appearance & About */}
         <section className="rounded-xl border border-[var(--border-hairline)] bg-[var(--bg-surface)] p-5 space-y-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-start gap-2.5">

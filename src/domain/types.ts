@@ -94,6 +94,8 @@ export interface CatalogModelOption {
   source: 'demo_tier' | 'core_catalog' | 'core_session';
   tier?: DemoModelTier;
   confirmed: boolean;
+  reasoningEfforts?: string[];
+  reasoningOptionId?: string;
 }
 
 export interface ModelRef {
@@ -103,6 +105,8 @@ export interface ModelRef {
   tier?: DemoModelTier;
   confirmation: 'confirmed' | 'simulated' | 'unverified_preference';
   confirmationDetail?: 'observed' | 'pending_next_turn' | 'command_ack';
+  reasoningEffort?: string;
+  reasoningOptionId?: string;
 }
 
 export interface ConnectionAdapterConfig {
@@ -757,6 +761,55 @@ export interface ConversationSnapshot {
   coveredEventLog: ExecutionEvent[];
 }
 
+export interface VerticeAssistantConfig {
+  connectionId: string;
+  modelExternalId: string;
+  modelDisplayName: string;
+  workspaceRoot?: string;
+  externalTeamId?: string;
+  externalSlotId?: string;
+  externalConversationId?: string;
+  nativeSessionId?: string;
+  includeLiveDiagnostics: boolean;
+  includeSourceContext: boolean;
+  accessMode: 'read_only';
+}
+
+export interface VerticeAssistantPermissionCard {
+  requestId: string;
+  actionTitle: string;
+  commandPreview: string;
+  status: 'pending' | 'approved' | 'denied';
+  isWriteAttempt: boolean;
+}
+
+export interface VerticeAssistantAttachmentMeta {
+  id: string;
+  name: string;
+  kind: 'image' | 'text';
+  mimeType: string;
+  sizeBytes: number;
+  truncated?: boolean;
+}
+
+export interface VerticeAssistantMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  contentMarkdown: string;
+  timestamp: string;
+  status?: 'streaming' | 'completed' | 'error';
+  sourcesCited?: string[];
+  permissionRequest?: VerticeAssistantPermissionCard;
+  attachments?: VerticeAssistantAttachmentMeta[];
+}
+
+export interface VerticeAssistantState {
+  config?: VerticeAssistantConfig;
+  status: 'idle' | 'configuring' | 'streaming' | 'error';
+  lastError?: string;
+  messages: VerticeAssistantMessage[];
+}
+
 export interface WorkspaceStoreState {
   schemaVersion: number;
   executionMode: ExecutionMode;
@@ -773,4 +826,5 @@ export interface WorkspaceStoreState {
   activeProjectId: string;
   activeConversationId: string;
   simulatedHeldBackEvents?: Record<string, ExecutionEvent[]>;
+  assistantState?: VerticeAssistantState;
 }

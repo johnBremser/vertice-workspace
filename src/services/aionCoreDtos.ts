@@ -446,19 +446,111 @@ export function assertWebSocketMessage(raw: unknown): WebSocketMessage {
   };
 }
 
+export interface ExtractedCoreModelOption {
+  externalId: string;
+  displayName: string;
+  reasoningEfforts?: string[];
+  reasoningOptionId?: string;
+}
+
+export interface ExtractedReasoningConfig {
+  optionId: string;
+  currentValue?: string;
+  options: string[];
+}
+
+function normalizeStringArray(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue;
+    const trimmed = entry.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+/**
+ * Surfaces Cursor-style bracketed capability tags (e.g. `[context=256k,reasoning_effort=high,fast=true]`)
+ * cleanly in the model label when the Core `label` omits them.
+ */
+export function formatBracketedModelDisplayName(
+  externalId: string,
+  baseLabel: string,
+): string {
+  const cleanLabel = baseLabel.trim();
+  const match = externalId.match(/\[([^\]]*)\]$/);
+  if (!match) return cleanLabel || externalId;
+  const rawTags = match[1]?.trim();
+  if (!rawTags) return cleanLabel || externalId;
+
+  const kvPairs = rawTags
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const badges: string[] = [];
+  let hasThinkingTrue = false;
+  let hasExplicitEffort = false;
+
+  for (const pair of kvPairs) {
+    const eqIdx = pair.indexOf('=');
+    if (eqIdx <= 0) continue;
+    const key = pair.slice(0, eqIdx).trim().toLowerCase();
+    const val = pair.slice(eqIdx + 1).trim();
+    if (!val) continue;
+
+    if (
+      key === 'reasoning_effort' ||
+      key === 'effort' ||
+      key === 'reasoning' ||
+      key === 'thought_level'
+    ) {
+      hasExplicitEffort = true;
+      badges.push(`raciocínio: ${val}`);
+    } else if (key === 'thinking' && val.toLowerCase() === 'true') {
+      hasThinkingTrue = true;
+    } else if (key === 'fast' && val.toLowerCase() === 'true') {
+      badges.push('fast');
+    } else if (key === 'context') {
+      badges.push(val);
+    } else if (key === 'optimize_for') {
+      badges.push(val);
+    }
+  }
+
+  if (hasThinkingTrue && !hasExplicitEffort) {
+    badges.unshift('thinking');
+  } else if (hasThinkingTrue) {
+    badges.push('thinking');
+  }
+
+  if (badges.length === 0) return cleanLabel || externalId;
+  const lowerLabel = cleanLabel.toLowerCase();
+  if (lowerLabel.includes('(') && lowerLabel.includes(')')) {
+    return cleanLabel;
+  }
+  return `${cleanLabel || externalId} (${badges.join(' · ')})`;
+}
+
 export function extractAvailableModelOptions(
   rawModels: unknown,
-): Array<{ externalId: string; displayName: string }> {
+): ExtractedCoreModelOption[] {
   if (!rawModels) return [];
   if (Array.isArray(rawModels)) {
-    const out: Array<{ externalId: string; displayName: string }> = [];
+    const out: ExtractedCoreModelOption[] = [];
     const seen = new Set<string>();
     for (const item of rawModels) {
       if (typeof item === 'string' && item.trim()) {
         const id = item.trim();
         if (!seen.has(id)) {
           seen.add(id);
-          out.push({ externalId: id, displayName: id });
+          out.push({
+            externalId: id,
+            displayName: formatBracketedModelDisplayName(id, id),
+          });
         }
       } else if (isObjectRecord(item)) {
         const id =
@@ -473,7 +565,7 @@ export function extractAvailableModelOptions(
                   : '';
         if (!id.trim()) continue;
         const cleanId = id.trim();
-        const label =
+        const rawLabel =
           typeof item.label === 'string'
             ? item.label
             : typeof item.name === 'string'
@@ -481,9 +573,21 @@ export function extractAvailableModelOptions(
               : typeof item.displayName === 'string'
                 ? item.displayName
                 : cleanId;
+        const reasoningEfforts = normalizeStringArray(
+          item.reasoning_efforts ??
+            item.reasoningEfforts ??
+            item.supportedEffortLevels ??
+            item.supported_effort_levels,
+        );
         if (!seen.has(cleanId)) {
           seen.add(cleanId);
-          out.push({ externalId: cleanId, displayName: label.trim() });
+          out.push({
+            externalId: cleanId,
+            displayName: formatBracketedModelDisplayName(cleanId, rawLabel),
+            ...(reasoningEfforts.length > 0
+              ? { reasoningEfforts, reasoningOptionId: 'reasoning_effort' }
+              : {}),
+          });
         }
       }
     }
@@ -503,24 +607,30 @@ export function extractAvailableModelOptions(
   return [];
 }
 
+function normalizeConfigOptionEntries(rawConfigOptions: unknown): unknown[] {
+  if (Array.isArray(rawConfigOptions)) {
+    return rawConfigOptions;
+  }
+  if (isObjectRecord(rawConfigOptions)) {
+    if (Array.isArray(rawConfigOptions.config_options)) {
+      return rawConfigOptions.config_options;
+    }
+    if (Array.isArray(rawConfigOptions.configOptions)) {
+      return rawConfigOptions.configOptions;
+    }
+    return [rawConfigOptions];
+  }
+  return [];
+}
+
 /**
  * Parses ACP `config_options` payloads (`AgentManagementRow.config_options` or WS `acp_config_option`).
  */
 export function extractModelsFromConfigOptions(
   rawConfigOptions: unknown,
-): Array<{ externalId: string; displayName: string }> {
-  const entries = Array.isArray(rawConfigOptions)
-    ? rawConfigOptions
-    : isObjectRecord(rawConfigOptions) &&
-        Array.isArray(rawConfigOptions.config_options)
-      ? rawConfigOptions.config_options
-      : isObjectRecord(rawConfigOptions) &&
-          Array.isArray(rawConfigOptions.configOptions)
-        ? rawConfigOptions.configOptions
-        : isObjectRecord(rawConfigOptions)
-          ? [rawConfigOptions]
-          : [];
-  const out: Array<{ externalId: string; displayName: string }> = [];
+): ExtractedCoreModelOption[] {
+  const entries = normalizeConfigOptionEntries(rawConfigOptions);
+  const out: ExtractedCoreModelOption[] = [];
   const seen = new Set<string>();
   for (const entry of entries) {
     if (!isObjectRecord(entry)) continue;
@@ -535,4 +645,56 @@ export function extractModelsFromConfigOptions(
     }
   }
   return out;
+}
+
+/**
+ * Extracts reasoning / thought_level options from ACP `config_options` (used by Codex, Claude, etc.).
+ */
+export function extractReasoningConfigFromConfigOptions(
+  rawConfigOptions: unknown,
+): ExtractedReasoningConfig | null {
+  const entries = normalizeConfigOptionEntries(rawConfigOptions);
+  for (const entry of entries) {
+    if (!isObjectRecord(entry)) continue;
+    const category = typeof entry.category === 'string' ? entry.category : '';
+    const id = typeof entry.id === 'string' ? entry.id : '';
+    if (
+      category !== 'thought_level' &&
+      id !== 'reasoning_effort' &&
+      id !== 'thought_level' &&
+      id !== 'effort'
+    ) {
+      continue;
+    }
+    const rawOpts = Array.isArray(entry.options) ? entry.options : [];
+    const options: string[] = [];
+    const seen = new Set<string>();
+    for (const opt of rawOpts) {
+      const val =
+        typeof opt === 'string'
+          ? opt.trim()
+          : isObjectRecord(opt) && typeof opt.value === 'string'
+            ? opt.value.trim()
+            : isObjectRecord(opt) && typeof opt.id === 'string'
+              ? opt.id.trim()
+              : '';
+      if (val && !seen.has(val)) {
+        seen.add(val);
+        options.push(val);
+      }
+    }
+    if (options.length === 0) continue;
+    const currentRaw =
+      typeof entry.currentValue === 'string'
+        ? entry.currentValue.trim()
+        : typeof entry.current_value === 'string'
+          ? entry.current_value.trim()
+          : '';
+    return {
+      optionId: id || 'reasoning_effort',
+      currentValue: currentRaw || undefined,
+      options,
+    };
+  }
+  return null;
 }

@@ -52,19 +52,33 @@ import type {
   TaskReview,
   TeamPreset,
   TeamPresetMember,
+  VerticeAssistantMessage,
+  VerticeAssistantState,
   WorkspaceConversation,
   WorkspaceStoreState,
 } from '../domain/types';
+import {
+  buildGroundedAssistantPrompt,
+  buildLiveRuntimeSnapshot,
+  type SourceExcerptInput,
+} from '../knowledge/assistantPromptBuilder';
 import { PT_BR } from '../i18n/ptBR';
+import {
+  fetchAssistantSourceMeta,
+  readAssistantSourceFile,
+  searchAssistantSourceFiles,
+} from './assistantSourceClient';
 import {
   assertHealthResponse,
   CORE_WS_EVENTS,
   extractAvailableModelOptions,
   extractModelsFromConfigOptions,
+  extractReasoningConfigFromConfigOptions,
   unwrapApiResponse,
   type AgentManagementRow,
   type AssistantResponse,
   type AuthStatusResponse,
+  type ChatFileRef,
   type CreateTeamRequest,
   type LoginResponse,
   type SendAgentMessageRequest,
@@ -96,10 +110,12 @@ import {
   type ConfigureParticipantInput,
   type CoreDiagnosticEntry,
   type CoreGatewayOperations,
+  type CoreTeamSummary,
   type GatewayEventListener,
   type PublishContextInput,
   type ReconcileResult,
   type SendMessageInput,
+  type VerticeAssistantAttachmentInput,
 } from './gateway';
 import { WorkspacePersistenceManager } from './storage';
 
@@ -209,6 +225,66 @@ function resolveCoreEscalationModelRef(
     ...currentRef,
     tier: targetTier,
   };
+}
+
+function mapCoreSlotWorkState(rawState?: string): Participant['status'] {
+  if (
+    rawState === 'running' ||
+    rawState === 'starting' ||
+    rawState === 'queued' ||
+    rawState === 'working'
+  ) {
+    return 'running';
+  }
+  if (rawState === 'blocked') {
+    return 'blocked';
+  }
+  return 'idle';
+}
+
+function hasUnansweredCoreParticipantTurn(
+  proj: ConversationProjection,
+  participant: Participant,
+): boolean {
+  if (participant.status === 'running') {
+    return true;
+  }
+  const participantTab = proj.messagesByTab[participant.id] ?? [];
+  const lastInParticipantTab = participantTab[participantTab.length - 1];
+  if (
+    lastInParticipantTab?.authorType === 'user' &&
+    lastInParticipantTab.delivery?.status === 'enqueued_core' &&
+    lastInParticipantTab.delivery?.targetParticipantId === participant.id
+  ) {
+    return true;
+  }
+  if (participant.id !== proj.conversation.coordinatorParticipantId) {
+    return false;
+  }
+  const generalTab = proj.messagesByTab.general ?? [];
+  const lastInGeneralTab = generalTab[generalTab.length - 1];
+  if (
+    lastInGeneralTab?.authorType !== 'user' ||
+    lastInGeneralTab.delivery?.status !== 'enqueued_core' ||
+    lastInGeneralTab.delivery?.targetParticipantId !== participant.id
+  ) {
+    return false;
+  }
+  const allRelevantAgentMsgs = [...generalTab, ...participantTab].filter(
+    (m) => m.authorType === 'agent' && m.authorParticipantId === participant.id,
+  );
+  if (allRelevantAgentMsgs.length === 0) {
+    return true;
+  }
+  const lastUserMs = Date.parse(lastInGeneralTab.timestamp);
+  if (!Number.isFinite(lastUserMs)) {
+    return true;
+  }
+  const latestAgentMs = allRelevantAgentMsgs.reduce((maxMs, msg) => {
+    const ms = Date.parse(msg.timestamp);
+    return Number.isFinite(ms) && ms > maxMs ? ms : maxMs;
+  }, -Infinity);
+  return lastUserMs > latestAgentMs;
 }
 
 function extractUserMarkdownFromCoreMailbox(rawContent: string): string {
@@ -323,7 +399,12 @@ function resolvePresetMembersForCore(
 
 function mergeConfirmedModels(
   existing: ConnectionAdapterConfig['availableModels'],
-  incoming: Array<{ externalId: string; displayName: string }>,
+  incoming: Array<{
+    externalId: string;
+    displayName: string;
+    reasoningEfforts?: string[];
+    reasoningOptionId?: string;
+  }>,
   source: 'core_catalog' | 'core_session' = 'core_catalog',
 ): ConnectionAdapterConfig['availableModels'] {
   const byId = new Map<
@@ -335,14 +416,49 @@ function mergeConfirmedModels(
   }
   for (const m of incoming) {
     const prev = byId.get(m.externalId);
+    const reasoningEfforts =
+      m.reasoningEfforts && m.reasoningEfforts.length > 0
+        ? m.reasoningEfforts
+        : prev?.reasoningEfforts;
+    const reasoningOptionId =
+      m.reasoningOptionId ||
+      prev?.reasoningOptionId ||
+      (reasoningEfforts && reasoningEfforts.length > 0
+        ? 'reasoning_effort'
+        : undefined);
     byId.set(m.externalId, {
       externalId: m.externalId,
       displayName: m.displayName || prev?.displayName || m.externalId,
       source: prev?.source === 'core_catalog' ? prev.source : source,
       confirmed: true,
+      ...(reasoningEfforts && reasoningEfforts.length > 0
+        ? { reasoningEfforts, reasoningOptionId }
+        : {}),
     });
   }
   return Array.from(byId.values());
+}
+
+function enrichModelsWithConfigReasoning(
+  models: ConnectionAdapterConfig['availableModels'],
+  rawConfigOptions: unknown,
+): ConnectionAdapterConfig['availableModels'] {
+  const reasoningCfg = extractReasoningConfigFromConfigOptions(rawConfigOptions);
+  if (!reasoningCfg || reasoningCfg.options.length === 0) {
+    return models;
+  }
+  return models.map((m) =>
+    m.reasoningEfforts && m.reasoningEfforts.length > 0
+      ? {
+          ...m,
+          reasoningOptionId: m.reasoningOptionId ?? reasoningCfg.optionId,
+        }
+      : {
+          ...m,
+          reasoningEfforts: reasoningCfg.options,
+          reasoningOptionId: reasoningCfg.optionId,
+        },
+  );
 }
 
 interface StreamBufferEntry {
@@ -405,6 +521,9 @@ export class AionCoreAdapterSkeleton implements AgentWorkspaceGateway {
   }
   async renameProject(): Promise<void> {
     return this.notConnected('renameProject');
+  }
+  async updateProject(): Promise<void> {
+    return this.notConnected('updateProject');
   }
   async setProjectArchived(): Promise<void> {
     return this.notConnected('setProjectArchived');
@@ -516,6 +635,7 @@ export class AionCoreAdapter
   private idCounter = 200;
   private streamBuffers = new Map<string, StreamBufferEntry>();
   private lastSlotWorkSignature = new Map<string, string>();
+  private slotReasoningApplied = new Map<string, string>();
   private turnParticipantMap = new Map<string, string>();
   private expectedKindByParticipant = new Map<string, StructuredEnvelopeKind>();
   private expectedDispatchByParticipant = new Map<
@@ -551,6 +671,7 @@ export class AionCoreAdapter
   private wsSlotMutationSeq = new Map<string, number>();
   private wsWasConnectedBefore = false;
   private wsDisconnectedSinceLastConnect = false;
+  private wsConnectPromise: Promise<void> | null = null;
   private inFlightSlotDispatches = new Set<string>();
   private backgroundDispatchChain: Promise<void> = Promise.resolve();
   private pendingCoreConfirmations = new Map<
@@ -563,6 +684,27 @@ export class AionCoreAdapter
       msgId: string;
       allowData: unknown;
       denyData: unknown;
+    }
+  >();
+  private assistantPendingConfirmations = new Map<
+    string,
+    {
+      extConvId: string;
+      callId: string;
+      msgId: string;
+      allowData: unknown;
+      denyData: unknown;
+    }
+  >();
+  private assistantStreamBuffers = new Map<
+    string,
+    {
+      msgId: string;
+      turnId?: string;
+      targetMessageId: string;
+      text: string;
+      finished: boolean;
+      seenTokens: Set<string>;
     }
   >();
 
@@ -662,6 +804,8 @@ export class AionCoreAdapter
     this.wsSlotMutationSeq.clear();
     this.inFlightSlotDispatches.clear();
     this.pendingCoreConfirmations.clear();
+    this.assistantPendingConfirmations.clear();
+    this.assistantStreamBuffers.clear();
   }
 
   private recordConsumedTurnBinding(
@@ -1213,10 +1357,13 @@ export class AionCoreAdapter
           externalId: m,
           displayName: m,
         }));
-        const availableModels = mergeConfirmedModels(
-          [],
-          [...agentModels, ...configModels, ...assistantModels],
-          'core_catalog',
+        const availableModels = enrichModelsWithConfigReasoning(
+          mergeConfirmedModels(
+            [],
+            [...agentModels, ...configModels, ...assistantModels],
+            'core_catalog',
+          ),
+          linkedAgent?.config_options,
         );
 
         const executableStatus = linkedAgent
@@ -1261,13 +1408,16 @@ export class AionCoreAdapter
       }
     } else {
       for (const agent of agents) {
-        const availableModels = mergeConfirmedModels(
-          [],
-          [
-            ...extractAvailableModelOptions(agent.available_models),
-            ...extractModelsFromConfigOptions(agent.config_options),
-          ],
-          'core_catalog',
+        const availableModels = enrichModelsWithConfigReasoning(
+          mergeConfirmedModels(
+            [],
+            [
+              ...extractAvailableModelOptions(agent.available_models),
+              ...extractModelsFromConfigOptions(agent.config_options),
+            ],
+            'core_catalog',
+          ),
+          agent.config_options,
         );
         derivedCoreConnections.push({
           id: `conn_core_agent_${agent.id}`,
@@ -1316,7 +1466,11 @@ export class AionCoreAdapter
     };
   }
 
-  async syncCoreTeams(): Promise<{ teamsCount: number; message: string }> {
+  async syncCoreTeams(): Promise<{
+    teamsCount: number;
+    teams: CoreTeamSummary[];
+    message: string;
+  }> {
     const state = this.getStateSnapshot();
     const raw = await this.httpClient.requestJson<unknown>({
       method: 'GET',
@@ -1334,12 +1488,34 @@ export class AionCoreAdapter
     const nextConversations = { ...latestState.conversations };
     let updated = 0;
 
+    const assistantTeamId = latestState.assistantState?.config?.externalTeamId;
+    const summaries: CoreTeamSummary[] = [];
+
     for (const team of teams) {
+      if (assistantTeamId && team.id === assistantTeamId) {
+        summaries.push({
+          id: team.id,
+          name: 'Assistente Vértice (interno)',
+          workspace: team.workspace,
+          agentsCount: team.assistants?.length ?? 1,
+          createdAt: team.created_at,
+          isInternalAssistant: true,
+        });
+        continue;
+      }
       const existingEntry = Object.entries(nextConversations).find(
         ([, proj]) =>
           proj.conversation.executionMode === 'aion_core' &&
           proj.conversation.externalTeamId === team.id,
       );
+      summaries.push({
+        id: team.id,
+        name: team.name,
+        workspace: team.workspace,
+        agentsCount: team.assistants?.length ?? 0,
+        createdAt: team.created_at,
+        linkedConversationId: existingEntry?.[0],
+      });
       if (existingEntry) {
         const [convId, convProj] = existingEntry;
         const mappedParticipants = convProj.participants.map((p) => {
@@ -1385,11 +1561,90 @@ export class AionCoreAdapter
 
     return {
       teamsCount: teams.length,
+      teams: summaries,
       message: `${teams.length} equipe(s) obtida(s) do Core (${updated} vinculada(s) a conversas abertas).`,
     };
   }
 
-  async createCoreTeamForConversation(conversationId: string): Promise<{
+  async deleteCoreTeam(teamId: string): Promise<{
+    teams: CoreTeamSummary[];
+    message: string;
+  }> {
+    const cleanId = teamId.trim();
+    if (!cleanId) {
+      throw new GatewayCapabilityError(
+        'VALIDATION_ERROR',
+        'ID da equipe no AionCore inválido.',
+      );
+    }
+    const raw = await this.httpClient.requestJson<unknown>({
+      method: 'DELETE',
+      path: `/api/teams/${encodeURIComponent(cleanId)}`,
+      idempotent: true,
+      operationName: 'core.deleteTeam',
+      teamId: cleanId,
+    });
+    unwrapApiResponse(raw, `DELETE /api/teams/${cleanId}`);
+    const synced = await this.syncCoreTeams();
+    return {
+      teams: synced.teams,
+      message: `Equipe "${cleanId}" removida do AionCore.`,
+    };
+  }
+
+  async cleanupOrphanCoreTeams(): Promise<{
+    deletedCount: number;
+    failedCount: number;
+    teams: CoreTeamSummary[];
+    message: string;
+  }> {
+    const initial = await this.syncCoreTeams();
+    const orphans = initial.teams.filter(
+      (t) => !t.linkedConversationId && !t.isInternalAssistant,
+    );
+    if (orphans.length === 0) {
+      return {
+        deletedCount: 0,
+        failedCount: 0,
+        teams: initial.teams,
+        message: 'Nenhuma equipe sem vínculo encontrada no AionCore.',
+      };
+    }
+
+    let deletedCount = 0;
+    let failedCount = 0;
+    for (const orphan of orphans) {
+      try {
+        const raw = await this.httpClient.requestJson<unknown>({
+          method: 'DELETE',
+          path: `/api/teams/${encodeURIComponent(orphan.id)}`,
+          idempotent: true,
+          operationName: 'core.cleanupOrphanTeam',
+          teamId: orphan.id,
+        });
+        unwrapApiResponse(raw, `DELETE /api/teams/${orphan.id}`);
+        deletedCount += 1;
+      } catch {
+        failedCount += 1;
+      }
+    }
+
+    const synced = await this.syncCoreTeams();
+    return {
+      deletedCount,
+      failedCount,
+      teams: synced.teams,
+      message:
+        failedCount > 0
+          ? `${deletedCount} equipe(s) sem vínculo removida(s) do AionCore (${failedCount} falha(s)).`
+          : `${deletedCount} equipe(s) sem vínculo removida(s) do AionCore.`,
+    };
+  }
+
+  async createCoreTeamForConversation(
+    conversationId: string,
+    teamName?: string,
+  ): Promise<{
     externalTeamId: string;
     message: string;
   }> {
@@ -1441,8 +1696,9 @@ export class AionCoreAdapter
     const project = state.projects.find(
       (pr) => pr.id === proj.conversation.projectId,
     );
+    const resolvedTeamName = teamName?.trim() || proj.conversation.title;
     const body: CreateTeamRequest = {
-      name: proj.conversation.title,
+      name: resolvedTeamName,
       workspace:
         state.coreSettings.workspacePath.trim() ||
         project?.workspacePathInfo ||
@@ -1540,14 +1796,29 @@ export class AionCoreAdapter
             this.wsWasConnectedBefore && this.wsDisconnectedSinceLastConnect;
           this.wsWasConnectedBefore = true;
           this.wsDisconnectedSinceLastConnect = false;
-          if (isReconnect) {
-            this.enqueueBackgroundWork(async () => {
-              await this.catchUpBoundConversationsAfterReconnect(conversationId);
-            });
-          }
+          this.enqueueBackgroundWork(async () => {
+            await this.catchUpBoundConversationsAfterReconnect(
+              conversationId,
+              !isReconnect,
+            );
+          });
         }
       },
     });
+  }
+
+  async ensureWebSocketConnected(conversationId?: string): Promise<void> {
+    if (this.wsClient.isConnected()) {
+      return;
+    }
+    if (!this.wsConnectPromise) {
+      this.wsConnectPromise = this.connectWebSocket(conversationId).finally(
+        () => {
+          this.wsConnectPromise = null;
+        },
+      );
+    }
+    await this.wsConnectPromise;
   }
 
   disconnectWebSocket(): void {
@@ -1581,14 +1852,34 @@ export class AionCoreAdapter
 
   private async catchUpBoundConversationsAfterReconnect(
     preferredConversationId?: string,
+    onlyIfPending = false,
   ): Promise<void> {
     if (!this.state) return;
     const boundIds = Object.values(this.state.conversations)
-      .filter(
-        (proj) =>
-          proj.conversation.executionMode === 'aion_core' &&
-          Boolean(proj.conversation.externalTeamId),
-      )
+      .filter((proj) => {
+        if (
+          proj.conversation.executionMode !== 'aion_core' ||
+          !proj.conversation.externalTeamId
+        ) {
+          return false;
+        }
+        if (!onlyIfPending) {
+          return true;
+        }
+        return (
+          proj.conversation.executionStatus === 'running' ||
+          proj.conversation.executionStatus === 'paused_queue' ||
+          proj.tasks.some(
+            (t) =>
+              t.status === 'running' ||
+              t.status === 'awaiting_review' ||
+              t.status === 'queued',
+          ) ||
+          proj.participants.some((p) =>
+            hasUnansweredCoreParticipantTurn(proj, p),
+          )
+        );
+      })
       .map((proj) => proj.conversation.id);
 
     const ordered =
@@ -2160,6 +2451,30 @@ export class AionCoreAdapter
       const blockedReason = asNonEmptyString(slotWork.blocked_reason) ?? '';
       const teamRunId = asNonEmptyString(slotWork.team_run_id) ?? '';
 
+      if (
+        (stateStr === 'working' || stateStr === 'quiescent' || stateStr === 'idle') &&
+        proj.conversation.externalTeamId &&
+        participant.sessionRef.externalConversationId &&
+        participant.modelRef.reasoningEffort
+      ) {
+        const teamId = proj.conversation.externalTeamId;
+        const extConvId = participant.sessionRef.externalConversationId;
+        const optionId = participant.modelRef.reasoningOptionId || 'reasoning_effort';
+        const targetEffort = participant.modelRef.reasoningEffort;
+        const applyKey = `${teamId}:${extConvId}`;
+        if (this.slotReasoningApplied.get(applyKey) !== targetEffort) {
+          this.enqueueBackgroundWork(async () => {
+            await this.syncCoreParticipantReasoning(
+              teamId,
+              extConvId,
+              slotId,
+              optionId,
+              targetEffort,
+            );
+          });
+        }
+      }
+
       if (activeTurnId) {
         this.turnParticipantMap.set(`${convId}:${activeTurnId}`, participant.id);
       }
@@ -2174,12 +2489,7 @@ export class AionCoreAdapter
       }
       this.lastSlotWorkSignature.set(slotSigKey, slotSig);
 
-      const mappedStatus: Participant['status'] =
-        stateStr === 'running' || stateStr === 'starting' || stateStr === 'queued'
-          ? 'running'
-          : stateStr === 'blocked'
-            ? 'blocked'
-            : 'idle';
+      const mappedStatus = mapCoreSlotWorkState(stateStr);
 
       if (
         participant.status === mappedStatus &&
@@ -2452,6 +2762,10 @@ export class AionCoreAdapter
     preferredConversationId?: string,
   ): void {
     if (!this.state) return;
+    if (this.isAssistantWsEvent(wsMsg.data)) {
+      this.handleAssistantWsEvent(wsMsg);
+      return;
+    }
     const resolved = this.resolveTargetConversationAndParticipant(
       wsMsg,
       preferredConversationId,
@@ -2545,7 +2859,8 @@ export class AionCoreAdapter
       // Live ACP model/config options reported on session start
       if (msgType === 'acp_config_option') {
         const discovered = extractModelsFromConfigOptions(data.data);
-        if (discovered.length > 0 && this.state) {
+        const reasoningCfg = extractReasoningConfigFromConfigOptions(data.data);
+        if ((discovered.length > 0 || reasoningCfg) && this.state) {
           const targetConn = this.state.connections.find(
             (c) => c.id === participant.connectionId,
           );
@@ -2554,10 +2869,15 @@ export class AionCoreAdapter
               c.id === targetConn.id
                 ? {
                   ...c,
-                  availableModels: mergeConfirmedModels(
-                    c.availableModels,
-                    discovered,
-                    'core_session',
+                  availableModels: enrichModelsWithConfigReasoning(
+                    discovered.length > 0
+                      ? mergeConfirmedModels(
+                          c.availableModels,
+                          discovered,
+                          'core_session',
+                        )
+                      : c.availableModels,
+                    data.data,
                   ),
                 }
                 : c,
@@ -5023,8 +5343,17 @@ export class AionCoreAdapter
   }
 
   async renameProject(projectId: string, name: string): Promise<void> {
+    return this.updateProject({ projectId, name });
+  }
+
+  async updateProject(input: {
+    projectId: string;
+    name: string;
+    description?: string;
+    workspacePathInfo?: string;
+  }): Promise<void> {
     const state = this.getStateSnapshot();
-    const trimmed = name.trim();
+    const trimmed = input.name.trim();
     if (!trimmed) {
       throw new GatewayCapabilityError(
         'VALIDATION_ERROR',
@@ -5034,8 +5363,20 @@ export class AionCoreAdapter
     this.state = {
       ...state,
       projects: state.projects.map((p) =>
-        p.id === projectId
-          ? { ...p, name: trimmed, updatedAt: new Date().toISOString() }
+        p.id === input.projectId
+          ? {
+              ...p,
+              name: trimmed,
+              description:
+                input.description !== undefined
+                  ? input.description.trim()
+                  : p.description,
+              workspacePathInfo:
+                input.workspacePathInfo !== undefined
+                  ? input.workspacePathInfo.trim()
+                  : p.workspacePathInfo,
+              updatedAt: new Date().toISOString(),
+            }
           : p,
       ),
     };
@@ -5074,26 +5415,32 @@ export class AionCoreAdapter
         'Informe um título para a conversa.',
       );
     }
-    const preset =
-      state.teamPresets.find((pr) => pr.id === input.presetId) ??
-      state.teamPresets.find((pr) => pr.id === 'preset_terra_sol_gemini') ??
-      DEFAULT_TEAM_PRESETS[0];
-    const effectivePreset: TeamPreset = input.customMembers?.length
-      ? { ...preset, members: input.customMembers }
-      : {
-        ...preset,
-        members: resolvePresetMembersForCore(state, preset.members),
-      };
+    const startEmpty = input.presetId === '__empty__';
+    const preset = startEmpty
+      ? undefined
+      : (state.teamPresets.find((pr) => pr.id === input.presetId) ??
+        state.teamPresets.find((pr) => pr.id === 'preset_terra_sol_gemini') ??
+        DEFAULT_TEAM_PRESETS[0]);
+    const effectivePreset: TeamPreset | undefined = startEmpty
+      ? undefined
+      : input.customMembers?.length
+        ? { ...preset!, members: input.customMembers }
+        : {
+          ...preset!,
+          members: resolvePresetMembersForCore(state, preset!.members),
+        };
 
     const convId = this.nextId('conv');
     const now = new Date().toISOString();
-    const participants = instantiateParticipantsFromPreset({
-      preset: effectivePreset,
-      conversationId: convId,
-      idGenerator: (prefix) => this.nextId(prefix),
-      isSimulated: false,
-      createdAt: now,
-    });
+    const participants = effectivePreset
+      ? instantiateParticipantsFromPreset({
+          preset: effectivePreset,
+          conversationId: convId,
+          idGenerator: (prefix) => this.nextId(prefix),
+          isSimulated: false,
+          createdAt: now,
+        })
+      : [];
     const resolved = resolveTeamRoles(participants);
     const coordinatorId =
       resolved.coordinator?.id ?? participants[0]?.id ?? '';
@@ -5104,7 +5451,7 @@ export class AionCoreAdapter
         projectId: input.projectId,
         title: trimmed,
         executionMode: 'aion_core',
-        teamPresetId: effectivePreset.id,
+        teamPresetId: startEmpty ? undefined : effectivePreset?.id,
         status: 'active',
         executionStatus: 'idle',
         coordinatorParticipantId: coordinatorId,
@@ -5405,6 +5752,40 @@ export class AionCoreAdapter
     });
   }
 
+  private async syncCoreParticipantReasoning(
+    teamId: string,
+    externalConvId: string,
+    slotId: string,
+    optionId: string,
+    reasoningEffort: string,
+  ): Promise<void> {
+    const cleanEffort = reasoningEffort.trim();
+    if (!cleanEffort) return;
+    const applyKey = `${teamId}:${externalConvId}`;
+    this.slotReasoningApplied.set(applyKey, cleanEffort);
+    try {
+      await this.httpClient.requestJson({
+        method: 'PUT',
+        path: `/api/teams/${encodeURIComponent(teamId)}/conversations/${encodeURIComponent(externalConvId)}/config-options/${encodeURIComponent(optionId || 'reasoning_effort')}`,
+        body: { value: cleanEffort },
+        idempotent: true,
+        operationName: 'core.updateReasoningEffort',
+        teamId,
+        slotId,
+      });
+    } catch (err) {
+      // Slot task may still be dormant before first message; keep pending so slotWork sync retries
+      this.slotReasoningApplied.delete(applyKey);
+      this.diagnostics.record({
+        operation: 'core.updateReasoningEffort',
+        status: 'ok',
+        teamId,
+        slotId,
+        detail: `Nível de raciocínio "${cleanEffort}" aguardando inicialização da sessão do slot (${err instanceof Error ? err.message : 'pendente'}).`,
+      });
+    }
+  }
+
   async configureParticipant(input: ConfigureParticipantInput): Promise<void> {
     const state = this.getStateSnapshot();
     const proj = state.conversations[input.conversationId];
@@ -5414,6 +5795,7 @@ export class AionCoreAdapter
 
     const teamId = proj.conversation.externalTeamId;
     const slotId = target.sessionRef.externalSlotId;
+    const extConvId = target.sessionRef.externalConversationId;
     if (
       proj.conversation.executionMode === 'aion_core' &&
       teamId &&
@@ -5426,6 +5808,21 @@ export class AionCoreAdapter
           target.modelRef.externalId?.trim() || target.modelRef.displayName.trim();
         if (nextModelId && nextModelId !== prevModelId) {
           await this.syncCoreParticipantModel(teamId, slotId, nextModelId);
+        }
+        const nextEffort = input.modelRef.reasoningEffort?.trim() || '';
+        const prevEffort = target.modelRef.reasoningEffort?.trim() || '';
+        if (nextEffort && (nextEffort !== prevEffort || nextModelId !== prevModelId)) {
+          if (extConvId) {
+            await this.syncCoreParticipantReasoning(
+              teamId,
+              extConvId,
+              slotId,
+              input.modelRef.reasoningOptionId || 'reasoning_effort',
+              nextEffort,
+            );
+          }
+        } else if (!nextEffort && extConvId) {
+          this.slotReasoningApplied.delete(`${teamId}:${extConvId}`);
         }
       }
       if (
@@ -6434,10 +6831,12 @@ export class AionCoreAdapter
             : ('missing' as const),
           coreAgentStatus: row.status,
           authStatus: mapCoreAgentStatusToAuthStatus(row.status),
-          availableModels:
+          availableModels: enrichModelsWithConfigReasoning(
             discoveredModels.length > 0
               ? mergeConfirmedModels(c.availableModels, discoveredModels, 'core_catalog')
               : c.availableModels,
+            row.config_options,
+          ),
           lastConnectionTestAt: testedAt,
           lastConnectionTestResult: message,
         }
@@ -6686,14 +7085,7 @@ export class AionCoreAdapter
             (s) => s.slot_id === slotId,
           );
           if (!slotWork) return p;
-          const mappedStatus =
-            slotWork.state === 'running' ||
-              slotWork.state === 'starting' ||
-              slotWork.state === 'queued'
-              ? 'running'
-              : slotWork.state === 'blocked'
-                ? 'blocked'
-                : 'idle';
+          const mappedStatus = mapCoreSlotWorkState(slotWork.state);
           return {
             ...p,
             status: mappedStatus as Participant['status'],
@@ -6865,24 +7257,11 @@ export class AionCoreAdapter
             (t.status === 'awaiting_review' &&
               t.reviewerParticipantId === participant.id),
         );
-        const tabMessagesForParticipant =
-          participant.id ===
-            latestProjForSlotCatchup.conversation.coordinatorParticipantId
-            ? [
-              ...(latestProjForSlotCatchup.messagesByTab.general ?? []),
-              ...(latestProjForSlotCatchup.messagesByTab[participant.id] ?? []),
-            ]
-            : (latestProjForSlotCatchup.messagesByTab[participant.id] ?? []);
-        const lastTabMsg =
-          tabMessagesForParticipant[tabMessagesForParticipant.length - 1];
-        const hasUnansweredPausedTurn =
-          latestProjForSlotCatchup.conversation.executionStatus ===
-          'paused_queue' &&
-          (participant.status === 'running' ||
-            (lastTabMsg?.authorType === 'user' &&
-              lastTabMsg.delivery?.status === 'enqueued_core' &&
-              lastTabMsg.delivery?.targetParticipantId === participant.id));
-        if (!hasOpenBuffer && !hasPendingTaskWork && !hasUnansweredPausedTurn) {
+        const hasUnansweredEnqueuedTurn = hasUnansweredCoreParticipantTurn(
+          latestProjForSlotCatchup,
+          participant,
+        );
+        if (!hasOpenBuffer && !hasPendingTaskWork && !hasUnansweredEnqueuedTurn) {
           continue;
         }
 
@@ -7052,6 +7431,933 @@ export class AionCoreAdapter
     await this.persistence.resetAndSave(nextState);
     for (const listener of this.stateListeners) {
       listener(nextState);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Vertice Floating Assistant (isolated Core session, strictly read-only)
+  // ---------------------------------------------------------------------------
+
+  private getOrInitAssistantState(
+    baseState: WorkspaceStoreState,
+  ): VerticeAssistantState {
+    return (
+      baseState.assistantState ?? {
+        status: 'idle',
+        messages: [],
+      }
+    );
+  }
+
+  private updateAssistantState(
+    updater: (prev: VerticeAssistantState) => VerticeAssistantState,
+  ): void {
+    if (!this.state) return;
+    const prev = this.getOrInitAssistantState(this.state);
+    this.state = {
+      ...this.state,
+      assistantState: updater(prev),
+    };
+    this.notifyState();
+  }
+
+  async configureVerticeAssistant(input: {
+    connectionId: string;
+    modelExternalId: string;
+    modelDisplayName: string;
+    includeLiveDiagnostics?: boolean;
+    includeSourceContext?: boolean;
+  }): Promise<{ externalTeamId: string; message: string }> {
+    const state = this.getStateSnapshot();
+    const conn = state.connections.find(
+      (c) => c.id === input.connectionId && c.mode === 'aion_core',
+    );
+    if (!conn || !conn.coreAssistantId) {
+      throw new GatewayCapabilityError(
+        'VALIDATION_ERROR',
+        'Selecione uma conexão válida do catálogo AionCore antes de ativar o Assistente.',
+      );
+    }
+    const modelId = input.modelExternalId.trim();
+    if (!modelId) {
+      throw new GatewayCapabilityError(
+        'VALIDATION_ERROR',
+        'Selecione um modelo confirmado para o Assistente.',
+      );
+    }
+
+    const prevAst = this.getOrInitAssistantState(state);
+    const includeLiveDiagnostics =
+      input.includeLiveDiagnostics ??
+      prevAst.config?.includeLiveDiagnostics ??
+      true;
+    const includeSourceContext =
+      input.includeSourceContext ??
+      prevAst.config?.includeSourceContext ??
+      true;
+
+    this.updateAssistantState((prev) => ({
+      ...prev,
+      status: 'configuring',
+      lastError: undefined,
+    }));
+
+    try {
+      const sourceMeta = await fetchAssistantSourceMeta();
+      const workspaceDir =
+        sourceMeta?.rootDir ||
+        state.coreSettings.workspacePath.trim() ||
+        undefined;
+
+      const body: CreateTeamRequest = {
+        name: '__vertice_internal_assistant__',
+        workspace: workspaceDir,
+        agents: [
+          {
+            assistant_id: conn.coreAssistantId,
+            name: 'Assistente Vértice',
+            role: 'lead',
+            model: modelId,
+          },
+        ],
+      };
+
+      const raw = await this.httpClient.requestJson<unknown>({
+        method: 'POST',
+        path: '/api/teams',
+        body,
+        idempotent: false,
+        operationName: 'core.assistant.createTeam',
+      });
+      const team = unwrapApiResponse<TeamResponse>(
+        raw,
+        'POST /api/teams (assistant)',
+        (d): d is TeamResponse =>
+          typeof d === 'object' &&
+          d !== null &&
+          typeof (d as TeamResponse).id === 'string' &&
+          Array.isArray((d as TeamResponse).assistants),
+      );
+      const leadAgent =
+        team.assistants.find(
+          (a) => a.role === 'lead' || a.role === 'leader',
+        ) ?? team.assistants[0];
+      if (!leadAgent) {
+        throw new GatewayCapabilityError(
+          'INVALID_PAYLOAD',
+          'AionCore criou equipe do Assistente sem slot de agente.',
+          true,
+        );
+      }
+
+      this.assistantStreamBuffers.clear();
+      this.assistantPendingConfirmations.clear();
+
+      this.updateAssistantState((prev) => ({
+        ...prev,
+        status: 'idle',
+        lastError: undefined,
+        config: {
+          connectionId: conn.id,
+          modelExternalId: modelId,
+          modelDisplayName: input.modelDisplayName.trim() || modelId,
+          workspaceRoot: sourceMeta?.rootDir,
+          externalTeamId: team.id,
+          externalSlotId: leadAgent.slot_id,
+          externalConversationId: leadAgent.conversation_id,
+          includeLiveDiagnostics,
+          includeSourceContext,
+          accessMode: 'read_only',
+        },
+      }));
+
+      return {
+        externalTeamId: team.id,
+        message: `Assistente Vértice ativado com ${conn.displayName} (${input.modelDisplayName || modelId}).`,
+      };
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'Falha ao configurar sessão do Assistente no Core.';
+      this.updateAssistantState((prev) => ({
+        ...prev,
+        status: 'error',
+        lastError: msg,
+      }));
+      throw err;
+    }
+  }
+
+  updateVerticeAssistantPreferences(input: {
+    includeLiveDiagnostics?: boolean;
+    includeSourceContext?: boolean;
+  }): void {
+    const state = this.getStateSnapshot();
+    const current = state.assistantState?.config;
+    if (!current) return;
+    this.updateAssistantState((prev) => ({
+      ...prev,
+      config: prev.config
+        ? {
+            ...prev.config,
+            includeLiveDiagnostics:
+              input.includeLiveDiagnostics ?? prev.config.includeLiveDiagnostics,
+            includeSourceContext:
+              input.includeSourceContext ?? prev.config.includeSourceContext,
+          }
+        : undefined,
+    }));
+  }
+
+  async sendVerticeAssistantMessage(input: {
+    prompt: string;
+    sourceQuery?: string;
+    attachments?: VerticeAssistantAttachmentInput[];
+  }): Promise<void> {
+    const rawQuestion = input.prompt.trim();
+    const attachments = input.attachments ?? [];
+    if (!rawQuestion && attachments.length === 0) {
+      throw new GatewayCapabilityError(
+        'VALIDATION_ERROR',
+        'Digite uma pergunta ou adicione um anexo para o Assistente.',
+      );
+    }
+    const question =
+      rawQuestion || 'Analise o(s) anexo(s) enviado(s) neste contexto.';
+
+    let state = this.getStateSnapshot();
+    let cfg = state.assistantState?.config;
+    if (!cfg) {
+      throw new GatewayCapabilityError(
+        'VALIDATION_ERROR',
+        'Selecione uma conexão e modelo como Assistente antes de enviar.',
+      );
+    }
+
+    const sourceMeta = await fetchAssistantSourceMeta();
+    if (
+      !cfg.externalTeamId ||
+      (!cfg.workspaceRoot && sourceMeta?.rootDir)
+    ) {
+      await this.configureVerticeAssistant({
+        connectionId: cfg.connectionId,
+        modelExternalId: cfg.modelExternalId,
+        modelDisplayName: cfg.modelDisplayName,
+        includeLiveDiagnostics: cfg.includeLiveDiagnostics,
+        includeSourceContext: cfg.includeSourceContext,
+      });
+      state = this.getStateSnapshot();
+      cfg = state.assistantState?.config;
+    }
+
+    if (!cfg?.externalTeamId) {
+      throw new GatewayCapabilityError(
+        'NOT_CONNECTED_LOCAL_CORE',
+        'Sessão dedicada do Assistente ainda não está vinculada ao Core.',
+        true,
+      );
+    }
+
+    if (!this.wsClient.isConnected()) {
+      await this.connectWebSocket();
+    }
+
+    const activeProject = state.projects.find(
+      (p) => p.id === state.activeProjectId,
+    );
+    const activeConv = state.activeConversationId
+      ? state.conversations[state.activeConversationId]
+      : undefined;
+
+    const liveSnapshot = cfg.includeLiveDiagnostics
+      ? buildLiveRuntimeSnapshot(
+          state,
+          activeProject,
+          activeConv,
+          this.diagnostics.list(),
+          {
+            assistantSessionWorkspace: cfg.workspaceRoot,
+            sourceReaderAvailable: Boolean(sourceMeta),
+          },
+        )
+      : undefined;
+
+    const sourceExcerpts: SourceExcerptInput[] = [];
+    if (cfg.includeSourceContext && sourceMeta) {
+      const matches = await searchAssistantSourceFiles(
+        input.sourceQuery || question,
+        6,
+      );
+      const seenPaths = new Set<string>();
+      for (const m of matches) {
+        if (seenPaths.has(m.path) || sourceExcerpts.length >= 3) break;
+        seenPaths.add(m.path);
+        const sliceStart = Math.max(1, m.lineNumber - 20);
+        const sliceEnd = sliceStart + 65;
+        const slice = await readAssistantSourceFile(
+          m.path,
+          sliceStart,
+          sliceEnd,
+        );
+        if (slice) {
+          sourceExcerpts.push({
+            path: slice.path,
+            startLine: slice.startLine,
+            endLine: slice.endLine,
+            content: slice.content,
+          });
+        }
+      }
+    }
+
+    const textAttachments = attachments.filter((a) => a.kind === 'text');
+    const imageAttachments = attachments.filter((a) => a.kind === 'image');
+
+    const recentHistory = this.getOrInitAssistantState(state).messages;
+    const grounded = buildGroundedAssistantPrompt({
+      userQuestion: question,
+      liveSnapshot,
+      sourceExcerpts,
+      sourceReaderAvailable: Boolean(sourceMeta),
+      recentHistory,
+      attachedTextFiles: textAttachments.map((att) => ({
+        name: att.name,
+        mimeType: att.mimeType,
+        content: att.textContent ?? '',
+        truncated: att.truncated,
+      })),
+      attachedImageNames: imageAttachments.map((att) => att.name),
+    });
+
+    const userMsgId = this.nextId('ast_usr');
+    const botMsgId = this.nextId('ast_bot');
+    const now = new Date().toISOString();
+
+    const userMessage: VerticeAssistantMessage = {
+      id: userMsgId,
+      role: 'user',
+      contentMarkdown: question,
+      timestamp: now,
+      status: 'completed',
+      sourcesCited: undefined,
+      attachments:
+        attachments.length > 0
+          ? attachments.map(({ id, name, kind, mimeType, sizeBytes, truncated }) => ({
+              id,
+              name,
+              kind,
+              mimeType,
+              sizeBytes,
+              truncated,
+            }))
+          : undefined,
+    };
+    const botPlaceholder: VerticeAssistantMessage = {
+      id: botMsgId,
+      role: 'assistant',
+      contentMarkdown: '',
+      timestamp: now,
+      status: 'streaming',
+      sourcesCited: grounded.sourcesCited,
+    };
+
+    this.updateAssistantState((prev) => ({
+      ...prev,
+      status: 'streaming',
+      lastError: undefined,
+      messages: [...prev.messages, userMessage, botPlaceholder],
+    }));
+
+    try {
+      const chatFiles: ChatFileRef[] = [];
+      for (const imgAtt of imageAttachments) {
+        if (!imgAtt.file) {
+          throw new GatewayCapabilityError(
+            'VALIDATION_ERROR',
+            `Arquivo de imagem ausente para o anexo "${imgAtt.name}".`,
+          );
+        }
+        const formData = new FormData();
+        formData.append('file', imgAtt.file, imgAtt.name);
+        if (cfg.externalConversationId) {
+          formData.append('conversation_id', cfg.externalConversationId);
+        }
+        const rawUpload = await this.httpClient.requestMultipart<unknown>({
+          path: '/api/fs/upload',
+          formData,
+          operationName: 'core.assistant.uploadAttachment',
+          teamId: cfg.externalTeamId,
+          slotId: cfg.externalSlotId,
+        });
+        const uploadedPath = unwrapApiResponse<string>(
+          rawUpload,
+          'POST /api/fs/upload',
+          (d): d is string => typeof d === 'string' && d.trim().length > 0,
+        );
+        chatFiles.push({ kind: 'upload', path: uploadedPath });
+      }
+
+      const messagePayload: SendTeamMessageRequest =
+        chatFiles.length > 0
+          ? { content: grounded.prompt, files: chatFiles }
+          : { content: grounded.prompt };
+
+      const rawAck = await this.httpClient.requestJson<unknown>({
+        method: 'POST',
+        path: `/api/teams/${encodeURIComponent(cfg.externalTeamId)}/messages`,
+        body: messagePayload,
+        idempotent: false,
+        operationName: 'core.assistant.sendMessage',
+        teamId: cfg.externalTeamId,
+        slotId: cfg.externalSlotId,
+      });
+      unwrapApiResponse<TeamRunAckResponse>(
+        rawAck,
+        'POST /api/teams/{assistant}/messages',
+        (d): d is TeamRunAckResponse =>
+          isRecord(d) &&
+          typeof d.message_id === 'string' &&
+          typeof d.enqueue_status === 'string',
+      );
+    } catch (err) {
+      const errMsg =
+        err instanceof Error
+          ? err.message
+          : 'Falha ao enviar pergunta ao Assistente no Core.';
+      this.updateAssistantState((prev) => ({
+        ...prev,
+        status: 'error',
+        lastError: errMsg,
+        messages: prev.messages.map((m) =>
+          m.id === botMsgId
+            ? {
+                ...m,
+                status: 'error',
+                contentMarkdown: `Não foi possível obter resposta do Assistente: ${errMsg}`,
+              }
+            : m,
+        ),
+      }));
+      throw err;
+    }
+  }
+
+  async respondVerticeAssistantPermission(input: {
+    requestId: string;
+    decision: 'approved' | 'denied';
+  }): Promise<void> {
+    const pending = this.assistantPendingConfirmations.get(input.requestId);
+    if (!pending) return;
+
+    const confirmData =
+      input.decision === 'approved' ? pending.allowData : pending.denyData;
+    await this.httpClient.requestJson<unknown>({
+      method: 'POST',
+      path: `/api/conversations/${encodeURIComponent(pending.extConvId)}/confirmations/${encodeURIComponent(pending.callId)}/confirm`,
+      body: {
+        msg_id: pending.msgId,
+        data: confirmData,
+        always_allow: false,
+      },
+      idempotent: false,
+      operationName: 'core.assistant.confirmPermission',
+    });
+    this.assistantPendingConfirmations.delete(input.requestId);
+
+    this.updateAssistantState((prev) => ({
+      ...prev,
+      messages: prev.messages.map((m) =>
+        m.permissionRequest?.requestId === input.requestId
+          ? {
+              ...m,
+              permissionRequest: {
+                ...m.permissionRequest,
+                status: input.decision,
+              },
+            }
+          : m,
+      ),
+    }));
+  }
+
+  async clearVerticeAssistantHistory(): Promise<void> {
+    this.assistantStreamBuffers.clear();
+    this.assistantPendingConfirmations.clear();
+    this.updateAssistantState((prev) => ({
+      ...prev,
+      status: 'idle',
+      lastError: undefined,
+      messages: [],
+    }));
+  }
+
+  private isAssistantWsEvent(data: Record<string, unknown>): boolean {
+    const cfg = this.state?.assistantState?.config;
+    if (!cfg) return false;
+    const slotWorkObj = isRecord(data.slot_work) ? data.slot_work : undefined;
+    const rawExtConvId = asNonEmptyString(data.conversation_id);
+    const rawTeamId =
+      asNonEmptyString(data.team_id) ?? asNonEmptyString(slotWorkObj?.team_id);
+    const rawSlotId =
+      asNonEmptyString(data.slot_id) ??
+      asNonEmptyString(data.target_slot_id) ??
+      asNonEmptyString(slotWorkObj?.slot_id);
+
+    if (cfg.externalConversationId && rawExtConvId === cfg.externalConversationId) {
+      return true;
+    }
+    if (cfg.externalTeamId && rawTeamId === cfg.externalTeamId) {
+      return true;
+    }
+    if (
+      !rawExtConvId &&
+      !rawTeamId &&
+      cfg.externalSlotId &&
+      rawSlotId === cfg.externalSlotId
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  private findActiveAssistantStreamingMessageId(): string | undefined {
+    const msgs = this.state?.assistantState?.messages ?? [];
+    for (let i = msgs.length - 1; i >= 0; i -= 1) {
+      if (msgs[i].role === 'assistant' && msgs[i].status === 'streaming') {
+        return msgs[i].id;
+      }
+    }
+    return undefined;
+  }
+
+  private handleAssistantWsEvent(wsMsg: WebSocketMessage): void {
+    if (!this.state) return;
+    const cfg = this.state.assistantState?.config;
+    if (!cfg) return;
+    const data = wsMsg.data;
+    const now = new Date().toISOString();
+
+    if (wsMsg.name === CORE_WS_EVENTS.MESSAGE_STREAM) {
+      if (data.position === 'right' || data.hidden === true) return;
+      const msgId =
+        asNonEmptyString(data.msg_id) ?? asNonEmptyString(data.message_id);
+      const turnId = asNonEmptyString(data.turn_id);
+      const msgType = asNonEmptyString(data.type) ?? '';
+      const inner = isRecord(data.data) ? data.data : undefined;
+      const streamSessionId =
+        asNonEmptyString(inner?.session_id) ?? asNonEmptyString(data.session_id);
+
+      if (streamSessionId && cfg.nativeSessionId !== streamSessionId) {
+        this.updateAssistantState((prev) => ({
+          ...prev,
+          config: prev.config
+            ? { ...prev.config, nativeSessionId: streamSessionId }
+            : undefined,
+        }));
+      }
+
+      if (msgType === 'acp_permission' || msgType === 'permission') {
+        const permInner = inner ?? (isRecord(data.data) ? data.data : undefined);
+        const toolCall =
+          permInner && isRecord(permInner.tool_call)
+            ? permInner.tool_call
+            : undefined;
+        const rawCallId =
+          asNonEmptyString(toolCall?.tool_call_id) ??
+          asNonEmptyString(permInner?.call_id) ??
+          asNonEmptyString(permInner?.id) ??
+          msgId;
+        const extConvId =
+          asNonEmptyString(data.conversation_id) ?? cfg.externalConversationId ?? '';
+        if (rawCallId && extConvId) {
+          const reqId = `ast_perm_${rawCallId}`;
+          const existing = (this.state.assistantState?.messages ?? []).some(
+            (m) => m.permissionRequest?.requestId === reqId,
+          );
+          if (!existing) {
+            const rawOptions = Array.isArray(permInner?.options)
+              ? permInner.options.filter(isRecord)
+              : [];
+            let allowData: unknown = 'allow';
+            let denyData: unknown = 'reject';
+            for (const opt of rawOptions) {
+              const kindStr = String(opt.kind ?? '').toLowerCase();
+              const optVal = opt.option_id ?? opt.value ?? opt.label;
+              if (
+                (kindStr === 'allow_once' || kindStr === 'allow_always') &&
+                optVal !== undefined
+              ) {
+                if (kindStr === 'allow_once' || allowData === 'allow') {
+                  allowData = optVal;
+                }
+              }
+              if (
+                (kindStr === 'reject_once' || kindStr === 'reject_always') &&
+                optVal !== undefined
+              ) {
+                if (kindStr === 'reject_once' || denyData === 'reject') {
+                  denyData = optVal;
+                }
+              }
+            }
+
+            const title =
+              asNonEmptyString(toolCall?.title) ??
+              asNonEmptyString(permInner?.title) ??
+              asNonEmptyString(permInner?.action) ??
+              'Solicitação de ferramenta pelo Assistente';
+            const kindLabel =
+              asNonEmptyString(toolCall?.kind) ??
+              asNonEmptyString(permInner?.command_type) ??
+              'tool';
+            const rawInput = toolCall?.raw_input;
+            const rawCmd =
+              isRecord(rawInput) && typeof rawInput.command === 'string'
+                ? rawInput.command
+                : typeof permInner?.description === 'string' && permInner.description
+                  ? permInner.description
+                  : rawInput !== undefined
+                    ? JSON.stringify(rawInput).slice(0, 180)
+                    : title;
+            const isWriteAttempt =
+              /edit|write|create|delete|remove|mkdir|rm\b|mv\b|chmod|patch|execute|bash|powershell|shell/i.test(
+                `${kindLabel} ${title} ${rawCmd}`,
+              );
+
+            this.assistantPendingConfirmations.set(reqId, {
+              extConvId,
+              callId: rawCallId,
+              msgId: msgId ?? rawCallId,
+              allowData,
+              denyData,
+            });
+
+            this.updateAssistantState((prev) => ({
+              ...prev,
+              messages: [
+                ...prev.messages,
+                {
+                  id: this.nextId('ast_perm_msg'),
+                  role: 'system',
+                  contentMarkdown: isWriteAttempt
+                    ? `O Assistente solicitou permissão de escrita/execução (\`${title}\`). Como o Assistente opera em **modo somente leitura**, recomenda-se **Recusar**.`
+                    : `O Assistente solicitou permissão de leitura (\`${title}\`).`,
+                  timestamp: now,
+                  status: 'completed',
+                  permissionRequest: {
+                    requestId: reqId,
+                    actionTitle: title,
+                    commandPreview: rawCmd,
+                    status: 'pending',
+                    isWriteAttempt,
+                  },
+                },
+              ],
+            }));
+          }
+        }
+        return;
+      }
+
+      if (
+        msgType === 'start' ||
+        msgType === 'available_commands' ||
+        msgType === 'acp_context_usage' ||
+        msgType === 'acp_session_info' ||
+        msgType === 'acp_config_option' ||
+        msgType === 'thought' ||
+        msgType === 'thinking' ||
+        msgType === 'tool_call' ||
+        msgType === 'tool_group'
+      ) {
+        return;
+      }
+
+      const chunkContent =
+        typeof inner?.content === 'string'
+          ? inner.content
+          : typeof data.data === 'string'
+            ? data.data
+            : typeof data.content === 'string'
+              ? data.content
+              : '';
+      const errorText =
+        asNonEmptyString(inner?.error) ??
+        asNonEmptyString(inner?.message) ??
+        asNonEmptyString(data.error) ??
+        chunkContent;
+
+      if (msgType === 'tips') {
+        const tipCode =
+          asNonEmptyString(inner?.code) ?? asNonEmptyString(inner?.type) ?? '';
+        const tipMsg =
+          asNonEmptyString(inner?.content) ?? chunkContent ?? tipCode;
+        if (/ACP_EMPTY_TURN_NEEDS_AUTH|unauthenticated/i.test(`${tipCode} ${tipMsg}`)) {
+          const targetId = this.findActiveAssistantStreamingMessageId();
+          this.updateAssistantState((prev) => ({
+            ...prev,
+            status: 'error',
+            lastError: tipMsg || 'CLI local requer autenticação.',
+            messages: targetId
+              ? prev.messages.map((m) =>
+                  m.id === targetId
+                    ? {
+                        ...m,
+                        status: 'error',
+                        contentMarkdown:
+                          tipMsg || 'CLI local requer autenticação antes de responder.',
+                      }
+                    : m,
+                )
+              : prev.messages,
+          }));
+        }
+        return;
+      }
+
+      const key = turnId ?? msgId;
+      if (!key) return;
+
+      let buf = this.assistantStreamBuffers.get(key);
+      if (!buf) {
+        const openBufs = Array.from(this.assistantStreamBuffers.values());
+        buf =
+          openBufs.find((b) => !b.finished && msgId && b.msgId === msgId) ??
+          openBufs.find((b) => !b.finished && turnId && b.turnId === turnId) ??
+          (msgType === 'finish' ||
+          msgType === 'end' ||
+          msgType === 'done' ||
+          msgType === 'completed'
+            ? openBufs.filter((b) => !b.finished && b.text.length > 0).slice(-1)[0]
+            : undefined);
+      }
+      if (buf?.finished) return;
+
+      if (!buf) {
+        const targetMessageId =
+          this.findActiveAssistantStreamingMessageId() ?? this.nextId('ast_bot');
+        buf = {
+          msgId: msgId ?? key,
+          turnId,
+          targetMessageId,
+          text: '',
+          finished: false,
+          seenTokens: new Set(),
+        };
+        this.assistantStreamBuffers.set(key, buf);
+      }
+
+      const explicitFrameId =
+        asNonEmptyString(data.event_id) ??
+        (typeof data.chunk_index === 'number'
+          ? `idx_${data.chunk_index}`
+          : undefined) ??
+        (typeof data.seq === 'number' ? `seq_${data.seq}` : undefined);
+      if (explicitFrameId) {
+        const tok = `${msgType}:${explicitFrameId}`;
+        if (buf.seenTokens.has(tok)) return;
+        buf.seenTokens.add(tok);
+      }
+
+      if (msgType === 'error' || msgType === 'failed') {
+        buf.finished = true;
+        const msgText = errorText || 'Erro retornado pelo Core para o Assistente.';
+        this.updateAssistantState((prev) => ({
+          ...prev,
+          status: 'error',
+          lastError: msgText,
+          messages: prev.messages.map((m) =>
+            m.id === buf!.targetMessageId
+              ? { ...m, status: 'error', contentMarkdown: msgText }
+              : m,
+          ),
+        }));
+        return;
+      }
+
+      if (msgType === 'content' || msgType === 'text' || msgType === 'delta') {
+        if (!chunkContent) return;
+        if (buf.text && !buf.text.endsWith('\n') && chunkContent.startsWith('```')) {
+          buf.text += '\n\n';
+        }
+        buf.text += chunkContent;
+        const targetId = buf.targetMessageId;
+        const updatedText = buf.text;
+        this.updateAssistantState((prev) => {
+          const exists = prev.messages.some((m) => m.id === targetId);
+          return {
+            ...prev,
+            status: 'streaming',
+            messages: exists
+              ? prev.messages.map((m) =>
+                  m.id === targetId
+                    ? { ...m, contentMarkdown: updatedText, status: 'streaming' }
+                    : m,
+                )
+              : [
+                  ...prev.messages,
+                  {
+                    id: targetId,
+                    role: 'assistant',
+                    contentMarkdown: updatedText,
+                    timestamp: now,
+                    status: 'streaming',
+                  },
+                ],
+          };
+        });
+        return;
+      }
+
+      if (
+        msgType === 'finish' ||
+        msgType === 'end' ||
+        msgType === 'done' ||
+        msgType === 'completed'
+      ) {
+        if (!buf.text && chunkContent) {
+          buf.text = chunkContent;
+        }
+        buf.finished = true;
+        const finalText = buf.text || '_(Resposta concluída sem conteúdo textual.)_';
+        const targetId = buf.targetMessageId;
+        this.updateAssistantState((prev) => ({
+          ...prev,
+          status: 'idle',
+          lastError: undefined,
+          messages: prev.messages.map((m) =>
+            m.id === targetId
+              ? { ...m, contentMarkdown: finalText, status: 'completed' }
+              : m,
+          ),
+        }));
+      }
+      return;
+    }
+
+    if (wsMsg.name === CORE_WS_EVENTS.TEAM_CHILD_TURN_COMPLETED) {
+      const statusStr = (asNonEmptyString(data.status) ?? 'completed').toLowerCase();
+      const turnId = asNonEmptyString(data.turn_id);
+      const bodyFromTurn =
+        asNonEmptyString(data.content) ??
+        asNonEmptyString(data.summary) ??
+        asNonEmptyString(data.message);
+      const targetId = this.findActiveAssistantStreamingMessageId();
+
+      for (const buf of this.assistantStreamBuffers.values()) {
+        if (!buf.finished && (!turnId || buf.turnId === turnId)) {
+          buf.finished = true;
+          if (statusStr === 'failed' || statusStr === 'cancelled') {
+            const errText =
+              asNonEmptyString(data.reason) ??
+              asNonEmptyString(data.error) ??
+              'Turno do Assistente interrompido no Core.';
+            this.updateAssistantState((prev) => ({
+              ...prev,
+              status: statusStr === 'failed' ? 'error' : 'idle',
+              lastError: statusStr === 'failed' ? errText : undefined,
+              messages: prev.messages.map((m) =>
+                m.id === buf.targetMessageId
+                  ? { ...m, status: 'error', contentMarkdown: buf.text || errText }
+                  : m,
+              ),
+            }));
+          } else {
+            const finalText = buf.text || bodyFromTurn || '';
+            if (finalText) {
+              this.updateAssistantState((prev) => ({
+                ...prev,
+                status: 'idle',
+                messages: prev.messages.map((m) =>
+                  m.id === buf.targetMessageId
+                    ? { ...m, status: 'completed', contentMarkdown: finalText }
+                    : m,
+                ),
+              }));
+            }
+          }
+          return;
+        }
+      }
+
+      if (targetId && (bodyFromTurn || statusStr === 'failed' || statusStr === 'cancelled')) {
+        const isErr = statusStr === 'failed' || statusStr === 'cancelled';
+        const text =
+          bodyFromTurn ??
+          asNonEmptyString(data.reason) ??
+          (isErr ? 'Turno do Assistente encerrado sem resposta.' : '');
+        if (text) {
+          this.updateAssistantState((prev) => ({
+            ...prev,
+            status: statusStr === 'failed' ? 'error' : 'idle',
+            messages: prev.messages.map((m) =>
+              m.id === targetId
+                ? {
+                    ...m,
+                    status: isErr ? 'error' : 'completed',
+                    contentMarkdown: text,
+                  }
+                : m,
+            ),
+          }));
+        }
+      }
+      return;
+    }
+
+    if (
+      wsMsg.name === CORE_WS_EVENTS.TEAM_RUN_FAILED ||
+      wsMsg.name === CORE_WS_EVENTS.TEAM_RUN_CANCELLED
+    ) {
+      const targetId = this.findActiveAssistantStreamingMessageId();
+      const errText =
+        asNonEmptyString(data.reason) ??
+        asNonEmptyString(data.error) ??
+        'Execução do Assistente falhou ou foi cancelada no Core.';
+      for (const buf of this.assistantStreamBuffers.values()) {
+        buf.finished = true;
+      }
+      this.updateAssistantState((prev) => ({
+        ...prev,
+        status: wsMsg.name === CORE_WS_EVENTS.TEAM_RUN_FAILED ? 'error' : 'idle',
+        lastError: errText,
+        messages: targetId
+          ? prev.messages.map((m) =>
+              m.id === targetId
+                ? {
+                    ...m,
+                    status: 'error',
+                    contentMarkdown: m.contentMarkdown || errText,
+                  }
+                : m,
+            )
+          : prev.messages,
+      }));
+      return;
+    }
+
+    if (wsMsg.name === CORE_WS_EVENTS.CONFIRMATION_REMOVE) {
+      const removedId = asNonEmptyString(data.id);
+      if (removedId) {
+        const reqId = `ast_perm_${removedId}`;
+        this.assistantPendingConfirmations.delete(reqId);
+        this.updateAssistantState((prev) => ({
+          ...prev,
+          messages: prev.messages.map((m) =>
+            m.permissionRequest?.requestId === reqId &&
+            m.permissionRequest.status === 'pending'
+              ? {
+                  ...m,
+                  permissionRequest: {
+                    ...m.permissionRequest,
+                    status: 'denied',
+                  },
+                }
+              : m,
+          ),
+        }));
+      }
     }
   }
 }

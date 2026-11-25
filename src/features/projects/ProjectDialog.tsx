@@ -1,11 +1,19 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Modal } from '../../components/Modal';
+import { WorkspacePathInput } from '../../components/WorkspacePathInput';
 import type { TeamPreset } from '../../domain/types';
 import { PT_BR } from '../../i18n/ptBR';
 
 export type ProjectModalMode =
   | { kind: 'create_project' }
-  | { kind: 'rename_project'; projectId: string; currentName: string }
+  | {
+      kind: 'edit_project';
+      projectId: string;
+      currentName: string;
+      currentDescription: string;
+      currentWorkspacePathInfo: string;
+      hasLinkedCoreTeams: boolean;
+    }
   | { kind: 'create_conversation'; projectId: string; projectName: string }
   | { kind: 'rename_conversation'; conversationId: string; currentTitle: string }
   | null;
@@ -13,13 +21,19 @@ export type ProjectModalMode =
 interface ProjectDialogProps {
   mode: ProjectModalMode;
   teamPresets?: TeamPreset[];
+  workspaceSuggestions?: string[];
   onClose: () => void;
   onCreateProject: (input: {
     name: string;
     description: string;
     workspacePathInfo: string;
   }) => Promise<void>;
-  onRenameProject: (projectId: string, name: string) => Promise<void>;
+  onUpdateProject: (input: {
+    projectId: string;
+    name: string;
+    description?: string;
+    workspacePathInfo?: string;
+  }) => Promise<void>;
   onCreateConversation: (
     projectId: string,
     title: string,
@@ -31,9 +45,10 @@ interface ProjectDialogProps {
 export function ProjectDialog({
   mode,
   teamPresets = [],
+  workspaceSuggestions = [],
   onClose,
   onCreateProject,
-  onRenameProject,
+  onUpdateProject,
   onCreateConversation,
   onRenameConversation,
 }: ProjectDialogProps) {
@@ -46,19 +61,17 @@ export function ProjectDialog({
   useEffect(() => {
     setError(null);
     if (!mode) return;
-    if (mode.kind === 'rename_project') {
+    if (mode.kind === 'edit_project') {
       setName(mode.currentName);
+      setDescription(mode.currentDescription);
+      setWorkspacePathInfo(mode.currentWorkspacePathInfo);
     } else if (mode.kind === 'rename_conversation') {
       setName(mode.currentTitle);
     } else {
       setName('');
       setDescription('');
       setWorkspacePathInfo('');
-      const preferred =
-        teamPresets.find((p) => p.id === 'preset_terra_sol_gemini')?.id ??
-        teamPresets[0]?.id ??
-        '';
-      setSelectedPresetId(preferred);
+      setSelectedPresetId('__empty__');
     }
   }, [mode, teamPresets]);
 
@@ -68,8 +81,8 @@ export function ProjectDialog({
     switch (mode.kind) {
       case 'create_project':
         return PT_BR.newProject;
-      case 'rename_project':
-        return 'Renomear projeto';
+      case 'edit_project':
+        return 'Editar projeto';
       case 'create_conversation':
         return `${PT_BR.newConversation} em ${mode.projectName}`;
       case 'rename_conversation':
@@ -86,8 +99,13 @@ export function ProjectDialog({
     }
     if (mode.kind === 'create_project') {
       await onCreateProject({ name: trimmed, description, workspacePathInfo });
-    } else if (mode.kind === 'rename_project') {
-      await onRenameProject(mode.projectId, trimmed);
+    } else if (mode.kind === 'edit_project') {
+      await onUpdateProject({
+        projectId: mode.projectId,
+        name: trimmed,
+        description,
+        workspacePathInfo,
+      });
     } else if (mode.kind === 'create_conversation') {
       await onCreateConversation(
         mode.projectId,
@@ -126,7 +144,7 @@ export function ProjectDialog({
           />
         </div>
 
-        {mode.kind === 'create_conversation' && teamPresets.length > 0 && (
+        {mode.kind === 'create_conversation' && (
           <div>
             <label
               htmlFor="aion-conv-preset"
@@ -140,21 +158,28 @@ export function ProjectDialog({
               onChange={(e) => setSelectedPresetId(e.target.value)}
               className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 text-xs text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
             >
+              <option value="__empty__">
+                Montar equipe do zero (vazia)
+              </option>
               {teamPresets.map((preset) => (
                 <option key={preset.id} value={preset.id}>
                   {preset.name}
                 </option>
               ))}
             </select>
-            {selectedPreset && (
+            {selectedPresetId === '__empty__' ? (
+              <p className="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
+                Cria a conversa sem participantes pré-carregados para você adicionar membros manualmente ou aplicar um preset em Configurações.
+              </p>
+            ) : selectedPreset ? (
               <p className="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
                 {selectedPreset.description}
               </p>
-            )}
+            ) : null}
           </div>
         )}
 
-        {mode.kind === 'create_project' && (
+        {(mode.kind === 'create_project' || mode.kind === 'edit_project') && (
           <>
             <div>
               <label
@@ -175,21 +200,25 @@ export function ProjectDialog({
             <div>
               <label
                 htmlFor="aion-project-path"
-                className="block text-xs font-medium text-[var(--text-primary)]"
+                className="mb-1 block text-xs font-medium text-[var(--text-primary)]"
               >
-                Caminho do workspace (informativo)
+                Caminho do workspace
               </label>
-              <input
+              <WorkspacePathInput
                 id="aion-project-path"
-                type="text"
                 value={workspacePathInfo}
-                onChange={(e) => setWorkspacePathInfo(e.target.value)}
+                onChange={setWorkspacePathInfo}
                 placeholder="Ex.: C:/projetos/meu-app"
-                className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 font-mono text-xs text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none"
+                suggestions={workspaceSuggestions}
               />
               <p className="mt-1 text-xs text-[var(--text-secondary)]">
                 {PT_BR.previewWorkspaceDisclaimer}
               </p>
+              {mode.kind === 'edit_project' && mode.hasLinkedCoreTeams && (
+                <p className="mt-1.5 rounded-md border border-[var(--status-warning)]/40 bg-[var(--status-warning-soft)] px-2.5 py-1.5 text-[11px] leading-relaxed text-[var(--status-warning)]">
+                  Este projeto já possui conversa(s) com equipe criada no AionCore: times já criados mantêm a pasta original; o novo caminho valerá para novas conversas/equipes.
+                </p>
+              )}
             </div>
           </>
         )}

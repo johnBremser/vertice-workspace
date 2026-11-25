@@ -16,4 +16,5 @@ data/
 *.db.*
 .eslintcache
 server.js
+*.lnk
 

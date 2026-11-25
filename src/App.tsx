@@ -22,6 +22,11 @@ const LazySettingsView = lazy(() =>
     default: m.SettingsView,
   })),
 );
+const LazyVerticeAssistantWidget = lazy(() =>
+  import('./features/assistant/VerticeAssistantWidget').then((m) => ({
+    default: m.VerticeAssistantWidget,
+  })),
+);
 
 function WorkspaceShell() {
   const {
@@ -235,6 +240,12 @@ function WorkspaceShell() {
             modelPolicy={store.modelPolicy}
             onImportState={importWorkspaceState}
           />
+        </Suspense>
+      )}
+
+      {!loading && (
+        <Suspense fallback={null}>
+          <LazyVerticeAssistantWidget />
         </Suspense>
       )}
     </div>

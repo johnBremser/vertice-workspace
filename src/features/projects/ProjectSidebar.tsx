@@ -42,7 +42,7 @@ export function ProjectSidebar() {
     closeMobileSidebar,
     selectConversation,
     createProject,
-    renameProject,
+    updateProject,
     setProjectArchived,
     createConversation,
     renameConversation,
@@ -184,13 +184,21 @@ export function ProjectSidebar() {
                       <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
                         <button
                           type="button"
-                          title={PT_BR.rename}
-                          aria-label={`Renomear projeto ${project.name}`}
+                          title="Editar projeto"
+                          aria-label={`Editar projeto ${project.name}`}
                           onClick={() =>
                             setModalMode({
-                              kind: 'rename_project',
+                              kind: 'edit_project',
                               projectId: project.id,
                               currentName: project.name,
+                              currentDescription: project.description ?? '',
+                              currentWorkspacePathInfo:
+                                project.workspacePathInfo ?? '',
+                              hasLinkedCoreTeams: projectConvs.some(
+                                (c) =>
+                                  c.conversation.executionMode === 'aion_core' &&
+                                  Boolean(c.conversation.externalTeamId),
+                              ),
                             })
                           }
                           className="rounded p-1 text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)] hover:text-[var(--text-primary)]"
@@ -373,9 +381,10 @@ export function ProjectSidebar() {
       <ProjectDialog
         mode={modalMode}
         teamPresets={store.teamPresets}
+        workspaceSuggestions={store.projects.map((p) => p.workspacePathInfo)}
         onClose={() => setModalMode(null)}
         onCreateProject={createProject}
-        onRenameProject={renameProject}
+        onUpdateProject={updateProject}
         onCreateConversation={createConversation}
         onRenameConversation={renameConversation}
       />

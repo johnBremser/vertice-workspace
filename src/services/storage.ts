@@ -440,6 +440,36 @@ export function sanitizeLoadedStateAfterReload(
         ? nextConversations[activeConversationId].conversation.projectId
         : nextProjects[0]?.id ?? '';
 
+  const sanitizedAssistantState = state.assistantState
+    ? {
+        ...state.assistantState,
+        status:
+          state.assistantState.status === 'streaming' ||
+          state.assistantState.status === 'configuring'
+            ? ('idle' as const)
+            : state.assistantState.status,
+        messages: state.assistantState.messages.map((m) =>
+          m.status === 'streaming'
+            ? {
+                ...m,
+                status: 'error' as const,
+                contentMarkdown: m.contentMarkdown
+                  ? `${m.contentMarkdown}\n\n_(Resposta interrompida ao recarregar a página.)_`
+                  : 'Resposta interrompida ao recarregar a página.',
+              }
+            : m.permissionRequest && m.permissionRequest.status === 'pending'
+              ? {
+                  ...m,
+                  permissionRequest: {
+                    ...m.permissionRequest,
+                    status: 'denied' as const,
+                  },
+                }
+              : m,
+        ),
+      }
+    : undefined;
+
   return {
     ...state,
     executionMode: 'aion_core',
@@ -450,5 +480,6 @@ export function sanitizeLoadedStateAfterReload(
     conversations: nextConversations,
     activeProjectId,
     activeConversationId,
+    assistantState: sanitizedAssistantState,
   };
 }

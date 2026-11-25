@@ -32,6 +32,24 @@ const ALL_ROLES: ParticipantRole[] = [
   'reviewer',
 ];
 
+const EFFORT_LABELS: Record<string, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'XHigh',
+  max: 'Max',
+  ultra: 'Ultra',
+};
+
+function formatEffortLabel(effort: string): string {
+  const clean = effort.trim();
+  if (!clean) return '';
+  return (
+    EFFORT_LABELS[clean.toLowerCase()] ??
+    `${clean.charAt(0).toUpperCase()}${clean.slice(1)}`
+  );
+}
+
 function ParticipantEditorRow({
   participant,
   index,
@@ -42,6 +60,7 @@ function ParticipantEditorRow({
   transitionReason,
   onMove,
   onSave,
+  onSaveAsProfile,
   onRemove,
 }: {
   participant: Participant;
@@ -58,6 +77,8 @@ function ParticipantEditorRow({
       source: 'demo_tier' | 'core_catalog' | 'core_session';
       tier?: 'fast' | 'review' | 'advanced';
       confirmed: boolean;
+      reasoningEfforts?: string[];
+      reasoningOptionId?: string;
     }[];
   }[];
   canRemove: boolean;
@@ -71,6 +92,13 @@ function ParticipantEditorRow({
     modelRef: ModelRef;
     instructions: string;
     reason?: string;
+  }) => Promise<void>;
+  onSaveAsProfile: (input: {
+    displayName: string;
+    connectionId: string;
+    defaultRoles: ParticipantRole[];
+    modelRef: ModelRef;
+    instructions: string;
   }) => Promise<void>;
   onRemove: (participantId: string) => Promise<void>;
 }) {
@@ -90,6 +118,9 @@ function ParticipantEditorRow({
       ? participant.modelRef.displayName
       : '',
   );
+  const [reasoningEffort, setReasoningEffort] = useState(
+    participant.modelRef.reasoningEffort ?? '',
+  );
   const [instructions, setInstructions] = useState(participant.instructions);
 
   useEffect(() => {
@@ -107,11 +138,16 @@ function ParticipantEditorRow({
         ? participant.modelRef.displayName
         : '',
     );
+    setReasoningEffort(participant.modelRef.reasoningEffort ?? '');
     setInstructions(participant.instructions);
   }, [participant]);
 
   const currentConnection =
     connections.find((c) => c.id === connectionId) ?? connections[0];
+  const selectedModelOption = currentConnection?.availableModels.find(
+    (m) => m.externalId === selectedModelKey,
+  );
+  const supportedEfforts = selectedModelOption?.reasoningEfforts ?? [];
 
   const toggleRole = (role: ParticipantRole) => {
     setRoles((prev) => {
@@ -129,19 +165,28 @@ function ParticipantEditorRow({
         participant.modelTier,
       );
     }
-    const found = currentConnection?.availableModels.find(
-      (m) => m.externalId === selectedModelKey,
-    );
+    const found = selectedModelOption;
     if (found) {
       if (found.source === 'demo_tier' && found.tier) {
         return makeDemoModelRef(found.tier, found.displayName);
       }
+      const normalizedEffort =
+        reasoningEffort.trim() &&
+        found.reasoningEfforts?.includes(reasoningEffort.trim())
+          ? reasoningEffort.trim()
+          : undefined;
       return {
         externalId: found.externalId,
         displayName: found.displayName,
         source: found.source,
         tier: found.tier ?? participant.modelTier,
         confirmation: found.confirmed ? 'confirmed' : 'unverified_preference',
+        ...(normalizedEffort
+          ? {
+              reasoningEffort: normalizedEffort,
+              reasoningOptionId: found.reasoningOptionId ?? 'reasoning_effort',
+            }
+          : {}),
       };
     }
     return participant.modelRef;
@@ -349,7 +394,19 @@ function ParticipantEditorRow({
           Modelo / perfil de execução
           <select
             value={selectedModelKey}
-            onChange={(e) => setSelectedModelKey(e.target.value)}
+            onChange={(e) => {
+              const nextKey = e.target.value;
+              setSelectedModelKey(nextKey);
+              const nextModel = currentConnection?.availableModels.find(
+                (m) => m.externalId === nextKey,
+              );
+              if (
+                reasoningEffort &&
+                !nextModel?.reasoningEfforts?.includes(reasoningEffort)
+              ) {
+                setReasoningEffort('');
+              }
+            }}
             className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]"
           >
             {(currentConnection?.availableModels ?? []).map((m) => (
@@ -362,6 +419,24 @@ function ParticipantEditorRow({
             </option>
           </select>
         </label>
+
+        {selectedModelKey !== '__custom__' && supportedEfforts.length > 0 && (
+          <label className="block text-xs text-[var(--text-secondary)]">
+            Nível de raciocínio
+            <select
+              value={reasoningEffort}
+              onChange={(e) => setReasoningEffort(e.target.value)}
+              className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]"
+            >
+              <option value="">Padrão do CLI</option>
+              {supportedEfforts.map((eff) => (
+                <option key={eff} value={eff}>
+                  {formatEffortLabel(eff)}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
 
         {selectedModelKey === '__custom__' && (
           <label className="block text-xs text-[var(--text-secondary)]">
@@ -393,24 +468,42 @@ function ParticipantEditorRow({
         <span className="text-[11px] text-[var(--text-muted)]">
           Alterações de modelo/instruções aplicam-se apenas à próxima tentativa (nunca reescrevem tentativas passadas).
         </span>
-        <button
-          type="button"
-          onClick={() =>
-            void onSave({
-              participantId: participant.id,
-              displayName: displayName.trim() || participant.displayName,
-              roles,
-              connectionId,
-              modelRef: buildModelRef(),
-              instructions,
-              reason: transitionReason,
-            })
-          }
-          className="inline-flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
-        >
-          <Save className="h-3.5 w-3.5" aria-hidden="true" />
-          <span>Aplicar alterações</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() =>
+              void onSaveAsProfile({
+                displayName: displayName.trim() || participant.displayName,
+                connectionId,
+                defaultRoles: roles,
+                modelRef: buildModelRef(),
+                instructions,
+              })
+            }
+            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]"
+          >
+            <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Salvar como perfil</span>
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              void onSave({
+                participantId: participant.id,
+                displayName: displayName.trim() || participant.displayName,
+                roles,
+                connectionId,
+                modelRef: buildModelRef(),
+                instructions,
+                reason: transitionReason,
+              })
+            }
+            className="inline-flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
+          >
+            <Save className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Aplicar alterações</span>
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -434,7 +527,7 @@ export function ParticipantsSection() {
     'Reorganização manual de papéis e equipe na conversa.',
   );
   const [selectedPresetId, setSelectedPresetId] = useState(
-    'preset_terra_sol_gemini',
+    activeConversation?.conversation.teamPresetId ?? '',
   );
   const [presetNameToSave, setPresetNameToSave] = useState('');
   const [showAddForm, setShowAddForm] = useState(false);
@@ -447,12 +540,31 @@ export function ParticipantsSection() {
         'conn_codex_demo'
       : 'conn_codex_demo';
   const [newConnId, setNewConnId] = useState(defaultAddConnId);
-  const [newRoles, setNewRoles] = useState<ParticipantRole[]>(['executor']);
+  const [newRoles, setNewRoles] = useState<ParticipantRole[]>(
+    (activeConversation?.participants.length ?? 0) === 0
+      ? ['coordinator']
+      : ['executor'],
+  );
   const [newModelPref, setNewModelPref] = useState('');
+  const [newReasoningEffort, setNewReasoningEffort] = useState('');
   const [newInstructions, setNewInstructions] = useState(
     'Executar tarefas delegadas respeitando contexto compartilhado.',
   );
   const [showProfilesManager, setShowProfilesManager] = useState(false);
+
+  useEffect(() => {
+    setSelectedPresetId(activeConversation?.conversation.teamPresetId ?? '');
+  }, [
+    activeConversation?.conversation.id,
+    activeConversation?.conversation.teamPresetId,
+  ]);
+
+  useEffect(() => {
+    if (!activeConversation) return;
+    if (activeConversation.participants.length === 0) {
+      setNewRoles(['coordinator']);
+    }
+  }, [activeConversation?.conversation.id, activeConversation?.participants.length]);
 
   if (!store || !activeConversation) return null;
 
@@ -460,6 +572,16 @@ export function ParticipantsSection() {
     activeConversation;
   const activeParticipants = sortParticipantsByTabOrder(participants);
   const validation = validateTeamConfiguration(participants, store.connections);
+  const hasExternalTeam = Boolean(activeConversation.conversation.externalTeamId);
+  const selectedAddConn =
+    store.connections.find((c) => c.id === newConnId) ??
+    store.connections.find((c) => c.mode === 'aion_core') ??
+    store.connections[0];
+  const resolvedAddModel =
+    selectedAddConn?.availableModels.find(
+      (m) => m.externalId === newModelPref.trim() || m.displayName === newModelPref.trim(),
+    ) ?? (!newModelPref.trim() ? selectedAddConn?.availableModels[0] : undefined);
+  const addSupportedEfforts = resolvedAddModel?.reasoningEfforts ?? [];
 
   const handleMove = async (index: number, delta: -1 | 1) => {
     const nextIdx = index + delta;
@@ -492,6 +614,11 @@ export function ParticipantsSection() {
       const matchedModel = targetConn?.availableModels.find(
         (m) => m.externalId === trimmedPref || m.displayName === trimmedPref,
       ) ?? (!trimmedPref ? targetConn?.availableModels[0] : undefined);
+      const normalizedAddEffort =
+        newReasoningEffort.trim() &&
+        matchedModel?.reasoningEfforts?.includes(newReasoningEffort.trim())
+          ? newReasoningEffort.trim()
+          : undefined;
       const modelRef: ModelRef = matchedModel
         ? matchedModel.source === 'demo_tier' && matchedModel.tier
           ? makeDemoModelRef(matchedModel.tier, matchedModel.displayName)
@@ -501,6 +628,13 @@ export function ParticipantsSection() {
               source: matchedModel.source,
               tier: matchedModel.tier ?? 'fast',
               confirmation: matchedModel.confirmed ? 'confirmed' : 'unverified_preference',
+              ...(normalizedAddEffort
+                ? {
+                    reasoningEffort: normalizedAddEffort,
+                    reasoningOptionId:
+                      matchedModel.reasoningOptionId ?? 'reasoning_effort',
+                  }
+                : {}),
             }
         : trimmedPref
           ? makePreferenceModelRef(trimmedPref, 'fast')
@@ -516,6 +650,7 @@ export function ParticipantsSection() {
     }
     setNewName('');
     setNewModelPref('');
+    setNewReasoningEffort('');
     setNewProfileId('');
     setShowAddForm(false);
   };
@@ -523,7 +658,7 @@ export function ParticipantsSection() {
   const handleSaveCurrentAsPreset = async (e: FormEvent) => {
     e.preventDefault();
     if (!presetNameToSave.trim()) return;
-    await saveTeamPreset({
+    const saved = await saveTeamPreset({
       name: presetNameToSave.trim(),
       description: `Preset salvo a partir da conversa "${activeConversation.conversation.title}".`,
       mode: activeConversation.conversation.executionMode,
@@ -536,6 +671,7 @@ export function ParticipantsSection() {
         instructions: p.instructions,
       })),
     });
+    setSelectedPresetId(saved.id);
     setPresetNameToSave('');
   };
 
@@ -556,28 +692,40 @@ export function ParticipantsSection() {
         </p>
       </div>
 
-      <div className="mt-4 flex flex-wrap items-end gap-2 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-elevated)] p-3">
-        <label className="min-w-[240px] flex-1 text-xs text-[var(--text-secondary)]">
-          Aplicar preset de equipe nesta conversa
-          <select
-            value={selectedPresetId}
-            onChange={(e) => setSelectedPresetId(e.target.value)}
-            className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]"
-          >
-            {store.teamPresets.map((preset) => (
-              <option key={preset.id} value={preset.id}>
-                {preset.name}
+      <div className="mt-4 space-y-2 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-elevated)] p-3">
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="min-w-[240px] flex-1 text-xs text-[var(--text-secondary)]">
+            Aplicar preset de equipe nesta conversa
+            <select
+              value={selectedPresetId}
+              disabled={hasExternalTeam}
+              onChange={(e) => setSelectedPresetId(e.target.value)}
+              className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs text-[var(--text-primary)] disabled:opacity-60"
+            >
+              <option value="">
+                Selecione um preset para carregar...
               </option>
-            ))}
-          </select>
-        </label>
-        <button
-          type="button"
-          onClick={() => void applyTeamPreset(selectedPresetId)}
-          className="rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
-        >
-          Aplicar preset na conversa
-        </button>
+              {store.teamPresets.map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            disabled={!selectedPresetId || hasExternalTeam}
+            onClick={() => void applyTeamPreset(selectedPresetId)}
+            className="rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50"
+          >
+            Aplicar preset na conversa
+          </button>
+        </div>
+        {hasExternalTeam && (
+          <p className="text-[11px] leading-relaxed text-[var(--text-secondary)]">
+            Esta conversa já possui time criado no Core (<code>{activeConversation.conversation.externalTeamId}</code>). No AionCore, cada participante já recebeu um <code>slot_id</code> e sessão fixos — por isso não é possível trocar todo o preset após criar o time. Para usar outro preset (como os salvos por você), crie uma <strong>Nova conversa</strong> selecionando-o.
+          </p>
+        )}
       </div>
 
       {(validation.errors.length > 0 || validation.warnings.length > 0) && (
@@ -623,30 +771,42 @@ export function ParticipantsSection() {
       </div>
 
       <div className="mt-4 divide-y divide-[var(--border-hairline)]">
-        {activeParticipants.map((p, index) => {
-          const isCurrentCoord =
-            p.id === activeConversation.conversation.coordinatorParticipantId;
-          return (
-            <ParticipantEditorRow
-              key={p.id}
-              participant={p}
-              index={index}
-              total={activeParticipants.length}
-              connections={store.connections}
-              workspaceMode={activeConversation.conversation.executionMode}
-              canRemove={!isCurrentCoord}
-              transitionReason={transitionReason}
-              onMove={(dir) => handleMove(index, dir)}
-              onSave={(input) => configureParticipant(input)}
-              onRemove={(id) =>
-                removeParticipantFromConversation(
-                  id,
-                  'Participante arquivado manualmente.',
-                )
-              }
-            />
-          );
-        })}
+        {activeParticipants.length === 0 ? (
+          <div className="rounded-md border border-dashed border-[var(--border-strong)] bg-[var(--bg-canvas)] p-4 text-xs text-[var(--text-secondary)]">
+            Nenhum participante nesta conversa ainda. Selecione um preset acima para carregar ou clique em <strong>+ Adicionar participante</strong> abaixo para montar sua equipe do zero.
+          </div>
+        ) : (
+          activeParticipants.map((p, index) => {
+            const isCurrentCoord =
+              p.id === activeConversation.conversation.coordinatorParticipantId;
+            return (
+              <ParticipantEditorRow
+                key={p.id}
+                participant={p}
+                index={index}
+                total={activeParticipants.length}
+                connections={store.connections}
+                workspaceMode={activeConversation.conversation.executionMode}
+                canRemove={!isCurrentCoord}
+                transitionReason={transitionReason}
+                onMove={(dir) => handleMove(index, dir)}
+                onSave={(input) => configureParticipant(input)}
+                onSaveAsProfile={async (profileInput) => {
+                  await saveParticipantProfile({
+                    ...profileInput,
+                    isSimulated: p.isSimulated,
+                  });
+                }}
+                onRemove={(id) =>
+                  removeParticipantFromConversation(
+                    id,
+                    'Participante arquivado manualmente.',
+                  )
+                }
+              />
+            );
+          })
+        )}
       </div>
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border-hairline)] pt-4">
@@ -759,13 +919,65 @@ export function ParticipantsSection() {
                   </label>
                 ))}
               </div>
-              <input
-                type="text"
-                value={newModelPref}
-                onChange={(e) => setNewModelPref(e.target.value)}
-                placeholder="Preferência de modelo (opcional, ex.: Sol 6.1)"
-                className="w-full rounded border border-[var(--border-strong)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]"
-              />
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {selectedAddConn && selectedAddConn.availableModels.length > 0 ? (
+                  <label className="block text-[var(--text-secondary)]">
+                    Modelo / perfil de execução
+                    <select
+                      value={newModelPref || selectedAddConn.availableModels[0]?.externalId || ''}
+                      onChange={(e) => {
+                        const nextId = e.target.value;
+                        setNewModelPref(nextId);
+                        const nextModel = selectedAddConn.availableModels.find(
+                          (m) => m.externalId === nextId,
+                        );
+                        if (
+                          newReasoningEffort &&
+                          !nextModel?.reasoningEfforts?.includes(newReasoningEffort)
+                        ) {
+                          setNewReasoningEffort('');
+                        }
+                      }}
+                      className="mt-1 w-full rounded border border-[var(--border-strong)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]"
+                    >
+                      {selectedAddConn.availableModels.map((m) => (
+                        <option key={m.externalId} value={m.externalId}>
+                          {m.displayName}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : (
+                  <label className="block text-[var(--text-secondary)]">
+                    Preferência de modelo (opcional)
+                    <input
+                      type="text"
+                      value={newModelPref}
+                      onChange={(e) => setNewModelPref(e.target.value)}
+                      placeholder="Ex.: GPT-6.2-Sol"
+                      className="mt-1 w-full rounded border border-[var(--border-strong)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]"
+                    />
+                  </label>
+                )}
+
+                {addSupportedEfforts.length > 0 && (
+                  <label className="block text-[var(--text-secondary)]">
+                    Nível de raciocínio
+                    <select
+                      value={newReasoningEffort}
+                      onChange={(e) => setNewReasoningEffort(e.target.value)}
+                      className="mt-1 w-full rounded border border-[var(--border-strong)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]"
+                    >
+                      <option value="">Padrão do CLI</option>
+                      {addSupportedEfforts.map((eff) => (
+                        <option key={eff} value={eff}>
+                          {formatEffortLabel(eff)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+              </div>
               <textarea
                 rows={2}
                 value={newInstructions}
@@ -822,6 +1034,9 @@ export function ParticipantsSection() {
             <div className="font-semibold text-[var(--text-primary)]">
               Perfis reutilizáveis ({store.participantProfiles.length})
             </div>
+            <p className="mt-0.5 text-[11px] text-[var(--text-secondary)]">
+              Modelos individuais de participante para reaproveitar em outras conversas (também aparecem em &quot;+ Adicionar participante&quot;).
+            </p>
             <ul className="mt-1.5 space-y-1">
               {store.participantProfiles.map((prof) => (
                 <li
@@ -838,6 +1053,24 @@ export function ParticipantsSection() {
                     </span>
                   </div>
                   <div className="flex items-center gap-2">
+                    {!prof.archived && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void addParticipantToConversation({
+                            profileId: prof.id,
+                            connectionId: prof.connectionId,
+                            displayName: prof.displayName,
+                            roles: [...prof.defaultRoles],
+                            modelRef: { ...prof.modelRef },
+                            instructions: prof.instructions,
+                          })
+                        }
+                        className="font-medium text-[var(--accent)] hover:underline"
+                      >
+                        + Usar na conversa
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() =>

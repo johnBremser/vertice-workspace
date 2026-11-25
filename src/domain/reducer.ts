@@ -472,6 +472,15 @@ export function applyEventIncrementally(
       if (!messagesByTab[incoming.id]) {
         messagesByTab = { ...messagesByTab, [incoming.id]: [] };
       }
+      if (
+        !conversation.coordinatorParticipantId &&
+        (incoming.roles?.includes('coordinator') || incoming.role === 'coordinator')
+      ) {
+        conversation = {
+          ...conversation,
+          coordinatorParticipantId: incoming.id,
+        };
+      }
       break;
     }
 

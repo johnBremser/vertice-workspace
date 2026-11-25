@@ -7,6 +7,21 @@ import path from 'node:path';
 import tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
 
+let assistantSourceReader = null;
+try {
+  assistantSourceReader = await import('./vertice-source-reader.mjs');
+} catch {
+  // Optional in isolated test copies that only stage vertice-server.mjs + vertice-ctl.mjs
+  assistantSourceReader = null;
+}
+
+let localFolderPicker = null;
+try {
+  localFolderPicker = await import('./vertice-folder-picker.mjs');
+} catch {
+  localFolderPicker = null;
+}
+
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
@@ -472,6 +487,22 @@ export async function startVerticeServer(options = {}) {
             setImmediate(() => void triggerClose());
           });
         }
+        return;
+      }
+
+      if (
+        assistantSourceReader &&
+        assistantSourceReader.shouldHandleAssistantSourcePath(reqUrl)
+      ) {
+        assistantSourceReader.handleAssistantSourceRequest(req, res, rootDir);
+        return;
+      }
+
+      if (
+        localFolderPicker &&
+        localFolderPicker.shouldHandleLocalFolderRequest(reqUrl)
+      ) {
+        localFolderPicker.handleLocalFolderRequest(req, res);
         return;
       }
 

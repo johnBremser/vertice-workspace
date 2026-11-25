@@ -18,6 +18,8 @@ import type {
   ParticipantRole,
   PermissionRequest,
   TeamPreset,
+  VerticeAssistantMessage,
+  VerticeAssistantState,
   WorkspaceStoreState,
 } from './types';
 
@@ -289,5 +291,117 @@ export function migrateWorkspaceState(raw: unknown): WorkspaceStoreState {
     activeConversationId: String(obj.activeConversationId ?? ''),
     simulatedHeldBackEvents:
       obj.simulatedHeldBackEvents as WorkspaceStoreState['simulatedHeldBackEvents'],
+    assistantState: normalizeAssistantState(obj.assistantState),
+  };
+}
+
+function normalizeAssistantState(raw: unknown): VerticeAssistantState | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return undefined;
+  }
+  const obj = raw as Record<string, unknown>;
+  const rawConfig =
+    obj.config && typeof obj.config === 'object' && !Array.isArray(obj.config)
+      ? (obj.config as Record<string, unknown>)
+      : undefined;
+  const config =
+    rawConfig &&
+    typeof rawConfig.connectionId === 'string' &&
+    typeof rawConfig.modelExternalId === 'string'
+      ? {
+          connectionId: rawConfig.connectionId,
+          modelExternalId: rawConfig.modelExternalId,
+          modelDisplayName:
+            typeof rawConfig.modelDisplayName === 'string'
+              ? rawConfig.modelDisplayName
+              : rawConfig.modelExternalId,
+          workspaceRoot:
+            typeof rawConfig.workspaceRoot === 'string'
+              ? rawConfig.workspaceRoot
+              : undefined,
+          externalTeamId:
+            typeof rawConfig.externalTeamId === 'string'
+              ? rawConfig.externalTeamId
+              : undefined,
+          externalSlotId:
+            typeof rawConfig.externalSlotId === 'string'
+              ? rawConfig.externalSlotId
+              : undefined,
+          externalConversationId:
+            typeof rawConfig.externalConversationId === 'string'
+              ? rawConfig.externalConversationId
+              : undefined,
+          nativeSessionId:
+            typeof rawConfig.nativeSessionId === 'string'
+              ? rawConfig.nativeSessionId
+              : undefined,
+          includeLiveDiagnostics: rawConfig.includeLiveDiagnostics !== false,
+          includeSourceContext: rawConfig.includeSourceContext !== false,
+          accessMode: 'read_only' as const,
+        }
+      : undefined;
+
+  const messages: VerticeAssistantMessage[] = Array.isArray(obj.messages)
+    ? obj.messages
+        .filter((m): m is Record<string, unknown> => Boolean(m && typeof m === 'object'))
+        .map((m) => {
+          const role: VerticeAssistantMessage['role'] =
+            m.role === 'user' || m.role === 'assistant' || m.role === 'system'
+              ? m.role
+              : 'assistant';
+          const status: NonNullable<VerticeAssistantMessage['status']> =
+            m.status === 'streaming' || m.status === 'completed' || m.status === 'error'
+              ? m.status
+              : 'completed';
+          const attachments = Array.isArray(m.attachments)
+            ? m.attachments
+                .filter(
+                  (a): a is Record<string, unknown> =>
+                    Boolean(a && typeof a === 'object' && typeof (a as Record<string, unknown>).name === 'string'),
+                )
+                .map((a, idx) => ({
+                  id:
+                    typeof a.id === 'string'
+                      ? a.id
+                      : `att_${idx}_${Math.random().toString(36).slice(2, 7)}`,
+                  name: a.name as string,
+                  kind: a.kind === 'image' ? ('image' as const) : ('text' as const),
+                  mimeType:
+                    typeof a.mimeType === 'string'
+                      ? a.mimeType
+                      : 'application/octet-stream',
+                  sizeBytes:
+                    typeof a.sizeBytes === 'number' && Number.isFinite(a.sizeBytes)
+                      ? a.sizeBytes
+                      : 0,
+                  truncated: a.truncated === true ? true : undefined,
+                }))
+            : undefined;
+          return {
+            id: typeof m.id === 'string' ? m.id : `ast_msg_${Math.random().toString(36).slice(2)}`,
+            role,
+            contentMarkdown:
+              typeof m.contentMarkdown === 'string' ? m.contentMarkdown : '',
+            timestamp:
+              typeof m.timestamp === 'string'
+                ? m.timestamp
+                : new Date().toISOString(),
+            status,
+            sourcesCited: Array.isArray(m.sourcesCited)
+              ? m.sourcesCited.filter((s): s is string => typeof s === 'string')
+              : undefined,
+            attachments: attachments && attachments.length > 0 ? attachments : undefined,
+          };
+        })
+    : [];
+
+  return {
+    config,
+    status:
+      obj.status === 'configuring' || obj.status === 'streaming' || obj.status === 'error'
+        ? obj.status
+        : 'idle',
+    lastError: typeof obj.lastError === 'string' ? obj.lastError : undefined,
+    messages,
   };
 }

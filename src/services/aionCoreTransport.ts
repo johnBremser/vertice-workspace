@@ -228,12 +228,58 @@ export class AionCoreHttpClient {
     teamId?: string;
     slotId?: string;
   }): Promise<T> {
+    const headers: Record<string, string> = {};
+    if (input.body !== undefined) {
+      headers['Content-Type'] = 'application/json';
+    }
+    return this.executeRequest<T>({
+      method: input.method,
+      path: input.path,
+      headers,
+      body: input.body !== undefined ? JSON.stringify(input.body) : undefined,
+      timeoutMs: input.timeoutMs,
+      operationName: input.operationName,
+      teamId: input.teamId,
+      slotId: input.slotId,
+    });
+  }
+
+  /**
+   * Sends a multipart/form-data POST request without forcing Content-Type so the runtime
+   * supplies the multipart boundary automatically while preserving auth/CSRF handling.
+   */
+  async requestMultipart<T>(input: {
+    path: string;
+    formData: FormData;
+    timeoutMs?: number;
+    operationName?: string;
+    teamId?: string;
+    slotId?: string;
+  }): Promise<T> {
+    return this.executeRequest<T>({
+      method: 'POST',
+      path: input.path,
+      body: input.formData,
+      timeoutMs: input.timeoutMs,
+      operationName: input.operationName,
+      teamId: input.teamId,
+      slotId: input.slotId,
+    });
+  }
+
+  private async executeRequest<T>(input: {
+    method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+    path: string;
+    headers?: Record<string, string>;
+    body?: BodyInit;
+    timeoutMs?: number;
+    operationName?: string;
+    teamId?: string;
+    slotId?: string;
+  }): Promise<T> {
     const operation = input.operationName ?? `${input.method} ${input.path}`;
     const performAttempt = async (): Promise<Response> => {
-      const headers: Record<string, string> = {};
-      if (input.body !== undefined) {
-        headers['Content-Type'] = 'application/json';
-      }
+      const headers: Record<string, string> = { ...(input.headers ?? {}) };
       if (this.bearerToken) {
         headers['Authorization'] = `Bearer ${this.bearerToken}`;
       }
@@ -255,8 +301,7 @@ export class AionCoreHttpClient {
           method: input.method,
           credentials: 'include',
           headers,
-          body:
-            input.body !== undefined ? JSON.stringify(input.body) : undefined,
+          body: input.body,
           signal: controller.signal,
         });
       } catch (err) {

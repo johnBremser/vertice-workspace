@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from 'react';
 import type {
+  ConnectionAdapterConfig,
   ConversationProjection,
   CoreRuntimeSettings,
   DemoModelTier,
@@ -22,6 +23,7 @@ import type {
   TaskReview,
   TeamPreset,
   TeamPresetMember,
+  VerticeAssistantState,
   WorkspaceStoreState,
 } from '../../domain/types';
 import { AionCoreAdapter } from '../../services/aionCoreAdapter';
@@ -29,6 +31,7 @@ import {
   GatewayCapabilityError,
   type AgentWorkspaceGateway,
   type CoreDiagnosticEntry,
+  type CoreTeamSummary,
 } from '../../services/gateway';
 import {
   IndexedDbStorageDriver,
@@ -70,6 +73,16 @@ export async function probeCoreSessionOnStartup(
     if (!shouldContinue()) return;
     if (auth.authenticated) {
       await gateway.core.refreshCoreCatalog();
+      if (!shouldContinue()) return;
+      try {
+        if (gateway.core.ensureWebSocketConnected) {
+          await gateway.core.ensureWebSocketConnected();
+        } else {
+          await gateway.core.connectWebSocket();
+        }
+      } catch {
+        // Conexão WebSocket inicial em melhor esforço durante abertura silenciosa.
+      }
     }
   } catch {
     // Revalidação silenciosa inicial: falhas de rede/502 já atualizam coreRuntimeStatus
@@ -126,6 +139,12 @@ interface WorkspaceContextValue {
     workspacePathInfo: string;
   }) => Promise<void>;
   renameProject: (projectId: string, name: string) => Promise<void>;
+  updateProject: (input: {
+    projectId: string;
+    name: string;
+    description?: string;
+    workspacePathInfo?: string;
+  }) => Promise<void>;
   setProjectArchived: (projectId: string, archived: boolean) => Promise<void>;
   createConversation: (
     projectId: string,
@@ -147,7 +166,7 @@ interface WorkspaceContextValue {
   ) => Promise<void>;
   saveTeamPreset: (
     preset: Omit<TeamPreset, 'id'> & { id?: string },
-  ) => Promise<void>;
+  ) => Promise<TeamPreset>;
   applyTeamPreset: (presetId: string) => Promise<void>;
   addParticipantToConversation: (member: TeamPresetMember) => Promise<void>;
   removeParticipantFromConversation: (
@@ -229,10 +248,53 @@ interface WorkspaceContextValue {
   coreLogout: () => Promise<void>;
   coreRefreshCatalog: () => Promise<void>;
   coreSyncTeams: () => Promise<void>;
-  coreCreateTeamForActiveConversation: () => Promise<void>;
+  coreDeleteTeam: (teamId: string) => Promise<void>;
+  coreCleanupOrphanTeams: () => Promise<void>;
+  coreTeamsList: CoreTeamSummary[];
+  coreCreateTeamForActiveConversation: (teamName?: string) => Promise<void>;
   coreConnectWs: () => Promise<void>;
   coreDisconnectWs: () => void;
   coreGetDiagnostics: () => CoreDiagnosticEntry[];
+
+  // Vertice Floating Assistant & Knowledge Base
+  assistantState: VerticeAssistantState;
+  assistantEligibleConnections: ConnectionAdapterConfig[];
+  assistantOpen: boolean;
+  assistantTab: 'chat' | 'kb' | 'source';
+  assistantSourcePreviewPath: string | null;
+  setAssistantOpen: (open: boolean) => void;
+  setAssistantTab: (tab: 'chat' | 'kb' | 'source') => void;
+  openAssistantSourceFile: (relPath: string) => void;
+  configureVerticeAssistant: (input: {
+    connectionId: string;
+    modelExternalId: string;
+    modelDisplayName: string;
+    includeLiveDiagnostics?: boolean;
+    includeSourceContext?: boolean;
+  }) => Promise<void>;
+  updateVerticeAssistantPreferences: (input: {
+    includeLiveDiagnostics?: boolean;
+    includeSourceContext?: boolean;
+  }) => void;
+  sendVerticeAssistantMessage: (input: {
+    prompt: string;
+    sourceQuery?: string;
+    attachments?: Array<{
+      id: string;
+      name: string;
+      kind: 'image' | 'text';
+      mimeType: string;
+      sizeBytes: number;
+      textContent?: string;
+      truncated?: boolean;
+      file?: File;
+    }>;
+  }) => Promise<void>;
+  respondVerticeAssistantPermission: (
+    requestId: string,
+    decision: 'approved' | 'denied',
+  ) => Promise<void>;
+  clearVerticeAssistantHistory: () => Promise<void>;
 }
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
@@ -308,6 +370,10 @@ export function WorkspaceProvider({
     useState<HighlightTarget | null>(null);
   const [actionBanner, setActionBanner] = useState<ActionBanner | null>(null);
   const [gatewayGeneration, setGatewayGeneration] = useState(0);
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [assistantTab, setAssistantTab] = useState<'chat' | 'kb' | 'source'>('chat');
+  const [assistantSourcePreviewPath, setAssistantSourcePreviewPath] = useState<string | null>(null);
+  const [coreTeamsList, setCoreTeamsList] = useState<CoreTeamSummary[]>([]);
 
   const draftsRef = useRef<Record<string, string>>({});
   const [draftVersion, setDraftVersion] = useState(0);
@@ -555,6 +621,30 @@ export function WorkspaceProvider({
 
   void gatewayGeneration;
 
+  const assistantState: VerticeAssistantState = store?.assistantState ?? {
+    status: 'idle',
+    messages: [],
+  };
+
+  const assistantEligibleConnections = useMemo(() => {
+    if (!store || store.executionMode !== 'aion_core' || !store.coreSessionAuthenticated) {
+      return [];
+    }
+    return store.connections.filter(
+      (c) =>
+        c.mode === 'aion_core' &&
+        Boolean(c.coreAssistantId) &&
+        c.catalogLoaded &&
+        c.availableModels.some((m) => m.confirmed),
+    );
+  }, [store]);
+
+  const openAssistantSourceFile = useCallback((relPath: string) => {
+    setAssistantSourcePreviewPath(relPath);
+    setAssistantTab('source');
+    setAssistantOpen(true);
+  }, []);
+
   const value: WorkspaceContextValue = {
     loading,
     store,
@@ -624,6 +714,10 @@ export function WorkspaceProvider({
       runAction(async () => {
         await gatewayRef.current!.renameProject(projectId, name);
       }),
+    updateProject: async (input) =>
+      runAction(async () => {
+        await gatewayRef.current!.updateProject(input);
+      }),
     setProjectArchived: async (projectId, archived) =>
       runAction(async () => {
         await gatewayRef.current!.setProjectArchived(projectId, archived);
@@ -664,14 +758,14 @@ export function WorkspaceProvider({
           archived,
         );
       }),
-    saveTeamPreset: async (preset) =>
-      runAction(async () => {
-        await gatewayRef.current!.saveTeamPreset(preset);
-        setActionBanner({
-          tone: 'success',
-          message: 'Preset de equipe salvo para novas conversas.',
-        });
-      }),
+    saveTeamPreset: async (preset) => {
+      const saved = await gatewayRef.current!.saveTeamPreset(preset);
+      setActionBanner({
+        tone: 'success',
+        message: 'Preset de equipe salvo para novas conversas.',
+      });
+      return saved;
+    },
     applyTeamPreset: async (presetId) =>
       runAction(async () => {
         if (!activeConversationId) return;
@@ -766,6 +860,14 @@ export function WorkspaceProvider({
     sendMessage: async (bodyMarkdown, promoteToSharedContext) =>
       runAction(async () => {
         if (!activeConversationId) return;
+        const core = gatewayRef.current?.core;
+        if (core?.ensureWebSocketConnected) {
+          try {
+            await core.ensureWebSocketConnected(activeConversationId);
+          } catch {
+            // Melhor esforço: fallback HTTP / reconciliação continua tratando o envio.
+          }
+        }
         await gatewayRef.current!.sendMessage({
           conversationId: activeConversationId,
           targetTab: activeTabId,
@@ -898,6 +1000,15 @@ export function WorkspaceProvider({
         if (res.authenticated) {
           try {
             const cat = await core.refreshCoreCatalog();
+            try {
+              if (core.ensureWebSocketConnected) {
+                await core.ensureWebSocketConnected(activeConversationId || undefined);
+              } else {
+                await core.connectWebSocket(activeConversationId || undefined);
+              }
+            } catch {
+              // Conexão WebSocket automática em melhor esforço após login.
+            }
             setActionBanner({
               tone: 'success',
               message: `${res.message} ${cat.message}`,
@@ -925,13 +1036,31 @@ export function WorkspaceProvider({
     coreSyncTeams: async () =>
       runAction(async () => {
         const res = await requireCoreOps().syncCoreTeams();
+        setCoreTeamsList(res.teams);
         setActionBanner({ tone: 'info', message: res.message });
       }),
-    coreCreateTeamForActiveConversation: async () =>
+    coreDeleteTeam: async (teamId: string) =>
+      runAction(async () => {
+        const res = await requireCoreOps().deleteCoreTeam(teamId);
+        setCoreTeamsList(res.teams);
+        setActionBanner({ tone: 'success', message: res.message });
+      }),
+    coreCleanupOrphanTeams: async () =>
+      runAction(async () => {
+        const res = await requireCoreOps().cleanupOrphanCoreTeams();
+        setCoreTeamsList(res.teams);
+        setActionBanner({
+          tone: res.failedCount > 0 ? 'warning' : 'success',
+          message: res.message,
+        });
+      }),
+    coreTeamsList,
+    coreCreateTeamForActiveConversation: async (teamName?: string) =>
       runAction(async () => {
         if (!activeConversationId) return;
         const res = await requireCoreOps().createCoreTeamForConversation(
           activeConversationId,
+          teamName,
         );
         setActionBanner({ tone: 'success', message: res.message });
       }),
@@ -949,6 +1078,37 @@ export function WorkspaceProvider({
     coreGetDiagnostics: () => {
       return gatewayRef.current?.core?.getDiagnostics() ?? [];
     },
+    assistantState,
+    assistantEligibleConnections,
+    assistantOpen,
+    assistantTab,
+    assistantSourcePreviewPath,
+    setAssistantOpen,
+    setAssistantTab,
+    openAssistantSourceFile,
+    configureVerticeAssistant: async (input) =>
+      runAction(async () => {
+        const res = await requireCoreOps().configureVerticeAssistant(input);
+        setActionBanner({ tone: 'success', message: res.message });
+      }),
+    updateVerticeAssistantPreferences: (input) => {
+      gatewayRef.current?.core?.updateVerticeAssistantPreferences(input);
+    },
+    sendVerticeAssistantMessage: async (input) =>
+      runAction(async () => {
+        await requireCoreOps().sendVerticeAssistantMessage(input);
+      }),
+    respondVerticeAssistantPermission: async (requestId, decision) =>
+      runAction(async () => {
+        await requireCoreOps().respondVerticeAssistantPermission({
+          requestId,
+          decision,
+        });
+      }),
+    clearVerticeAssistantHistory: async () =>
+      runAction(async () => {
+        await requireCoreOps().clearVerticeAssistantHistory();
+      }),
   };
 
   return (

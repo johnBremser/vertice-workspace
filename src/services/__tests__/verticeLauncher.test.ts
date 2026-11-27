@@ -40,6 +40,10 @@ async function createIsolatedWorkspace() {
   await fs.mkdir(path.join(dir, 'dist'), { recursive: true });
   await fs.mkdir(path.join(dir, '.vertice'), { recursive: true });
   await fs.copyFile(
+    path.join(REPO_ROOT, 'scripts', 'node-compat.mjs'),
+    path.join(dir, 'scripts', 'node-compat.mjs'),
+  );
+  await fs.copyFile(
     path.join(REPO_ROOT, 'scripts', 'vertice-ctl.mjs'),
     path.join(dir, 'scripts', 'vertice-ctl.mjs'),
   );
@@ -428,5 +432,18 @@ describe('Launcher identity & lifecycle safety (V6-00)', () => {
     expect(doctorUnreachable.stdout).toContain('inacessível');
     expect(doctorUnreachable.stdout).toContain('inicie o binário externo AionCore');
     expect(doctorUnreachable.stdout).not.toContain('URL inválida');
+  });
+
+  it('refuses start on unsupported Node before stopping an active verified instance (BL-03)', async () => {
+    const ctlSource = await fs.readFile(
+      path.join(REPO_ROOT, 'scripts', 'vertice-ctl.mjs'),
+      'utf8',
+    );
+    const cmdStartIdx = ctlSource.indexOf('async function cmdStart(');
+    const assertIdx = ctlSource.indexOf("assertSupportedNodeVersion('server:start')", cmdStartIdx);
+    const stopIdx = ctlSource.indexOf('await cmdStop(', cmdStartIdx);
+    expect(cmdStartIdx).toBeGreaterThan(-1);
+    expect(assertIdx).toBeGreaterThan(cmdStartIdx);
+    expect(stopIdx).toBeGreaterThan(assertIdx);
   });
 });

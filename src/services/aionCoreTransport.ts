@@ -58,6 +58,10 @@ export interface AionCoreTransportOptions {
   readCookie?: (name: string) => string | undefined;
   timeoutMs?: number;
   diagnostics?: CoreDiagnosticsLog;
+  verifyWorkspaceTargetPath?: (
+    workspaceRoot: string,
+    targetPath: string,
+  ) => Promise<boolean>;
 }
 
 export function normalizeBaseUrl(rawUrl?: string): string {

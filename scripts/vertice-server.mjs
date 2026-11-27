@@ -29,6 +29,13 @@ try {
   workspaceDiffReader = null;
 }
 
+let nodeCompat = null;
+try {
+  nodeCompat = await import('./node-compat.mjs');
+} catch {
+  nodeCompat = null;
+}
+
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
@@ -379,6 +386,16 @@ export async function startVerticeServer(options = {}) {
     fileEnv.VITE_AIONCORE_PROXY_TARGET ??
     '',
   ).trim();
+  const allowedWorkspaces = Array.isArray(options.allowedWorkspaces)
+    ? options.allowedWorkspaces
+    : undefined;
+  const allowedWorkspacesEnv = String(
+    process.env.VERTICE_ALLOWED_WORKSPACES ??
+    fileEnv.VERTICE_ALLOWED_WORKSPACES ??
+    process.env.VERTICE_WORKSPACE_ROOT ??
+    fileEnv.VERTICE_WORKSPACE_ROOT ??
+    '',
+  ).trim();
   const instanceId = String(
     options.instanceId ?? process.env.VERTICE_INSTANCE_ID ?? '',
   ).trim();
@@ -517,7 +534,11 @@ export async function startVerticeServer(options = {}) {
         workspaceDiffReader &&
         workspaceDiffReader.shouldHandleWorkspaceDiffRequest(reqUrl)
       ) {
-        void workspaceDiffReader.handleWorkspaceDiffRequest(req, res);
+        void workspaceDiffReader.handleWorkspaceDiffRequest(req, res, {
+          rootDir,
+          allowedWorkspaces,
+          allowedWorkspacesEnv,
+        });
         return;
       }
 
@@ -647,6 +668,7 @@ const isEntrypoint =
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (isEntrypoint) {
+  nodeCompat?.assertSupportedNodeVersion('start');
   try {
     let instance = null;
     instance = await startVerticeServer({

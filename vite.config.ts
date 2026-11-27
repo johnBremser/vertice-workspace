@@ -10,7 +10,10 @@ import {
   shouldHandleWorkspaceDiffRequest,
 } from './scripts/vertice-workspace-diff.mjs';
 
-function verticeAssistantSourcePlugin(rootDir: string): Plugin {
+function verticeAssistantSourcePlugin(
+  rootDir: string,
+  allowedWorkspacesEnv: string,
+): Plugin {
   return {
     name: 'vertice-assistant-source-reader',
     configureServer(server) {
@@ -22,7 +25,10 @@ function verticeAssistantSourcePlugin(rootDir: string): Plugin {
           return;
         }
         if (shouldHandleWorkspaceDiffRequest(req.url)) {
-          void handleWorkspaceDiffRequest(req, res);
+          void handleWorkspaceDiffRequest(req, res, {
+            rootDir,
+            allowedWorkspacesEnv,
+          });
           return;
         }
         next();
@@ -38,12 +44,19 @@ export default defineConfig(({ mode }) => {
     process.env.VITE_AIONCORE_PROXY_TARGET ||
     ''
   ).trim();
+  const allowedWorkspacesEnv = (
+    env.VERTICE_ALLOWED_WORKSPACES ||
+    process.env.VERTICE_ALLOWED_WORKSPACES ||
+    env.VERTICE_WORKSPACE_ROOT ||
+    process.env.VERTICE_WORKSPACE_ROOT ||
+    ''
+  ).trim();
 
   return {
     plugins: [
       react(),
       tailwindcss(),
-      verticeAssistantSourcePlugin(import.meta.dirname),
+      verticeAssistantSourcePlugin(import.meta.dirname, allowedWorkspacesEnv),
       // Copies src/assets into dist/ so root-relative URLs like
       // "/src/assets/images/..." (e.g. generate_image output) still resolve
       // in production builds. Do not remove.
@@ -96,28 +109,28 @@ export default defineConfig(({ mode }) => {
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
       proxy: proxyTarget
         ? {
-            '/api': {
-              target: proxyTarget,
-              changeOrigin: false,
-            },
-            '/health': {
-              target: proxyTarget,
-              changeOrigin: false,
-            },
-            '/login': {
-              target: proxyTarget,
-              changeOrigin: false,
-            },
-            '/logout': {
-              target: proxyTarget,
-              changeOrigin: false,
-            },
-            '/ws': {
-              target: proxyTarget,
-              ws: true,
-              changeOrigin: false,
-            },
-          }
+          '/api': {
+            target: proxyTarget,
+            changeOrigin: false,
+          },
+          '/health': {
+            target: proxyTarget,
+            changeOrigin: false,
+          },
+          '/login': {
+            target: proxyTarget,
+            changeOrigin: false,
+          },
+          '/logout': {
+            target: proxyTarget,
+            changeOrigin: false,
+          },
+          '/ws': {
+            target: proxyTarget,
+            ws: true,
+            changeOrigin: false,
+          },
+        }
         : undefined,
     },
   };

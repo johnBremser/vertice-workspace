@@ -12,8 +12,10 @@ import {
 } from '../presets';
 import {
   classifyToolPermissionKind,
+  extractPermissionTargetPaths,
   hasBlockingDenialForAutoApproval,
   isPermissionStillBlocked,
+  isTargetPathWithinWorkspace,
   shouldAutoApprovePermission,
   validateTaskInput,
 } from '../taskRules';
@@ -673,12 +675,21 @@ describe('V4 Domain, Migration, Configurable Teams, Protocol & Backup', () => {
     expect(classifyToolPermissionKind('execute', 'Executar testes', 'npm test')).toBe('execute');
     expect(classifyToolPermissionKind('unknown_tool', 'Ação desconhecida', 'foo')).toBe('execute');
 
-    expect(shouldAutoApprovePermission(undefined, 'read')).toBe(false);
-    expect(shouldAutoApprovePermission('manual', 'read')).toBe(false);
-    expect(shouldAutoApprovePermission('allow_read_edit', 'read')).toBe(true);
-    expect(shouldAutoApprovePermission('allow_read_edit', 'edit')).toBe(true);
-    expect(shouldAutoApprovePermission('allow_read_edit', 'execute')).toBe(false);
+    expect(shouldAutoApprovePermission(undefined, 'read', { workspaceVerified: true })).toBe(false);
+    expect(shouldAutoApprovePermission('manual', 'read', { workspaceVerified: true })).toBe(false);
+    expect(shouldAutoApprovePermission('allow_read_edit', 'read')).toBe(false);
+    expect(shouldAutoApprovePermission('allow_read_edit', 'read', { workspaceVerified: false })).toBe(false);
+    expect(shouldAutoApprovePermission('allow_read_edit', 'read', { workspaceVerified: true })).toBe(true);
+    expect(shouldAutoApprovePermission('allow_read_edit', 'edit', { workspaceVerified: true })).toBe(true);
+    expect(shouldAutoApprovePermission('allow_read_edit', 'execute', { workspaceVerified: true })).toBe(false);
     expect(shouldAutoApprovePermission('allow_all_in_conversation', 'execute')).toBe(true);
+
+    expect(extractPermissionTargetPaths({ path: 'src/App.tsx' })).toEqual(['src/App.tsx']);
+    expect(extractPermissionTargetPaths({})).toEqual([]);
+    expect(isTargetPathWithinWorkspace('src/App.tsx', 'C:/repo')).toBe(true);
+    expect(isTargetPathWithinWorkspace('C:\\repo\\src\\App.tsx', 'C:/repo')).toBe(true);
+    expect(isTargetPathWithinWorkspace('../outside.txt', 'C:/repo')).toBe(false);
+    expect(isTargetPathWithinWorkspace('C:/Windows/win.ini', 'C:/repo')).toBe(false);
 
     const deniedPerms: PermissionRequest[] = [
       {
@@ -693,6 +704,21 @@ describe('V4 Domain, Migration, Configurable Teams, Protocol & Backup', () => {
         status: 'denied',
         createdAt: '2026-11-27T10:00:00Z',
         sourceEventId: 'evt_1',
+        isSimulated: false,
+      },
+      // Approving a DIFFERENT scopeKey must NOT clear the earlier denial!
+      {
+        id: 'perm_approved_other_scope',
+        conversationId: 'conv_1',
+        participantId: 'part_exec',
+        actionKey: 'execute',
+        scopeKey: 'ext_1:call_other',
+        actionTitle: 'Rodar outro comando',
+        commandSimulated: 'echo ok',
+        scopeDescription: 'Core',
+        status: 'approved',
+        createdAt: '2026-11-27T10:01:00Z',
+        sourceEventId: 'evt_2',
         isSimulated: false,
       },
     ];

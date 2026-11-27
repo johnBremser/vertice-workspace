@@ -480,6 +480,7 @@ export interface WorkspaceConversation {
   executionMode: ExecutionMode;
   teamPresetId?: string;
   externalTeamId?: string;
+  coreTeamWorkspace?: string;
   coreLeadParticipantId?: string;
   coreTeamNeedsResync?: boolean;
   importedExternalTeamId?: string;

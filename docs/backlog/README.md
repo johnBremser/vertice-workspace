@@ -4,7 +4,7 @@ Centralize nesta pasta as listas de backlog e as propostas de melhorias futuras 
 
 ## Listas e propostas
 
-- [Melhorias e estabilização](melhorias.md): melhorias funcionais, ambiente, documentação, desempenho, persistência, contratos, modularização e recuperação (BL-01 a BL-09).
+- [Melhorias e estabilização](melhorias.md): fila ativa de melhorias e estabilização (`BL-04` a `BL-09`; `BL-01` a `BL-03` concluídos e registrados no [CHANGELOG.md](../../CHANGELOG.md)).
 - [Persistência em SQLite](sqlite-workspace-persistence.md): proposta de armazenamento local independente do navegador, com migração e controle de concorrência.
 - [Worker local de orquestração](future-background-worker.md): proposta de continuidade dos fluxos autorizados sem depender de uma aba aberta.
 

@@ -229,18 +229,193 @@ export function classifyToolPermissionKind(
 }
 
 /**
+ * Extracts candidate target file/directory paths from an ACP permission payload.
+ */
+export function extractPermissionTargetPaths(
+  rawInput: unknown,
+  toolCall?: Record<string, unknown>,
+  permInner?: Record<string, unknown>,
+): string[] {
+  const candidates: string[] = [];
+  const pushString = (val: unknown) => {
+    if (typeof val === 'string') {
+      const trimmed = val.trim();
+      if (trimmed) candidates.push(trimmed);
+    }
+  };
+
+  if (rawInput && typeof rawInput === 'object' && !Array.isArray(rawInput)) {
+    const inputRec = rawInput as Record<string, unknown>;
+    for (const key of [
+      'path',
+      'file_path',
+      'filePath',
+      'target_path',
+      'targetPath',
+      'file',
+      'filename',
+      'directory',
+      'dir',
+      'cwd',
+    ]) {
+      pushString(inputRec[key]);
+    }
+    for (const arrKey of ['paths', 'files']) {
+      const arr = inputRec[arrKey];
+      if (Array.isArray(arr)) {
+        for (const item of arr) pushString(item);
+      }
+    }
+    if (Array.isArray(inputRec.edits)) {
+      for (const edit of inputRec.edits) {
+        if (edit && typeof edit === 'object') {
+          const editRec = edit as Record<string, unknown>;
+          pushString(editRec.path ?? editRec.file_path ?? editRec.filePath);
+        }
+      }
+    }
+  }
+
+  if (toolCall && Array.isArray(toolCall.locations)) {
+    for (const loc of toolCall.locations) {
+      if (loc && typeof loc === 'object') {
+        const locRec = loc as Record<string, unknown>;
+        pushString(locRec.path);
+        if (typeof locRec.uri === 'string') {
+          const uri = locRec.uri.trim();
+          if (uri.toLowerCase().startsWith('file:///')) {
+            const stripped = decodeURIComponent(uri.slice('file:///'.length));
+            pushString(/^[a-zA-Z]:/.test(stripped) ? stripped : `/${stripped}`);
+          }
+        }
+      }
+    }
+  }
+
+  if (permInner) {
+    pushString(permInner.path ?? permInner.file_path ?? permInner.filePath);
+  }
+
+  return Array.from(new Set(candidates));
+}
+
+function normalizePosixOrWinSegments(
+  rawPath: string,
+): { root: string; segments: string[]; isWindowsDrive: boolean } | null {
+  if (!rawPath || rawPath.includes('\0')) return null;
+  const slash = rawPath.trim().replaceAll('\\', '/');
+  if (!slash || slash.startsWith('~') || /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(slash)) {
+    return null;
+  }
+
+  const driveMatch = slash.match(/^([a-zA-Z]:)(?:\/(.*))?$/);
+  if (driveMatch) {
+    const root = `${driveMatch[1].toUpperCase()}/`;
+    const rest = (driveMatch[2] ?? '').split('/').filter(Boolean);
+    const segments: string[] = [];
+    for (const seg of rest) {
+      if (seg === '.') continue;
+      if (seg === '..') {
+        if (segments.length === 0) return null;
+        segments.pop();
+      } else {
+        segments.push(seg);
+      }
+    }
+    return { root, segments, isWindowsDrive: true };
+  }
+
+  if (slash.startsWith('/')) {
+    const rest = slash.split('/').filter(Boolean);
+    const segments: string[] = [];
+    for (const seg of rest) {
+      if (seg === '.') continue;
+      if (seg === '..') {
+        if (segments.length === 0) return null;
+        segments.pop();
+      } else {
+        segments.push(seg);
+      }
+    }
+    return { root: '/', segments, isWindowsDrive: false };
+  }
+
+  return null;
+}
+
+/**
+ * Verifies whether a candidate target path stays strictly inside `workspaceRoot`.
+ */
+export function isTargetPathWithinWorkspace(
+  targetPath: string,
+  workspaceRoot: string,
+): boolean {
+  const rootNorm = normalizePosixOrWinSegments(workspaceRoot);
+  if (!rootNorm) return false;
+
+  const trimmed = targetPath.trim().replaceAll('\\', '/');
+  if (!trimmed || trimmed.includes('\0') || trimmed.startsWith('~')) {
+    return false;
+  }
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {
+    return false;
+  }
+
+  const isAbsoluteTarget =
+    trimmed.startsWith('/') || /^[a-zA-Z]:(?:\/|$)/.test(trimmed);
+
+  let targetNorm: { root: string; segments: string[]; isWindowsDrive: boolean } | null;
+  if (!isAbsoluteTarget) {
+    const relSegments = [...rootNorm.segments];
+    for (const seg of trimmed.split('/').filter(Boolean)) {
+      if (seg === '.') continue;
+      if (seg === '..') {
+        if (relSegments.length <= rootNorm.segments.length) {
+          return false;
+        }
+        relSegments.pop();
+      } else {
+        relSegments.push(seg);
+      }
+    }
+    targetNorm = {
+      root: rootNorm.root,
+      segments: relSegments,
+      isWindowsDrive: rootNorm.isWindowsDrive,
+    };
+  } else {
+    targetNorm = normalizePosixOrWinSegments(trimmed);
+  }
+
+  if (!targetNorm) return false;
+  if (targetNorm.root !== rootNorm.root) return false;
+  if (targetNorm.segments.length < rootNorm.segments.length) return false;
+
+  const caseInsensitive = rootNorm.isWindowsDrive;
+  for (let i = 0; i < rootNorm.segments.length; i += 1) {
+    const a = rootNorm.segments[i];
+    const b = targetNorm.segments[i];
+    if (caseInsensitive ? a.toLowerCase() !== b.toLowerCase() : a !== b) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Determines whether a classified tool permission may be auto-approved under
  * the active conversation tool-approval policy.
  */
 export function shouldAutoApprovePermission(
   policy: ConversationToolApprovalPolicy | undefined,
   kind: ToolPermissionKind,
+  options?: { workspaceVerified?: boolean },
 ): boolean {
   if (!policy || policy === 'manual') {
     return false;
   }
   if (policy === 'allow_read_edit') {
-    return kind === 'read' || kind === 'edit';
+    return (kind === 'read' || kind === 'edit') && options?.workspaceVerified === true;
   }
   return policy === 'allow_all_in_conversation';
 }
@@ -289,6 +464,7 @@ export function hasBlockingDenialForAutoApproval(
       return (
         later.participantId === req.participantId &&
         later.actionKey === req.actionKey &&
+        later.scopeKey === req.scopeKey &&
         (!req.taskId || !later.taskId || req.taskId === later.taskId)
       );
     });

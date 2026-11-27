@@ -21,7 +21,9 @@ import { getLatestContextRevision } from '../domain/selectors';
 import {
   areTaskDependenciesSatisfied,
   classifyToolPermissionKind,
+  extractPermissionTargetPaths,
   hasBlockingDenialForAutoApproval,
+  isTargetPathWithinWorkspace,
   shouldAutoApprovePermission,
   validateTaskInput,
 } from '../domain/taskRules';
@@ -73,6 +75,7 @@ import {
   readAssistantSourceFile,
   searchAssistantSourceFiles,
 } from './assistantSourceClient';
+import { verifyWorkspaceTargetPathOnHost } from './workspaceDiffClient';
 import {
   assertHealthResponse,
   CORE_WS_EVENTS,
@@ -643,6 +646,10 @@ export class AionCoreAdapter
   private readonly diagnostics = new CoreDiagnosticsLog();
   private readonly httpClient: AionCoreHttpClient;
   private readonly wsClient: AionCoreWsClient;
+  private readonly verifyWorkspaceTargetPath: (
+    workspaceRoot: string,
+    targetPath: string,
+  ) => Promise<boolean>;
   private listeners = new Set<GatewayEventListener>();
   private stateListeners = new Set<(state: WorkspaceStoreState) => void>();
   private activeTabByConversation: Record<string, string> = {};
@@ -736,6 +743,9 @@ export class AionCoreAdapter
       wsFactory: transportOptions.wsFactory,
       diagnostics: this.diagnostics,
     });
+    this.verifyWorkspaceTargetPath =
+      transportOptions.verifyWorkspaceTargetPath ??
+      verifyWorkspaceTargetPathOnHost;
   }
 
   private nextId(prefix: string): string {
@@ -1650,6 +1660,9 @@ export class AionCoreAdapter
           conversation: {
             ...convProj.conversation,
             externalTeamId: team.id,
+            ...(typeof team.workspace === 'string' && team.workspace.trim()
+              ? { coreTeamWorkspace: team.workspace.trim() }
+              : {}),
             ...(mappedLeadParticipantId
               ? { coreLeadParticipantId: mappedLeadParticipantId }
               : {}),
@@ -1977,6 +1990,10 @@ export class AionCoreAdapter
           conversation: {
             ...latestProj.conversation,
             externalTeamId: team.id,
+            coreTeamWorkspace:
+              (typeof team.workspace === 'string' && team.workspace.trim()) ||
+              body.workspace?.trim() ||
+              undefined,
             coreLeadParticipantId: resolvedCoordinatorId,
             coreTeamNeedsResync: false,
             ...(previousTeamId &&
@@ -3273,19 +3290,37 @@ export class AionCoreAdapter
 
               const policy = latestProj.conversation.toolApprovalPolicy ?? 'manual';
               const permKind = classifyToolPermissionKind(kindLabel, title, rawCmd);
-              const blockedByPriorDenial = hasBlockingDenialForAutoApproval(
-                previousPermissions,
-                participant.id,
-                kindLabel,
-                scopeKey,
-                activeTask?.id,
+              const targetPaths = extractPermissionTargetPaths(
+                rawInput,
+                toolCall,
+                permInner,
               );
-              if (
+              const knownTeamWorkspace =
+                latestProj.conversation.coreTeamWorkspace?.trim() ?? '';
+              const canAttemptAutoApprove =
                 latestProj.conversation.executionStatus !== 'paused_queue' &&
-                shouldAutoApprovePermission(policy, permKind) &&
-                !blockedByPriorDenial
-              ) {
+                !hasBlockingDenialForAutoApproval(
+                  previousPermissions,
+                  participant.id,
+                  kindLabel,
+                  scopeKey,
+                  activeTask?.id,
+                ) &&
+                (policy === 'allow_all_in_conversation' ||
+                  (policy === 'allow_read_edit' &&
+                    (permKind === 'read' || permKind === 'edit') &&
+                    targetPaths.length > 0 &&
+                    (knownTeamWorkspace
+                      ? targetPaths.every((tp) =>
+                          isTargetPathWithinWorkspace(tp, knownTeamWorkspace),
+                        )
+                      : Boolean(latestProj.conversation.externalTeamId))));
+
+              if (canAttemptAutoApprove) {
                 const resolvedMsgId = msgId ?? rawCallId;
+                const originalTeamId = latestProj.conversation.externalTeamId;
+                const originalSlotId = participant.sessionRef.externalSlotId;
+                const originalExtConvId = extConvId;
                 this.enqueueBackgroundWork(async () => {
                   const currentProj = this.state?.conversations[convId];
                   const currentPerm = currentProj?.permissions.find(
@@ -3301,9 +3336,123 @@ export class AionCoreAdapter
                   }
                   const activePolicy =
                     currentProj.conversation.toolApprovalPolicy ?? 'manual';
-                  if (!shouldAutoApprovePermission(activePolicy, permKind)) {
+                  if (
+                    activePolicy === 'manual' ||
+                    (activePolicy === 'allow_read_edit' &&
+                      permKind !== 'read' &&
+                      permKind !== 'edit')
+                  ) {
                     return;
                   }
+
+                  let effectiveTeamWorkspace =
+                    currentProj.conversation.coreTeamWorkspace?.trim() ?? '';
+                  if (
+                    activePolicy === 'allow_read_edit' &&
+                    !effectiveTeamWorkspace &&
+                    currentProj.conversation.externalTeamId
+                  ) {
+                    // Pre-update bound team without cached workspace: confirm real workspace with Core (never guess from current settings).
+                    try {
+                      await this.syncCoreTeams();
+                    } catch {
+                      return;
+                    }
+                    effectiveTeamWorkspace =
+                      this.state?.conversations[convId]?.conversation.coreTeamWorkspace?.trim() ??
+                      '';
+                  }
+
+                  let workspaceVerified = false;
+                  if (activePolicy === 'allow_read_edit') {
+                    if (
+                      !effectiveTeamWorkspace ||
+                      targetPaths.length === 0 ||
+                      !targetPaths.every((tp) =>
+                        isTargetPathWithinWorkspace(tp, effectiveTeamWorkspace),
+                      )
+                    ) {
+                      return;
+                    }
+                    // Fail-closed real filesystem verification: confirm every target resolves inside effectiveTeamWorkspace.
+                    for (const tp of targetPaths) {
+                      let realOk = false;
+                      try {
+                        realOk = await this.verifyWorkspaceTargetPath(
+                          effectiveTeamWorkspace,
+                          tp,
+                        );
+                      } catch {
+                        realOk = false;
+                      }
+                      if (!realOk) {
+                        return;
+                      }
+                    }
+                    workspaceVerified = true;
+                  }
+
+                  // Revalidate live conversation state AND team/session/workspace binding immediately before sending POST .../confirm
+                  // in case the user paused the queue, switched to manual, denied another request, or recreated the team while awaiting disk/Core checks.
+                  const livePending = this.pendingCoreConfirmations.get(reqId);
+                  if (
+                    !livePending ||
+                    livePending.convId !== convId ||
+                    livePending.participantId !== participant.id ||
+                    livePending.extConvId !== originalExtConvId ||
+                    livePending.callId !== rawCallId
+                  ) {
+                    return;
+                  }
+                  const preConfirmProj = this.state?.conversations[convId];
+                  const preConfirmPerm = preConfirmProj?.permissions.find(
+                    (p) => p.id === reqId,
+                  );
+                  const liveParticipant = preConfirmProj?.participants.find(
+                    (p) => p.id === participant.id,
+                  );
+                  if (
+                    !preConfirmProj ||
+                    !preConfirmPerm ||
+                    !liveParticipant ||
+                    preConfirmPerm.status !== 'pending' ||
+                    preConfirmProj.conversation.executionStatus === 'paused_queue' ||
+                    preConfirmProj.conversation.externalTeamId !== originalTeamId ||
+                    liveParticipant.sessionRef.externalTeamId !== originalTeamId ||
+                    liveParticipant.sessionRef.externalSlotId !== originalSlotId ||
+                    liveParticipant.sessionRef.externalConversationId !== originalExtConvId
+                  ) {
+                    return;
+                  }
+                  const finalPolicy =
+                    preConfirmProj.conversation.toolApprovalPolicy ?? 'manual';
+                  const liveTeamWorkspace =
+                    preConfirmProj.conversation.coreTeamWorkspace?.trim() ?? '';
+                  if (
+                    finalPolicy === 'allow_read_edit' &&
+                    (!effectiveTeamWorkspace || liveTeamWorkspace !== effectiveTeamWorkspace)
+                  ) {
+                    return;
+                  }
+                  if (
+                    !shouldAutoApprovePermission(finalPolicy, permKind, {
+                      workspaceVerified,
+                    })
+                  ) {
+                    return;
+                  }
+                  if (
+                    hasBlockingDenialForAutoApproval(
+                      preConfirmProj.permissions.filter((p) => p.id !== reqId),
+                      participant.id,
+                      kindLabel,
+                      scopeKey,
+                      activeTask?.id,
+                    )
+                  ) {
+                    return;
+                  }
+
                   await this.httpClient.requestJson<unknown>({
                     method: 'POST',
                     path: `/api/conversations/${encodeURIComponent(extConvId)}/confirmations/${encodeURIComponent(rawCallId)}/confirm`,
@@ -3314,7 +3463,7 @@ export class AionCoreAdapter
                     },
                     idempotent: false,
                     operationName: 'core.autoApprovePermission',
-                    teamId: currentProj.conversation.externalTeamId,
+                    teamId: preConfirmProj.conversation.externalTeamId,
                     slotId: participant.sessionRef.externalSlotId,
                   });
                   this.pendingCoreConfirmations.delete(reqId);
@@ -3324,7 +3473,7 @@ export class AionCoreAdapter
                   const decEvtId = `evt_core_perm_dec_${convId}_${rawCallId}_approved`;
                   if (!afterProj.seenEventIds.includes(decEvtId)) {
                     const policyDesc =
-                      activePolicy === 'allow_read_edit'
+                      finalPolicy === 'allow_read_edit'
                         ? 'auto leitura/edição'
                         : 'auto nesta sessão';
                     this.emitAndIngest(convId, {

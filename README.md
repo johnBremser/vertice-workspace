@@ -12,7 +12,7 @@ Interface em React, TypeScript e Tailwind CSS v4 para **coordenação observáve
 > - O aplicativo opera exclusivamente em **Modo AionCore Local** (`AionCoreAdapter`), comunicando via HTTP/WebSocket com uma instância real do AionCore (`v0.2.2`), sem simulador interno nem fallback para respostas fictícias quando o Core está inacessível.
 > - **Abertura limpa**: em uma instalação nova o workspace começa vazio, pronto para autenticar no AionCore local, sincronizar o catálogo real de CLIs/modelos e criar projetos reais.
 > - **Configuração padrão sem segredos**: [vertice.config.json](vertice.config.json) define host (`127.0.0.1`), porta (`4173`), alvo do proxy (`http://127.0.0.1:25828`) e versão do AionCore (`v0.2.2`). Overrides locais opcionais continuam suportados via `.env.local`.
-> - **Compatibilidade preservada**: o produto adota a marca **Vértice Workspace**, preservando identificadores técnicos internos (`aion-desk/v1`, `aion-desk-json`, banco IndexedDB e formato de backup `2.0.0`).
+> - **Compatibilidade preservada**: o produto adota a marca **Vértice Workspace**, preservando identificadores técnicos internos (`aion-desk` no pacote, protocolo `aion-desk/v1` / `aion-desk-json`, banco IndexedDB `aion_desk_storage`, preferências `aion_desk_ui_prefs_v1` e formato de backup `2.0.0`), distintos dos nomes externos definidos pelo **AionCore** (`aioncore.exe`, `aionui-backend.db`). Consulte a tabela completa em [docs/architecture.md](docs/architecture.md).
 
 ---
 
@@ -59,8 +59,11 @@ npm run dev
 
 ### Scripts disponíveis (`package.json`)
 
+> **Verificação antecipada de Node.js**: os hooks `predev`, `prebuild`, `prestart`, `prepreview`, `prelint` e `pretest` (além de `npm run node:check`) validam a faixa `^22.12.0 || ^24.0.0 || >=26.0.0` via `scripts/node-compat.mjs` antes de executar as ferramentas, exibindo diagnóstico legível sem alterar variáveis globais do sistema.
+
 | Script | Função |
 | :--- | :--- |
+| `npm run node:check` | Verifica se o Node ativo na sessão atende à faixa suportada (`^22.12.0 \|\| ^24.0.0 \|\| >=26.0.0`). |
 | `npm run dev` | Sobe Vite em desenvolvimento na porta `3000` (`--host=0.0.0.0`). |
 | `npm run build` | Gera o bundle de produção em `dist/` (com chunks separados, sem alertas de tamanho). |
 | `npm start` | Sobe o servidor local reproduzível (`scripts/vertice-server.mjs`) em `127.0.0.1:4173` servindo `dist/` e encaminhando `/api`, `/health`, `/login`, `/logout` e `/ws`. |
@@ -113,7 +116,12 @@ npm run server:start
 ```env
 VITE_AIONCORE_BASE_URL=""
 VITE_AIONCORE_PROXY_TARGET="http://127.0.0.1:<PORTA_DO_SEU_CORE>"
+# Opcional: autorizar projetos fora da pasta de instalação do Vértice para a aba Arquivos/Diff
+# (separe múltiplos caminhos com ";" no Windows ou ":" no Linux/macOS)
+VERTICE_ALLOWED_WORKSPACES="C:\meus-projetos\projeto-a;C:\meus-projetos\projeto-b"
 ```
+
+> **Isolamento da aba Arquivos (`/__vertice_workspace/*`)**: por padrão, o servidor local só permite inspecionar diffs e verificar caminhos dentro da pasta de instalação do Vértice. Para projetos em outros diretórios locais, declare-os explicitamente em `VERTICE_ALLOWED_WORKSPACES` (ou `VERTICE_WORKSPACE_ROOT`) no `.env.local` e reinicie o servidor.
 
 4. Inicie `npm run build && npm run server:start` (ou `npm run dev` em desenvolvimento). Tanto o proxy do Vite quanto `scripts/vertice-server.mjs` encaminham `/api`, `/health`, `/login`, `/logout` e `/ws` preservando cookies e tokens CSRF na mesma origem.
 5. Na interface, acesse **Configurações → Modo de operação → Modo AionCore local** e siga a lista de 5 etapas (**Preparação guiada para operação real**). O modo de abertura padrão já é *Modo AionCore local*.
@@ -127,7 +135,7 @@ Consulte os guias detalhados e licenças:
 - `docs/v6-progress.md` — Progresso completo do ciclo v6 (`V6-00` a `V6-10`), além dos registros históricos `docs/v4-progress.md` e `docs/v5-progress.md`.
 - `LICENSE`, `CHANGELOG.md` e `THIRD_PARTY_NOTICES.md` — Licença Apache-2.0 do projeto, histórico de mudanças e atribuições Apache-2.0 (`AionUi`, `AionCore`).
 
-> **Publicação e CI**: o workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) executa `lint`, `build`, `test` (`70` testes em `ubuntu-latest` Node 22/24 e `windows-latest` Node 24) e Playwright E2E em `ubuntu-latest`. Após publicar em remoto (`git push -u origin main`), observe a execução da CI no GitHub Actions antes de declarar qualquer release ou tag.
+> **Publicação e CI**: o workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) executa `lint`, `build`, `test` (em `ubuntu-latest` Node 22/24 e `windows-latest` Node 24) e Playwright E2E em `ubuntu-latest`. Após publicar em remoto (`git push -u origin main`), observe a execução da CI no GitHub Actions antes de declarar qualquer release ou tag.
 
 ---
 

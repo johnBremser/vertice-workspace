@@ -6494,6 +6494,7 @@ describe('AionCoreAdapter HTTP/CSRF/Refresh/WS & Collaboration Pipeline integrat
       return jsonResponse({ success: true, data: { message_id: 'ack', enqueue_status: 'started' } });
     };
 
+    const verifyCalls: Array<{ workspaceRoot: string; targetPath: string }> = [];
     const persistence = new WorkspacePersistenceManager(new MemoryOnlyStorageDriver());
     const adapter = new AionCoreAdapter(persistence, {
       baseUrl: 'http://127.0.0.1:25828',
@@ -6503,6 +6504,13 @@ describe('AionCoreAdapter HTTP/CSRF/Refresh/WS & Collaboration Pipeline integrat
         return sock;
       },
       readCookie: () => 'csrf_bl01',
+      verifyWorkspaceTargetPath: async (workspaceRoot, targetPath) => {
+        verifyCalls.push({ workspaceRoot, targetPath });
+        if (targetPath.includes('uncertain-symlink')) {
+          return false;
+        }
+        return true;
+      },
     });
 
     await adapter.loadWorkspace();
@@ -6603,6 +6611,65 @@ describe('AionCoreAdapter HTTP/CSRF/Refresh/WS & Collaboration Pipeline integrat
       ),
     ).toBe(true);
 
+    // Read/edit OUTSIDE project workspace or WITHOUT verifiable destination stays pending under 'allow_read_edit'
+    sock!.emitMessage({
+      name: 'message.stream',
+      data: {
+        conversation_id: extConvId,
+        msg_id: 'm_outside_read',
+        type: 'acp_permission',
+        data: {
+          tool_call: {
+            tool_call_id: 'call_outside_read',
+            title: 'Ler fora do workspace',
+            kind: 'read',
+            raw_input: { path: 'C:/Windows/win.ini' },
+          },
+          options: [{ option_id: 'opt_out_once', kind: 'allow_once' }],
+        },
+      },
+    });
+    sock!.emitMessage({
+      name: 'message.stream',
+      data: {
+        conversation_id: extConvId,
+        msg_id: 'm_nopath_edit',
+        type: 'acp_permission',
+        data: {
+          tool_call: {
+            tool_call_id: 'call_nopath_edit',
+            title: 'Editar sem destino verificável',
+            kind: 'edit',
+            raw_input: {},
+          },
+          options: [{ option_id: 'opt_np_once', kind: 'allow_once' }],
+        },
+      },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(confirmCalls).toHaveLength(2);
+    const snapBlockedReadEdit = adapter.getStateSnapshot().conversations[convId];
+    const outsidePerm = snapBlockedReadEdit.permissions.find((p) =>
+      p.id.endsWith('call_outside_read'),
+    )!;
+    const noPathPerm = snapBlockedReadEdit.permissions.find((p) =>
+      p.id.endsWith('call_nopath_edit'),
+    )!;
+    expect(outsidePerm.status).toBe('pending');
+    expect(noPathPerm.status).toBe('pending');
+    // Resolve both manually so later pending check is isolated to call_exec_1
+    await adapter.respondPermission({
+      conversationId: convId,
+      requestId: outsidePerm.id,
+      decision: 'approved',
+    });
+    await adapter.respondPermission({
+      conversationId: convId,
+      requestId: noPathPerm.id,
+      decision: 'approved',
+    });
+    expect(confirmCalls).toHaveLength(4);
+
     // Execute stays pending under 'allow_read_edit'
     sock!.emitMessage({
       name: 'message.stream',
@@ -6625,9 +6692,10 @@ describe('AionCoreAdapter HTTP/CSRF/Refresh/WS & Collaboration Pipeline integrat
       },
     });
     await new Promise((r) => setTimeout(r, 30));
-    expect(confirmCalls).toHaveLength(2);
-    const execPerm = afterEditSnap.permissions.find((p) => p.id.endsWith('call_exec_1'))
-      ?? adapter.getStateSnapshot().conversations[convId].permissions.find((p) => p.id.endsWith('call_exec_1'))!;
+    expect(confirmCalls).toHaveLength(4);
+    const execPerm = adapter
+      .getStateSnapshot()
+      .conversations[convId].permissions.find((p) => p.id.endsWith('call_exec_1'))!;
     expect(execPerm.status).toBe('pending');
 
     // Deny the execute permission -> blocks future auto-approval for same participant/action even in allow_all_in_conversation
@@ -6636,7 +6704,38 @@ describe('AionCoreAdapter HTTP/CSRF/Refresh/WS & Collaboration Pipeline integrat
       requestId: execPerm.id,
       decision: 'denied',
     });
-    expect(confirmCalls).toHaveLength(3);
+    expect(confirmCalls).toHaveLength(5);
+
+    // Also prove approving an unrelated scopeKey for the same participant/action does NOT clear the earlier denial
+    sock!.emitMessage({
+      name: 'message.stream',
+      data: {
+        conversation_id: extConvId,
+        msg_id: 'm_exec_other_scope',
+        type: 'acp_permission',
+        data: {
+          tool_call: {
+            tool_call_id: 'call_exec_other_scope',
+            title: 'Executar echo ok',
+            kind: 'execute',
+            raw_input: { command: 'echo ok' },
+          },
+          options: [{ option_id: 'opt_exec_other', kind: 'allow_once' }],
+        },
+      },
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    const otherScopePerm = adapter
+      .getStateSnapshot()
+      .conversations[convId].permissions.find((p) =>
+        p.id.endsWith('call_exec_other_scope'),
+      )!;
+    await adapter.respondPermission({
+      conversationId: convId,
+      requestId: otherScopePerm.id,
+      decision: 'approved',
+    });
+    expect(confirmCalls).toHaveLength(6);
 
     await adapter.setConversationToolApprovalPolicy(convId, 'allow_all_in_conversation');
     sock!.emitMessage({
@@ -6658,7 +6757,7 @@ describe('AionCoreAdapter HTTP/CSRF/Refresh/WS & Collaboration Pipeline integrat
     });
     await new Promise((r) => setTimeout(r, 30));
     // Must remain pending and NOT call /confirm automatically
-    expect(confirmCalls).toHaveLength(3);
+    expect(confirmCalls).toHaveLength(6);
     expect(
       adapter
         .getStateSnapshot()
@@ -6694,11 +6793,411 @@ describe('AionCoreAdapter HTTP/CSRF/Refresh/WS & Collaboration Pipeline integrat
       },
     });
     await new Promise((r) => setTimeout(r, 30));
-    expect(confirmCalls).toHaveLength(3);
+    expect(confirmCalls).toHaveLength(6);
     const astPermMsg = adapter
       .getStateSnapshot()
       .assistantState!.messages.find((m) => m.permissionRequest?.requestId === 'ast_perm_call_ast_write');
     expect(astPermMsg?.permissionRequest?.status).toBe('pending');
+    expect(verifyCalls).toEqual([
+      { workspaceRoot: 'C:/tmp/bl01', targetPath: 'src/App.tsx' },
+    ]);
+
+    adapter.dispose();
+  });
+
+  it('uses the effective Core team workspace and fails closed when real filesystem target is uncertain under allow_read_edit (BL-01)', async () => {
+    const confirmCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const verifyCalls: Array<{ workspaceRoot: string; targetPath: string }> = [];
+    let sock: MockSocket | null = null;
+
+    const fetchFn: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/health')) return jsonResponse(REAL_CORE_HEALTH_V022);
+      if (url.endsWith('/api/auth/status')) {
+        return jsonResponse({ success: true, ...REAL_CORE_AUTH_STATUS_V022 });
+      }
+      if (url.endsWith('/login') && method === 'POST') {
+        return jsonResponse({ success: true, user: { username: 'admin' } });
+      }
+      if (url.endsWith('/api/ws-token')) {
+        return jsonResponse({ success: true, ws_token: 'ws_tok_eff', expires_in: 300 });
+      }
+      if (url.endsWith('/api/assistants')) {
+        return jsonResponse({ success: true, data: REAL_CORE_ASSISTANTS_V022 });
+      }
+      if (url.endsWith('/api/agents/management')) {
+        return jsonResponse({ success: true, data: REAL_CORE_AGENTS_MANAGEMENT_V022 });
+      }
+      if (url.endsWith('/api/teams') && method === 'GET') {
+        return jsonResponse({ success: true, data: [] });
+      }
+      if (url.endsWith('/api/teams') && method === 'POST') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as {
+          name?: string;
+          workspace?: string;
+          agents?: Array<{ name: string; role: string; model?: string }>;
+        };
+        return jsonResponse({
+          success: true,
+          data: {
+            id: 'team_eff_1',
+            name: body.name ?? 'Eff Team',
+            workspace: body.workspace,
+            assistants: (body.agents ?? []).map((a, idx) => ({
+              slot_id: `slot_eff_${idx + 1}`,
+              conversation_id: `ext_conv_eff_${idx + 1}`,
+              name: a.name,
+              role: a.role,
+              model: a.model,
+            })),
+          },
+        });
+      }
+      if (url.includes('/confirmations/') && url.endsWith('/confirm') && method === 'POST') {
+        confirmCalls.push({ url, body: JSON.parse(String(init?.body ?? '{}')) });
+        return jsonResponse({ success: true });
+      }
+      return jsonResponse({ success: true, data: { message_id: 'ack', enqueue_status: 'started' } });
+    };
+
+    const persistence = new WorkspacePersistenceManager(new MemoryOnlyStorageDriver());
+    const adapter = new AionCoreAdapter(persistence, {
+      baseUrl: 'http://127.0.0.1:25828',
+      fetchFn,
+      wsFactory: (url, protocols) => {
+        sock = new MockSocket(url, protocols);
+        return sock;
+      },
+      readCookie: () => 'csrf_eff',
+      verifyWorkspaceTargetPath: async (workspaceRoot, targetPath) => {
+        verifyCalls.push({ workspaceRoot, targetPath });
+        if (targetPath.includes('uncertain')) {
+          return false;
+        }
+        return true;
+      },
+    });
+
+    await adapter.loadWorkspace();
+    await adapter.login('admin', 'secret');
+    await adapter.refreshCoreCatalog();
+    // Global Core workspace differs from project.workspacePathInfo
+    await adapter.updateCoreSettings({
+      baseUrl: 'http://127.0.0.1:25828',
+      workspacePath: 'C:/effective-core-ws',
+      authMode: 'cookie_or_bearer',
+    });
+    const proj = await adapter.createProject({
+      name: 'Projeto Diferente',
+      description: 'Project dir differs from Core global workspace',
+      workspacePathInfo: 'C:/project-other-ws',
+    });
+    const conv = await adapter.createConversation({ projectId: proj.id, title: 'Eff Conv' });
+    const convId = conv.conversation.id;
+    await adapter.createCoreTeamForConversation(convId);
+    await adapter.connectWebSocket(convId);
+    await adapter.setConversationToolApprovalPolicy(convId, 'allow_read_edit');
+
+    const convSnap = adapter.getStateSnapshot().conversations[convId];
+    expect(convSnap.conversation.coreTeamWorkspace).toBe('C:/effective-core-ws');
+    const execPart = convSnap.participants.find((p) => p.roles.includes('executor'))!;
+    const extConvId = execPart.sessionRef.externalConversationId!;
+
+    // 1. Path inside project folder (C:/project-other-ws) is OUTSIDE effective team folder (C:/effective-core-ws) -> stays pending!
+    sock!.emitMessage({
+      name: 'message.stream',
+      data: {
+        conversation_id: extConvId,
+        msg_id: 'm_proj_only',
+        type: 'acp_permission',
+        data: {
+          tool_call: {
+            tool_call_id: 'call_proj_only',
+            title: 'Ler arquivo da pasta do projeto',
+            kind: 'read',
+            raw_input: { path: 'C:/project-other-ws/src/a.ts' },
+          },
+          options: [{ option_id: 'opt_1', kind: 'allow_once' }],
+        },
+      },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(confirmCalls).toHaveLength(0);
+    const projOnlyPerm = adapter
+      .getStateSnapshot()
+      .conversations[convId].permissions.find((p) => p.id.endsWith('call_proj_only'))!;
+    expect(projOnlyPerm.status).toBe('pending');
+    // Resolve manually so the next permission reaches real filesystem verification
+    await adapter.respondPermission({
+      conversationId: convId,
+      requestId: projOnlyPerm.id,
+      decision: 'approved',
+    });
+    expect(confirmCalls).toHaveLength(1);
+
+    // 2. Relative path whose real filesystem target cannot be confirmed (verifyWorkspaceTargetPath -> false) -> stays pending!
+    sock!.emitMessage({
+      name: 'message.stream',
+      data: {
+        conversation_id: extConvId,
+        msg_id: 'm_uncertain',
+        type: 'acp_permission',
+        data: {
+          tool_call: {
+            tool_call_id: 'call_uncertain',
+            title: 'Editar symlink incerto',
+            kind: 'edit',
+            raw_input: { path: 'src/uncertain.ts' },
+          },
+          options: [{ option_id: 'opt_2', kind: 'allow_once' }],
+        },
+      },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(confirmCalls).toHaveLength(1);
+    expect(verifyCalls).toEqual([
+      { workspaceRoot: 'C:/effective-core-ws', targetPath: 'src/uncertain.ts' },
+    ]);
+
+    const afterUncertain = adapter.getStateSnapshot().conversations[convId];
+    expect(afterUncertain.permissions.find((p) => p.id.endsWith('call_uncertain'))?.status).toBe('pending');
+
+    adapter.dispose();
+  });
+
+  it('confirms legacy team workspace from Core via syncCoreTeams and aborts auto-approval if user switches to manual or pauses during disk verification (BL-01)', async () => {
+    const confirmCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const verifyCalls: Array<{ workspaceRoot: string; targetPath: string }> = [];
+    let releaseVerify: ((ok: boolean) => void) | null = null;
+    let sock: MockSocket | null = null;
+
+    const fetchFn: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/health')) return jsonResponse(REAL_CORE_HEALTH_V022);
+      if (url.endsWith('/api/auth/status')) {
+        return jsonResponse({ success: true, ...REAL_CORE_AUTH_STATUS_V022 });
+      }
+      if (url.endsWith('/login') && method === 'POST') {
+        return jsonResponse({ success: true, user: { username: 'admin' } });
+      }
+      if (url.endsWith('/api/ws-token')) {
+        return jsonResponse({ success: true, ws_token: 'ws_tok_leg', expires_in: 300 });
+      }
+      if (url.endsWith('/api/assistants')) {
+        return jsonResponse({ success: true, data: REAL_CORE_ASSISTANTS_V022 });
+      }
+      if (url.endsWith('/api/agents/management')) {
+        return jsonResponse({ success: true, data: REAL_CORE_AGENTS_MANAGEMENT_V022 });
+      }
+      if (url.endsWith('/api/teams') && method === 'GET') {
+        return jsonResponse({
+          success: true,
+          data: [
+            {
+              id: 'team_legacy_1',
+              name: 'Legacy Conv',
+              workspace: 'C:/legacy-core-real-dir',
+              assistants: [
+                { slot_id: 'slot_leg_1', conversation_id: 'ext_conv_leg_1', name: 'Terra Coordenador', role: 'lead' },
+                { slot_id: 'slot_leg_2', conversation_id: 'ext_conv_leg_2', name: 'Sol Planejador', role: 'teammate' },
+                { slot_id: 'slot_leg_3', conversation_id: 'ext_conv_leg_3', name: 'Gemini Executor', role: 'teammate' },
+              ],
+            },
+          ],
+        });
+      }
+      if (url.endsWith('/api/teams') && method === 'POST') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as {
+          name?: string;
+          agents?: Array<{ name: string; role: string; model?: string }>;
+        };
+        return jsonResponse({
+          success: true,
+          data: {
+            id: 'team_legacy_1',
+            name: body.name ?? 'Legacy Conv',
+            assistants: (body.agents ?? []).map((a, idx) => ({
+              slot_id: `slot_leg_${idx + 1}`,
+              conversation_id: `ext_conv_leg_${idx + 1}`,
+              name: a.name,
+              role: a.role,
+              model: a.model,
+            })),
+          },
+        });
+      }
+      if (url.includes('/confirmations/') && url.endsWith('/confirm') && method === 'POST') {
+        confirmCalls.push({ url, body: JSON.parse(String(init?.body ?? '{}')) });
+        return jsonResponse({ success: true });
+      }
+      return jsonResponse({ success: true, data: { message_id: 'ack', enqueue_status: 'started' } });
+    };
+
+    const persistence = new WorkspacePersistenceManager(new MemoryOnlyStorageDriver());
+    const adapter = new AionCoreAdapter(persistence, {
+      baseUrl: 'http://127.0.0.1:25828',
+      fetchFn,
+      wsFactory: (url, protocols) => {
+        sock = new MockSocket(url, protocols);
+        return sock;
+      },
+      readCookie: () => 'csrf_leg',
+      verifyWorkspaceTargetPath: (workspaceRoot, targetPath) => {
+        verifyCalls.push({ workspaceRoot, targetPath });
+        return new Promise<boolean>((resolve) => {
+          releaseVerify = resolve;
+        });
+      },
+    });
+
+    await adapter.loadWorkspace();
+    await adapter.login('admin', 'secret');
+    await adapter.refreshCoreCatalog();
+    const proj = await adapter.createProject({
+      name: 'Projeto Legacy',
+      description: 'Pre-update team without cached coreTeamWorkspace',
+      workspacePathInfo: 'C:/project-dir',
+    });
+    const conv = await adapter.createConversation({ projectId: proj.id, title: 'Legacy Conv' });
+    const convId = conv.conversation.id;
+    await adapter.createCoreTeamForConversation(convId);
+    // Simulate a pre-update persisted state where externalTeamId exists but coreTeamWorkspace was never stored,
+    // and coreSettings.workspacePath was later changed to another directory!
+    const snapBefore = adapter.getStateSnapshot();
+    await adapter.importWorkspaceState({
+      ...snapBefore,
+      coreSettings: {
+        ...snapBefore.coreSettings,
+        workspacePath: 'C:/changed-global-dir',
+      },
+      conversations: {
+        ...snapBefore.conversations,
+        [convId]: {
+          ...snapBefore.conversations[convId],
+          conversation: {
+            ...snapBefore.conversations[convId].conversation,
+            externalTeamId: 'team_legacy_1',
+            coreTeamWorkspace: undefined,
+            toolApprovalPolicy: 'allow_read_edit',
+          },
+        },
+      },
+    });
+    await adapter.connectWebSocket(convId);
+
+    const execPart = adapter
+      .getStateSnapshot()
+      .conversations[convId].participants.find((p) => p.roles.includes('executor'))!;
+    const extConvId = execPart.sessionRef.externalConversationId!;
+
+    sock!.emitMessage({
+      name: 'message.stream',
+      data: {
+        conversation_id: extConvId,
+        msg_id: 'm_leg_race',
+        type: 'acp_permission',
+        data: {
+          tool_call: {
+            tool_call_id: 'call_leg_race',
+            title: 'Editar src/index.ts',
+            kind: 'edit',
+            raw_input: { path: 'src/index.ts' },
+          },
+          options: [{ option_id: 'opt_leg_once', kind: 'allow_once' }],
+        },
+      },
+    });
+
+    // Wait for syncCoreTeams() + verifyWorkspaceTargetPath() to be invoked
+    await new Promise((r) => setTimeout(r, 30));
+    expect(verifyCalls).toEqual([
+      { workspaceRoot: 'C:/legacy-core-real-dir', targetPath: 'src/index.ts' },
+    ]);
+    expect(
+      adapter.getStateSnapshot().conversations[convId].conversation.coreTeamWorkspace,
+    ).toBe('C:/legacy-core-real-dir');
+
+    // User switches back to 'manual' while disk verification is still in flight!
+    await adapter.setConversationToolApprovalPolicy(convId, 'manual');
+    releaseVerify!(true);
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Must NOT auto-approve after policy changed to 'manual'!
+    expect(confirmCalls).toHaveLength(0);
+    expect(
+      adapter
+        .getStateSnapshot()
+        .conversations[convId].permissions.find((p) => p.id.endsWith('call_leg_race'))?.status,
+    ).toBe('pending');
+
+    // Now resolve call_leg_race manually, re-enable allow_read_edit, and prove recreating the team while disk verification is in flight ALSO aborts auto-approval!
+    const legRacePerm = adapter
+      .getStateSnapshot()
+      .conversations[convId].permissions.find((p) => p.id.endsWith('call_leg_race'))!;
+    await adapter.respondPermission({
+      conversationId: convId,
+      requestId: legRacePerm.id,
+      decision: 'approved',
+    });
+    expect(confirmCalls).toHaveLength(1);
+
+    await adapter.setConversationToolApprovalPolicy(convId, 'allow_read_edit');
+    sock!.emitMessage({
+      name: 'message.stream',
+      data: {
+        conversation_id: extConvId,
+        msg_id: 'm_recreate_race',
+        type: 'acp_permission',
+        data: {
+          tool_call: {
+            tool_call_id: 'call_recreate_race',
+            title: 'Editar src/recreate.ts',
+            kind: 'edit',
+            raw_input: { path: 'src/recreate.ts' },
+          },
+          options: [{ option_id: 'opt_rec_once', kind: 'allow_once' }],
+        },
+      },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(verifyCalls).toHaveLength(2);
+
+    // Team is recreated (new team_id / slots / conversations) while verification is still pending!
+    const snapMid = adapter.getStateSnapshot();
+    await adapter.importWorkspaceState({
+      ...snapMid,
+      conversations: {
+        ...snapMid.conversations,
+        [convId]: {
+          ...snapMid.conversations[convId],
+          conversation: {
+            ...snapMid.conversations[convId].conversation,
+            externalTeamId: 'team_recreated_2',
+          },
+          participants: snapMid.conversations[convId].participants.map((p) => ({
+            ...p,
+            sessionRef: {
+              ...p.sessionRef,
+              externalTeamId: 'team_recreated_2',
+              externalSlotId: `${p.sessionRef.externalSlotId}_v2`,
+              externalConversationId: `${p.sessionRef.externalConversationId}_v2`,
+            },
+          })),
+        },
+      },
+    });
+    releaseVerify!(true);
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Must NOT send POST .../confirm to the stale previous session!
+    expect(confirmCalls).toHaveLength(1);
+    expect(
+      adapter
+        .getStateSnapshot()
+        .conversations[convId].permissions.find((p) => p.id.endsWith('call_recreate_race'))?.status,
+    ).toBe('pending');
 
     adapter.dispose();
   });

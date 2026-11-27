@@ -30,21 +30,38 @@ Write-Host "  Vertice Workspace - Encerrando" -ForegroundColor Cyan
 Write-Host "==================================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Localizar Node.js
-$NodeCandidates = @(
+# Localizar Node.js compativel na sessao sem alterar ambiente global
+$NodeCompatScript = Join-Path $RootDir "scripts\node-compat.mjs"
+$CandidateExes = [System.Collections.Generic.List[string]]::new()
+foreach ($pattern in @(
   "$env:APPDATA\AionUi-Dev\aionui\runtime\node\node-v24*",
   "$env:APPDATA\AionUi\aionui\runtime\node\node-v24*",
   "$env:APPDATA\AionUi-Dev\aionui\runtime\node\node-v22*",
-  "$env:APPDATA\AionUi\aionui\runtime\node\node-v22*"
-)
-foreach ($pattern in $NodeCandidates) {
+  "$env:APPDATA\AionUi\aionui\runtime\node\node-v22*",
+  "$env:APPDATA\AionUi-Dev\aionui\runtime\node\node-v26*",
+  "$env:APPDATA\AionUi\aionui\runtime\node\node-v26*"
+)) {
   $dirs = Get-ChildItem -Path $pattern -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
   foreach ($d in $dirs) {
-    if (Test-Path (Join-Path $d.FullName "node.exe")) {
-      $env:PATH = "$($d.FullName);$env:PATH"
+    $exe = Join-Path $d.FullName "node.exe"
+    if (Test-Path $exe) { $CandidateExes.Add($exe) }
+  }
+}
+$pathNode = Get-Command node -ErrorAction SilentlyContinue
+if ($pathNode -and $pathNode.Source) {
+  $CandidateExes.Add($pathNode.Source)
+}
+foreach ($exe in ($CandidateExes | Select-Object -Unique)) {
+  try {
+    $ver = (& $exe -v 2>$null).Trim()
+    if (-not $ver) { continue }
+    & $exe $NodeCompatScript --is-supported $ver 2>$null
+    if ($LASTEXITCODE -eq 0) {
+      $nodeDir = Split-Path -Parent $exe
+      $env:PATH = "$nodeDir;$env:PATH"
       break
     }
-  }
+  } catch {}
 }
 
 $exitCode = 0

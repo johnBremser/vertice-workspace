@@ -155,3 +155,34 @@ export async function fetchWorkspaceFileDiff(
     };
   }
 }
+
+/**
+ * Confirms against the local loopback host that `targetPath` resolves on disk
+ * strictly inside `workspacePath` (following symlinks and blocking sensitive files).
+ * Strictly fail-closed: returns `false` on any network/server/validation uncertainty.
+ */
+export async function verifyWorkspaceTargetPathOnHost(
+  workspacePath: string,
+  targetPath: string,
+): Promise<boolean> {
+  const trimmedWorkspace = workspacePath.trim();
+  const trimmedTarget = targetPath.trim();
+  if (!trimmedWorkspace || !trimmedTarget) return false;
+
+  try {
+    const response = await fetch(
+      `/__vertice_workspace/verify-path?workspace=${encodeURIComponent(trimmedWorkspace)}&target=${encodeURIComponent(trimmedTarget)}`,
+      { method: 'GET', cache: 'no-store' },
+    );
+    const contentType = response.headers.get('content-type') ?? '';
+    if (!response.ok || !contentType.includes('application/json')) {
+      return false;
+    }
+    const payload = (await response.json().catch(() => null)) as
+      | { ok?: boolean; verified?: boolean }
+      | null;
+    return Boolean(payload?.ok === true && payload?.verified === true);
+  } catch {
+    return false;
+  }
+}

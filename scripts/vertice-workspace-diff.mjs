@@ -115,7 +115,45 @@ export function isSensitiveWorkspaceFile(rawRelPath) {
   return false;
 }
 
-export function resolveWorkspaceRoot(rawWorkspacePath) {
+export function resolveAllowedWorkspaces(options = {}) {
+  const rawList = [];
+  if (Array.isArray(options.allowedWorkspaces)) {
+    rawList.push(...options.allowedWorkspaces);
+  } else {
+    const envRaw =
+      options.allowedWorkspacesEnv ??
+      process.env.VERTICE_ALLOWED_WORKSPACES ??
+      process.env.VERTICE_WORKSPACE_ROOT ??
+      '';
+    if (typeof envRaw === 'string' && envRaw.trim()) {
+      for (const part of envRaw.split(path.delimiter)) {
+        if (part.trim()) rawList.push(part.trim());
+      }
+    } else if (options.rootDir) {
+      rawList.push(options.rootDir);
+    } else {
+      return null;
+    }
+  }
+
+  const resolved = [];
+  for (const candidate of rawList) {
+    if (typeof candidate !== 'string' || !candidate.trim() || candidate.includes('\0')) {
+      continue;
+    }
+    try {
+      const real = fs.realpathSync(path.resolve(candidate.trim()));
+      if (fs.statSync(real).isDirectory()) {
+        resolved.push(real);
+      }
+    } catch {
+      // Ignore unavailable candidate directories
+    }
+  }
+  return Array.from(new Set(resolved));
+}
+
+export function resolveWorkspaceRoot(rawWorkspacePath, allowedWorkspaces = null) {
   const trimmed = String(rawWorkspacePath || '').trim();
   if (!trimmed || trimmed.includes('\0')) {
     return { ok: false, status: 400, error: 'Caminho do workspace ausente ou inválido.' };
@@ -135,13 +173,60 @@ export function resolveWorkspaceRoot(rawWorkspacePath) {
   if (!stat.isDirectory()) {
     return { ok: false, status: 400, error: 'O caminho informado não é um diretório.' };
   }
+  if (Array.isArray(allowedWorkspaces)) {
+    const allowed = allowedWorkspaces.some((allowedRoot) => {
+      const prefix = allowedRoot.endsWith(path.sep) ? allowedRoot : allowedRoot + path.sep;
+      return isWithinRoot(realRoot, prefix, allowedRoot);
+    });
+    if (!allowed) {
+      return {
+        ok: false,
+        status: 403,
+        error:
+          'Diretório fora do projeto/workspace configurado no servidor. Defina VERTICE_ALLOWED_WORKSPACES no .env.local para autorizar esta pasta.',
+      };
+    }
+  }
   return { ok: true, realRoot };
+}
+
+function inspectPathSensitivityAndEscape(realRoot, relPath) {
+  const rootPrefix = realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep;
+  if (isSensitiveWorkspaceFile(relPath)) {
+    return { escapesRoot: false, isSensitive: true };
+  }
+  const candidate = path.resolve(realRoot, relPath);
+  if (!isWithinRoot(candidate, rootPrefix, realRoot)) {
+    return { escapesRoot: true, isSensitive: true };
+  }
+  if (fs.existsSync(candidate)) {
+    try {
+      const realTarget = fs.realpathSync(candidate);
+      if (!isWithinRoot(realTarget, rootPrefix, realRoot)) {
+        return { escapesRoot: true, isSensitive: true };
+      }
+      const realRel = normalizeRelPath(path.relative(realRoot, realTarget));
+      if (isSensitiveWorkspaceFile(realRel)) {
+        return { escapesRoot: false, isSensitive: true };
+      }
+    } catch {
+      return { escapesRoot: false, isSensitive: false };
+    }
+  }
+  return { escapesRoot: false, isSensitive: false };
 }
 
 export function resolveWorkspaceFile(realRoot, rawRelPath) {
   const relPath = normalizeRelPath(rawRelPath);
   if (!relPath || relPath.includes('\0')) {
     return { ok: false, status: 400, error: 'Caminho de arquivo inválido.' };
+  }
+  if (relPath.endsWith('/')) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'O alvo informado é um diretório; informe um único arquivo.',
+    };
   }
   if (path.isAbsolute(rawRelPath) || /^[a-zA-Z]:/.test(relPath)) {
     return { ok: false, status: 403, error: 'Caminho absoluto fora do workspace recusado.' };
@@ -157,16 +242,27 @@ export function resolveWorkspaceFile(realRoot, rawRelPath) {
     return { ok: false, status: 403, error: 'Acesso fora do workspace recusado.' };
   }
 
+  let realRelPath = '';
   if (fs.existsSync(candidate)) {
     let realTarget;
+    let stat;
     try {
       realTarget = fs.realpathSync(candidate);
+      stat = fs.statSync(realTarget);
     } catch {
       return { ok: false, status: 404, error: 'Falha ao resolver arquivo.' };
     }
     if (!isWithinRoot(realTarget, rootPrefix, realRoot)) {
       return { ok: false, status: 403, error: 'Symlink externo ao workspace recusado.' };
     }
+    if (!stat.isFile()) {
+      return {
+        ok: false,
+        status: 400,
+        error: 'O alvo informado é um diretório; informe um único arquivo.',
+      };
+    }
+    realRelPath = normalizeRelPath(path.relative(realRoot, realTarget));
   } else {
     // For deleted files, verify the nearest existing ancestor stays inside realRoot
     let parent = path.dirname(candidate);
@@ -187,7 +283,10 @@ export function resolveWorkspaceFile(realRoot, rawRelPath) {
     }
   }
 
-  if (isSensitiveWorkspaceFile(relPath)) {
+  if (
+    isSensitiveWorkspaceFile(relPath) ||
+    (realRelPath && isSensitiveWorkspaceFile(realRelPath))
+  ) {
     return {
       ok: false,
       status: 403,
@@ -242,7 +341,7 @@ function inspectFileMetrics(fullPath) {
 async function runGit(realRoot, args) {
   const { stdout } = await execFileAsync(
     'git',
-    ['-C', realRoot, '-c', 'core.quotepath=false', ...args],
+    ['-C', realRoot, '--literal-pathspecs', '-c', 'core.quotepath=false', ...args],
     {
       shell: false,
       timeout: GIT_TIMEOUT_MS,
@@ -272,6 +371,67 @@ async function hasGitHead(realRoot) {
   }
 }
 
+async function getGitHeadObjectType(realRoot, repoRelPath) {
+  try {
+    const out = await runGit(realRoot, ['cat-file', '-t', `HEAD:${repoRelPath}`]);
+    return out.trim();
+  } catch {
+    return null;
+  }
+}
+
+async function hasGitIndexDirectoryChildren(realRoot, relPath, gitPrefix) {
+  try {
+    const raw = await runGit(realRoot, ['ls-files', '-z', '--', relPath]);
+    if (!raw) return false;
+    const prefix = `${relPath}/`;
+    const prefixLower = prefix.toLowerCase();
+    for (const token of raw.split('\0')) {
+      if (!token) continue;
+      const localPath = stripGitPrefix(token, gitPrefix);
+      if (!localPath) continue;
+      if (
+        localPath.startsWith(prefix) ||
+        (process.platform === 'win32' && localPath.toLowerCase().startsWith(prefixLower))
+      ) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function filterUnifiedDiffToSinglePath(rawDiff, expectedRepoRelPath) {
+  const text = String(rawDiff || '');
+  if (!text.trim()) return '';
+  const expectedA = `a/${expectedRepoRelPath}`;
+  const expectedB = `b/${expectedRepoRelPath}`;
+  const expectedUnquoted = `diff --git ${expectedA} ${expectedB}`;
+  const expectedQuoted = `diff --git "${expectedA}" "${expectedB}"`;
+
+  const lines = text.split(/\r?\n/);
+  const kept = [];
+  let includeSection = false;
+
+  for (const line of lines) {
+    if (line.startsWith('diff --git ')) {
+      const matches =
+        line === expectedUnquoted ||
+        line === expectedQuoted ||
+        (process.platform === 'win32' &&
+          (line.toLowerCase() === expectedUnquoted.toLowerCase() ||
+            line.toLowerCase() === expectedQuoted.toLowerCase()));
+      includeSection = matches;
+    }
+    if (includeSection) {
+      kept.push(line);
+    }
+  }
+  return kept.join('\n').trim();
+}
+
 async function getGitBranch(realRoot) {
   try {
     const branch = (await runGit(realRoot, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
@@ -281,7 +441,34 @@ async function getGitBranch(realRoot) {
   }
 }
 
-function parseGitNumstatZ(rawOutput, map) {
+async function getGitPrefix(realRoot) {
+  try {
+    const raw = await runGit(realRoot, ['rev-parse', '--show-prefix']);
+    const normalized = normalizeRelPath(raw.replace(/[\r\n]+/g, ''));
+    if (!normalized) return '';
+    return normalized.endsWith('/') ? normalized : `${normalized}/`;
+  } catch {
+    return '';
+  }
+}
+
+function stripGitPrefix(repoRelPath, gitPrefix) {
+  const normalized = normalizeRelPath(repoRelPath);
+  if (!normalized) return null;
+  if (!gitPrefix) return normalized;
+  if (normalized.startsWith(gitPrefix)) {
+    return normalized.slice(gitPrefix.length);
+  }
+  if (
+    process.platform === 'win32' &&
+    normalized.toLowerCase().startsWith(gitPrefix.toLowerCase())
+  ) {
+    return normalized.slice(gitPrefix.length);
+  }
+  return null;
+}
+
+function parseGitNumstatZ(rawOutput, map, gitPrefix = '') {
   if (!rawOutput) return;
   const tokens = rawOutput.split('\0');
   let i = 0;
@@ -305,15 +492,16 @@ function parseGitNumstatZ(rawOutput, map) {
     }
     if (!filePath) continue;
 
-    const normalized = normalizeRelPath(filePath);
-    const prev = map.get(normalized) ?? { additions: 0, deletions: 0, isBinary: false };
+    const localPath = stripGitPrefix(filePath, gitPrefix);
+    if (!localPath) continue;
+    const prev = map.get(localPath) ?? { additions: 0, deletions: 0, isBinary: false };
     if (addStr === '-' || delStr === '-') {
       prev.isBinary = true;
     } else {
       prev.additions += Number.parseInt(addStr, 10) || 0;
       prev.deletions += Number.parseInt(delStr, 10) || 0;
     }
-    map.set(normalized, prev);
+    map.set(localPath, prev);
   }
 }
 
@@ -327,7 +515,7 @@ function mapPorcelainStatus(xy) {
   return 'modified';
 }
 
-function parseGitPorcelainZ(rawOutput) {
+function parseGitPorcelainZ(rawOutput, gitPrefix = '') {
   if (!rawOutput) return [];
   const tokens = rawOutput.split('\0');
   const entries = [];
@@ -337,17 +525,20 @@ function parseGitPorcelainZ(rawOutput) {
     i += 1;
     if (!token || token.length < 4 || token[2] !== ' ') continue;
     const xy = token.slice(0, 2);
-    const filePath = normalizeRelPath(token.slice(3));
+    const rawFilePath = token.slice(3);
     const x = xy[0];
     const y = xy[1];
-    let previousPath;
+    let rawPrevPath;
     if ((x === 'R' || x === 'C' || y === 'R' || y === 'C') && i < tokens.length) {
-      previousPath = normalizeRelPath(tokens[i]);
+      rawPrevPath = tokens[i];
       i += 1;
     }
+    const localPath = stripGitPrefix(rawFilePath, gitPrefix);
+    if (!localPath) continue;
+    const localPrevPath = rawPrevPath ? stripGitPrefix(rawPrevPath, gitPrefix) ?? undefined : undefined;
     entries.push({
-      path: filePath,
-      previousPath,
+      path: localPath,
+      previousPath: localPrevPath,
       status: mapPorcelainStatus(xy),
     });
   }
@@ -388,12 +579,15 @@ function listRecentFilesFallback(realRoot) {
       } else if (entry.isFile()) {
         try {
           const stat = fs.statSync(realAbs);
+          const realRel = normalizeRelPath(path.relative(realRoot, realAbs));
           results.push({
             path: nextRel,
             status: 'modified',
             additions: null,
             deletions: null,
-            isSensitive: isSensitiveWorkspaceFile(nextRel),
+            isSensitive:
+              isSensitiveWorkspaceFile(nextRel) ||
+              isSensitiveWorkspaceFile(realRel),
             isBinary: false,
             updatedAt: new Date(stat.mtimeMs).toISOString(),
             sizeBytes: stat.size,
@@ -476,8 +670,11 @@ function buildUntrackedUnifiedDiff(relPath, fullPath) {
   return { isBinary: false, ...clamped };
 }
 
-export async function getWorkspaceChanges(workspaceDir) {
-  const rootCheck = resolveWorkspaceRoot(workspaceDir);
+export async function getWorkspaceChanges(workspaceDir, options = {}) {
+  const allowedWorkspaces = Array.isArray(options.allowedWorkspaces)
+    ? options.allowedWorkspaces
+    : null;
+  const rootCheck = resolveWorkspaceRoot(workspaceDir, allowedWorkspaces);
   if (!rootCheck.ok) {
     return rootCheck;
   }
@@ -497,54 +694,62 @@ export async function getWorkspaceChanges(workspaceDir) {
     };
   }
 
-  const [branch, porcelainRaw, unstagedNumstatRaw, stagedNumstatRaw] =
+  const [branch, gitPrefix, porcelainRaw, unstagedNumstatRaw, stagedNumstatRaw] =
     await Promise.all([
       getGitBranch(realRoot),
-      runGit(realRoot, ['status', '--porcelain=v1', '-uall', '-z']),
-      runGit(realRoot, ['diff', '--numstat', '-z']),
-      runGit(realRoot, ['diff', '--cached', '--numstat', '-z']),
+      getGitPrefix(realRoot),
+      runGit(realRoot, ['status', '--porcelain=v1', '-uall', '-z', '--', '.']),
+      runGit(realRoot, ['diff', '--numstat', '-z', '--', '.']),
+      runGit(realRoot, ['diff', '--cached', '--numstat', '-z', '--', '.']),
     ]);
 
   const numstatMap = new Map();
-  parseGitNumstatZ(unstagedNumstatRaw, numstatMap);
-  parseGitNumstatZ(stagedNumstatRaw, numstatMap);
+  parseGitNumstatZ(unstagedNumstatRaw, numstatMap, gitPrefix);
+  parseGitNumstatZ(stagedNumstatRaw, numstatMap, gitPrefix);
 
-  const parsedEntries = parseGitPorcelainZ(porcelainRaw);
-  const files = parsedEntries.slice(0, MAX_FILES_LISTED).map((entry) => {
-    const sensitive = isSensitiveWorkspaceFile(entry.path);
-    if (entry.status === 'untracked') {
-      if (sensitive) {
+  const parsedEntries = parseGitPorcelainZ(porcelainRaw, gitPrefix);
+  const files = parsedEntries
+    .slice(0, MAX_FILES_LISTED)
+    .map((entry) => {
+      const check = inspectPathSensitivityAndEscape(realRoot, entry.path);
+      if (check.escapesRoot) {
+        return null;
+      }
+      const sensitive = check.isSensitive;
+      if (entry.status === 'untracked') {
+        if (sensitive) {
+          return {
+            path: entry.path,
+            status: 'untracked',
+            additions: null,
+            deletions: null,
+            isSensitive: true,
+            isBinary: false,
+          };
+        }
+        const metrics = inspectFileMetrics(path.join(realRoot, entry.path));
         return {
           path: entry.path,
           status: 'untracked',
-          additions: null,
-          deletions: null,
-          isSensitive: true,
-          isBinary: false,
+          additions: metrics.isBinary ? null : metrics.lineCount,
+          deletions: 0,
+          isSensitive: false,
+          isBinary: metrics.isBinary,
         };
       }
-      const metrics = inspectFileMetrics(path.join(realRoot, entry.path));
+
+      const statInfo = numstatMap.get(entry.path);
       return {
         path: entry.path,
-        status: 'untracked',
-        additions: metrics.isBinary ? null : metrics.lineCount,
-        deletions: 0,
-        isSensitive: false,
-        isBinary: metrics.isBinary,
+        previousPath: entry.previousPath,
+        status: entry.status,
+        additions: statInfo?.isBinary ? null : (statInfo?.additions ?? null),
+        deletions: statInfo?.isBinary ? null : (statInfo?.deletions ?? null),
+        isSensitive: sensitive,
+        isBinary: Boolean(statInfo?.isBinary),
       };
-    }
-
-    const statInfo = numstatMap.get(entry.path);
-    return {
-      path: entry.path,
-      previousPath: entry.previousPath,
-      status: entry.status,
-      additions: statInfo?.isBinary ? null : (statInfo?.additions ?? null),
-      deletions: statInfo?.isBinary ? null : (statInfo?.deletions ?? null),
-      isSensitive: sensitive,
-      isBinary: Boolean(statInfo?.isBinary),
-    };
-  });
+    })
+    .filter(Boolean);
 
   return {
     ok: true,
@@ -558,8 +763,11 @@ export async function getWorkspaceChanges(workspaceDir) {
   };
 }
 
-export async function getWorkspaceFileDiff(workspaceDir, relFilePath) {
-  const rootCheck = resolveWorkspaceRoot(workspaceDir);
+export async function getWorkspaceFileDiff(workspaceDir, relFilePath, options = {}) {
+  const allowedWorkspaces = Array.isArray(options.allowedWorkspaces)
+    ? options.allowedWorkspaces
+    : null;
+  const rootCheck = resolveWorkspaceRoot(workspaceDir, allowedWorkspaces);
   if (!rootCheck.ok) {
     return rootCheck;
   }
@@ -602,15 +810,29 @@ export async function getWorkspaceFileDiff(workspaceDir, relFilePath) {
     };
   }
 
-  const porcelain = await runGit(realRoot, [
-    'status',
-    '--porcelain=v1',
-    '-uall',
-    '-z',
-    '--',
-    relPath,
+  const [gitPrefix, porcelain] = await Promise.all([
+    getGitPrefix(realRoot),
+    runGit(realRoot, [
+      'status',
+      '--porcelain=v1',
+      '-uall',
+      '-z',
+      '--',
+      relPath,
+    ]),
   ]);
-  const entries = parseGitPorcelainZ(porcelain);
+  const entries = parseGitPorcelainZ(porcelain, gitPrefix);
+  // If path does not exist on disk and Git matched child paths (deleted directory), reject as directory
+  if (
+    !fs.existsSync(fullPath) &&
+    (entries.length > 1 || (entries.length === 1 && entries[0].path !== relPath))
+  ) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'O alvo informado corresponde a um diretório; informe um único arquivo.',
+    };
+  }
   const entry = entries[0];
 
   if (entry?.status === 'untracked') {
@@ -658,16 +880,54 @@ export async function getWorkspaceFileDiff(workspaceDir, relFilePath) {
   }
 
   const hasHead = await hasGitHead(realRoot);
+  const repoRelPath = gitPrefix ? `${gitPrefix}${relPath}` : relPath;
+  const [headObjectType, indexHasDirChildren] = await Promise.all([
+    hasHead ? getGitHeadObjectType(realRoot, repoRelPath) : Promise.resolve(null),
+    hasGitIndexDirectoryChildren(realRoot, relPath, gitPrefix),
+  ]);
+
+  if (headObjectType === 'tree' || indexHasDirChildren) {
+    if (!fs.existsSync(fullPath)) {
+      return {
+        ok: false,
+        status: 400,
+        error: 'O alvo informado corresponde a um diretório; informe um único arquivo.',
+      };
+    }
+    // Path was a directory in HEAD or in the Git index (including unborn repos without a first commit)
+    // and is now a regular file on disk: never run `git diff` against the old directory tree;
+    // return only the literal diff of the authorized file itself.
+    const synthetic = buildUntrackedUnifiedDiff(relPath, fullPath);
+    return {
+      ok: true,
+      status: 200,
+      mode: 'git',
+      path: relPath,
+      fileStatus: 'added',
+      isFullFilePreview: false,
+      ...synthetic,
+    };
+  }
+
   let diffOutput = '';
   if (hasHead) {
-    diffOutput = await runGit(realRoot, ['diff', '--no-color', 'HEAD', '--', relPath]);
+    diffOutput = await runGit(realRoot, [
+      'diff',
+      '--no-color',
+      '--no-renames',
+      'HEAD',
+      '--',
+      relPath,
+    ]);
   } else {
     const [unstaged, staged] = await Promise.all([
-      runGit(realRoot, ['diff', '--no-color', '--', relPath]),
-      runGit(realRoot, ['diff', '--no-color', '--cached', '--', relPath]),
+      runGit(realRoot, ['diff', '--no-color', '--no-renames', '--', relPath]),
+      runGit(realRoot, ['diff', '--no-color', '--no-renames', '--cached', '--', relPath]),
     ]);
     diffOutput = [staged, unstaged].filter(Boolean).join('\n');
   }
+
+  diffOutput = filterUnifiedDiffToSinglePath(diffOutput, repoRelPath);
 
   if (/^Binary files .* differ$/m.test(diffOutput)) {
     return {
@@ -697,12 +957,130 @@ export async function getWorkspaceFileDiff(workspaceDir, relFilePath) {
   };
 }
 
+export function verifyWorkspaceTargetPath(workspaceDir, rawTargetPath, options = {}) {
+  const allowedWorkspaces = Array.isArray(options.allowedWorkspaces)
+    ? options.allowedWorkspaces
+    : null;
+  const rootCheck = resolveWorkspaceRoot(workspaceDir, allowedWorkspaces);
+  if (!rootCheck.ok) {
+    return rootCheck;
+  }
+  const { realRoot } = rootCheck;
+  const trimmedTarget = String(rawTargetPath || '').trim();
+  if (
+    !trimmedTarget ||
+    trimmedTarget.includes('\0') ||
+    trimmedTarget.startsWith('~') ||
+    /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmedTarget)
+  ) {
+    return {
+      ok: true,
+      status: 200,
+      verified: false,
+      reason: 'Caminho de destino inválido ou não verificável.',
+    };
+  }
+
+  const rootPrefix = realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep;
+  const isAbs = path.isAbsolute(trimmedTarget) || /^[a-zA-Z]:/.test(trimmedTarget);
+  const candidate = isAbs
+    ? path.resolve(trimmedTarget)
+    : path.resolve(realRoot, trimmedTarget);
+
+  if (!isWithinRoot(candidate, rootPrefix, realRoot)) {
+    return {
+      ok: true,
+      status: 200,
+      verified: false,
+      reason: 'Destino fora do diretório efetivo da equipe.',
+    };
+  }
+
+  const candidateRel = normalizeRelPath(path.relative(realRoot, candidate));
+  if (candidateRel && isSensitiveWorkspaceFile(candidateRel)) {
+    return {
+      ok: true,
+      status: 200,
+      verified: false,
+      reason: 'Destino aponta para arquivo sensível protegido.',
+    };
+  }
+
+  if (fs.existsSync(candidate)) {
+    let realTarget;
+    try {
+      realTarget = fs.realpathSync(candidate);
+    } catch {
+      return {
+        ok: true,
+        status: 200,
+        verified: false,
+        reason: 'Não foi possível resolver o destino real no sistema de arquivos.',
+      };
+    }
+    if (!isWithinRoot(realTarget, rootPrefix, realRoot)) {
+      return {
+        ok: true,
+        status: 200,
+        verified: false,
+        reason: 'Symlink resolve para fora do diretório efetivo da equipe.',
+      };
+    }
+    const realRel = normalizeRelPath(path.relative(realRoot, realTarget));
+    if (realRel && isSensitiveWorkspaceFile(realRel)) {
+      return {
+        ok: true,
+        status: 200,
+        verified: false,
+        reason: 'Symlink resolve para arquivo sensível protegido.',
+      };
+    }
+    return { ok: true, status: 200, verified: true, realRoot, realPath: realTarget };
+  }
+
+  // Non-existent target (e.g., creating a new file): verify nearest existing ancestor stays inside realRoot
+  let parent = path.dirname(candidate);
+  while (parent && parent.length >= realRoot.length && !fs.existsSync(parent)) {
+    const next = path.dirname(parent);
+    if (next === parent) break;
+    parent = next;
+  }
+  if (!fs.existsSync(parent)) {
+    return {
+      ok: true,
+      status: 200,
+      verified: false,
+      reason: 'Diretório pai inexistente ou não verificável.',
+    };
+  }
+  let realParent;
+  try {
+    realParent = fs.realpathSync(parent);
+  } catch {
+    return {
+      ok: true,
+      status: 200,
+      verified: false,
+      reason: 'Falha ao resolver diretório pai real.',
+    };
+  }
+  if (!isWithinRoot(realParent, rootPrefix, realRoot)) {
+    return {
+      ok: true,
+      status: 200,
+      verified: false,
+      reason: 'Diretório pai resolve para fora do diretório efetivo da equipe.',
+    };
+  }
+  return { ok: true, status: 200, verified: true, realRoot, realPath: candidate };
+}
+
 export function shouldHandleWorkspaceDiffRequest(reqUrl) {
   const rawPath = String(reqUrl || '').split('?')[0];
   return rawPath.startsWith(WORKSPACE_DIFF_PREFIX);
 }
 
-export async function handleWorkspaceDiffRequest(req, res) {
+export async function handleWorkspaceDiffRequest(req, res, options = {}) {
   if (!shouldHandleWorkspaceDiffRequest(req.url)) {
     return false;
   }
@@ -722,17 +1100,28 @@ export async function handleWorkspaceDiffRequest(req, res) {
 
   const url = new URL(req.url || '/', 'http://127.0.0.1');
   const workspace = url.searchParams.get('workspace') ?? '';
+  const allowedWorkspaces = resolveAllowedWorkspaces({
+    ...options,
+    rootDir: options.rootDir ?? process.cwd(),
+  });
 
   try {
     if (url.pathname === `${WORKSPACE_DIFF_PREFIX}changes`) {
-      const result = await getWorkspaceChanges(workspace);
+      const result = await getWorkspaceChanges(workspace, { allowedWorkspaces });
       sendJson(res, result.status ?? (result.ok ? 200 : 400), result);
       return true;
     }
 
     if (url.pathname === `${WORKSPACE_DIFF_PREFIX}diff`) {
       const file = url.searchParams.get('file') ?? '';
-      const result = await getWorkspaceFileDiff(workspace, file);
+      const result = await getWorkspaceFileDiff(workspace, file, { allowedWorkspaces });
+      sendJson(res, result.status ?? (result.ok ? 200 : 400), result);
+      return true;
+    }
+
+    if (url.pathname === `${WORKSPACE_DIFF_PREFIX}verify-path`) {
+      const target = url.searchParams.get('target') ?? '';
+      const result = verifyWorkspaceTargetPath(workspace, target, { allowedWorkspaces });
       sendJson(res, result.status ?? (result.ok ? 200 : 400), result);
       return true;
     }

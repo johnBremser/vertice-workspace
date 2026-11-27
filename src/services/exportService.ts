@@ -155,6 +155,7 @@ function detachExternalBindingsFromProjection(
           ? 'manual'
           : proj.conversation.toolApprovalPolicy,
       externalTeamId: undefined,
+      coreTeamWorkspace: undefined,
       importedExternalTeamId: hasTeamRef
         ? proj.conversation.externalTeamId
         : proj.conversation.importedExternalTeamId,

@@ -29,34 +29,59 @@ if (Test-Path $ConfigPath) {
   }
 }
 
-# 2. Localizar Node.js compativel (22.12+ ou 24+)
+# 2. Localizar Node.js compativel (^22.12.0 || ^24.0.0 || >=26.0.0) sem alterar PATH global
 Write-Host "[1/4] Verificando Node.js..." -ForegroundColor White
-$NodeCandidates = @(
+$NodeCompatScript = Join-Path $RootDir "scripts\node-compat.mjs"
+$CandidateExes = [System.Collections.Generic.List[string]]::new()
+foreach ($pattern in @(
   "$env:APPDATA\AionUi-Dev\aionui\runtime\node\node-v24*",
   "$env:APPDATA\AionUi\aionui\runtime\node\node-v24*",
   "$env:APPDATA\AionUi-Dev\aionui\runtime\node\node-v22*",
-  "$env:APPDATA\AionUi\aionui\runtime\node\node-v22*"
-)
-foreach ($pattern in $NodeCandidates) {
+  "$env:APPDATA\AionUi\aionui\runtime\node\node-v22*",
+  "$env:APPDATA\AionUi-Dev\aionui\runtime\node\node-v26*",
+  "$env:APPDATA\AionUi\aionui\runtime\node\node-v26*"
+)) {
   $dirs = Get-ChildItem -Path $pattern -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
   foreach ($d in $dirs) {
-    if (Test-Path (Join-Path $d.FullName "node.exe")) {
-      $env:PATH = "$($d.FullName);$env:PATH"
-      break
-    }
+    $exe = Join-Path $d.FullName "node.exe"
+    if (Test-Path $exe) { $CandidateExes.Add($exe) }
   }
 }
+$pathNode = Get-Command node -ErrorAction SilentlyContinue
+if ($pathNode -and $pathNode.Source) {
+  $CandidateExes.Add($pathNode.Source)
+}
 
-$nodeCmd = Get-Command node -ErrorAction SilentlyContinue
-if (-not $nodeCmd) {
-  Write-Host "[ERRO] Node.js nao encontrado neste computador." -ForegroundColor Red
+$SelectedNodeExe = $null
+$LastSeenVersion = $null
+foreach ($exe in ($CandidateExes | Select-Object -Unique)) {
+  try {
+    $ver = (& $exe -v 2>$null).Trim()
+    if (-not $ver) { continue }
+    $LastSeenVersion = $ver
+    & $exe $NodeCompatScript --is-supported $ver 2>$null
+    if ($LASTEXITCODE -eq 0) {
+      $SelectedNodeExe = $exe
+      $nodeDir = Split-Path -Parent $exe
+      $env:PATH = "$nodeDir;$env:PATH"
+      break
+    }
+  } catch {}
+}
+
+if (-not $SelectedNodeExe) {
+  if ($LastSeenVersion) {
+    Write-Host "[ERRO] Node.js encontrado ($LastSeenVersion) esta fora da faixa suportada (^22.12.0 || ^24.0.0 || >=26.0.0)." -ForegroundColor Red
+  } else {
+    Write-Host "[ERRO] Node.js compativel (^22.12.0 || ^24.0.0 || >=26.0.0) nao encontrado neste computador." -ForegroundColor Red
+  }
   Write-Host "       Instale o Node.js 24 LTS em: https://nodejs.org/" -ForegroundColor Yellow
   Write-Host "       Depois de instalar, execute install.cmd novamente." -ForegroundColor Yellow
   exit 1
 }
 
-$nodeVerRaw = (& node -v).Trim()
-Write-Host "       Node.js encontrado: $nodeVerRaw ($($nodeCmd.Source))" -ForegroundColor Green
+$nodeVerRaw = (& $SelectedNodeExe -v).Trim()
+Write-Host "       Node.js compativel encontrado: $nodeVerRaw ($SelectedNodeExe)" -ForegroundColor Green
 
 # 3. Instalar dependencias e gerar build
 Write-Host ""

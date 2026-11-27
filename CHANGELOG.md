@@ -4,7 +4,28 @@ Este arquivo registra a evolução técnica do **Vértice Workspace** (*Powered 
 
 ---
 
-## [Não lançado — V6 Local (V6-00 a V6-10 aprovados; V6-11 concluído localmente)]
+## [Não lançado — V6 Local (V6-00 a V6-10 aprovados; V6-11 a BL-03 entregues localmente)]
+
+### Política de aprovação de ferramentas, arquivos/diff e ambiente reproduzível (`BL-01`, `BL-02`, `BL-03` — 27/11/2026)
+
+- **BL-01 — Política de aprovação automática de ferramentas por conversa (`acp_permission`)**:
+  - Campo opcional `toolApprovalPolicy` (`'manual' | 'allow_read_edit' | 'allow_all_in_conversation'`) em `WorkspaceConversation` (`src/domain/types.ts`) e `canAllowAlways` em `PermissionRequest`.
+  - Classificação *fail-closed* (`classifyToolPermissionKind`), validação estrita de destino dentro do workspace (`extractPermissionTargetPaths`, `isTargetPathWithinWorkspace`), avaliação de política (`shouldAutoApprovePermission`) e proteção contra recusa prévia vinculada ao `scopeKey` (`hasBlockingDenialForAutoApproval`) em `src/domain/taskRules.ts`.
+  - Reversão obrigatória de `allow_all_in_conversation` para `'manual'` no reload (`sanitizeLoadedStateAfterReload` em `src/services/storage.ts`), na exportação JSON e na importação de backup (`copy` e `replace` em `src/services/exportService.ts`).
+  - Auto-aprovação auditável (`permission_requested` + `permission_decided` por `'Política automática da conversa'`) e suporte a `alwaysAllow` em `src/services/aionCoreAdapter.ts`, utilizando o diretório efetivo da equipe (`coreTeamWorkspace`) + confirmação real no sistema de arquivos via `GET /__vertice_workspace/verify-path` (*fail-closed* quando o destino real for incerto), mantendo o **Assistente Vértice** isolado em modo somente leitura.
+  - Controle de política por conversa com modal de confirmação explícita em `src/features/workspace/Composer.tsx` e botão secundário em `src/components/PermissionCard.tsx`.
+- **BL-02 — Lista de arquivos alterados e visualizador de diff do workspace**:
+  - Módulo somente leitura `scripts/vertice-workspace-diff.mjs` integrado a `scripts/vertice-server.mjs` e `vite.config.ts` expondo `GET /__vertice_workspace/changes`, `GET /__vertice_workspace/diff` e `GET /__vertice_workspace/verify-path` (loopback-only, restrição via `allowedWorkspaces` / `VERTICE_ALLOWED_WORKSPACES` documentada no `README.md`, anti-path-traversal, verificação de destino real de symlinks contra escape e lista de arquivos sensíveis com HTTP `403`, pathspecs literais `--literal-pathspecs` no Git, suporte a subdiretórios Git via `--show-prefix`, detecção de binários, limite seguro de 1.500 linhas / 200 KB e fallback honesto `filesystem_recent` fora de repositórios Git).
+  - Cliente `src/services/workspaceDiffClient.ts` e nova aba **Arquivos** na gaveta **Trabalho** (`src/features/inspector/FilesPanel.tsx` e `InspectorDrawer.tsx`) com atualização automática em entregas/revisões, badges de status, contagem `+`/`-` e visualização de diff em tema claro/escuro.
+- **BL-03 — Ambiente reproduzível, diagnóstico de Node e documentação atual**:
+  - Regra única de compatibilidade (`^22.12.0 || ^24.0.0 || >=26.0.0`, rejeitando pré-lançamentos como `-rc.1` / `-alpha.1`) centralizada em `scripts/node-compat.mjs` e reutilizada em `scripts/vertice-ctl.mjs` (inclusive no início de `cmdStart` antes de encerrar instância ativa), `scripts/vertice-server.mjs`, `package.json` (`npm run node:check` e hooks `predev`/`prebuild`/`prestart`/`prepreview`/`prelint`/`pretest`) e scripts PowerShell (`scripts/install.ps1`, `scripts/start-vertice.ps1`, `scripts/stop-vertice.ps1`), sem alterar variáveis globais do usuário.
+  - Documentação vigente alinhada à operação exclusiva com AionCore local (`docs/architecture.md`, `README.md`), corrigindo referência do IndexedDB (`aion_desk_storage`), documentando recuperação pós-reconexão, paginação em memória e tabela explícita de identificadores legados preservados por compatibilidade.
+- **Referência de verificação (baseline 27/11/2026 — Node `v24.11.0`, npm `11.6.1`, Windows 11)**:
+  - Verificação negativa em runtime incompatível (`node v20.18.1` via `node scripts/node-compat.mjs --check test`): saída `1` com diagnóstico claro em pt-BR antes de invocar ferramentas.
+  - `npm run lint` (`tsc --noEmit`): **aprovado** (`0` erros).
+  - `npm test` (`vitest run`): **aprovado** — **18 arquivos, 104/104 testes** (23,38s), cobrindo unitários de domínio, fixtures de contrato do Core, sincronização de workspace de equipes legadas, revalidação pós-verificação em disco, isolamento estrito de diff por arquivo único (com ou sem primeiro commit), rejeição de diretórios/pathspecs literais e subdiretórios Git no servidor local. *(Nota: testes automatizados validam contratos locais e fixtures; validação ao vivo com CLIs/modelos reais permanece separada.)*
+  - `npm run build` (`vite build`): **aprovado** em 1,04s (`1868` módulos, sem avisos de chunk).
+  - `npm run server:doctor`: **aprovado** (Node `v24.11.0`, `dist/` presente, loopback `127.0.0.1:4173` verificado).
 
 ### Instalação, launcher e servidor (`V6-00`, `V6-01`)
 

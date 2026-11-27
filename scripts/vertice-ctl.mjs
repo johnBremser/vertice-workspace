@@ -5,7 +5,14 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  assertSupportedNodeVersion,
+  isSupportedNodeVersion,
+  SUPPORTED_NODE_RANGE,
+} from './node-compat.mjs';
 import { isLoopbackHost, loadEnvFiles } from './vertice-server.mjs';
+
+export { isSupportedNodeVersion };
 
 const SCRIPT_MARKER = 'scripts/vertice-server.mjs';
 const CONTROL_IDENTITY_PATH = '/__vertice_ctl/identity';
@@ -14,19 +21,6 @@ const CONTROL_TOKEN_HEADER = 'x-vertice-control-token';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const defaultRootDir = path.resolve(scriptDir, '..');
-
-export function isSupportedNodeVersion(versionString = process.versions.node) {
-  const match = String(versionString)
-    .trim()
-    .replace(/^v/i, '')
-    .match(/^(\d+)\.(\d+)\.(\d+)/);
-  if (!match) return false;
-  const major = Number(match[1]);
-  const minor = Number(match[2]);
-  if (major === 22) return minor >= 12;
-  if (major === 24) return true;
-  return major >= 26;
-}
 
 export function restrictPrivateFileAcl(filePath) {
   if (process.platform !== 'win32') {
@@ -61,9 +55,11 @@ function getPaths(rootDir = defaultRootDir) {
 function computeServerScriptFingerprint(rootDir = defaultRootDir) {
   const hash = crypto.createHash('sha256');
   for (const rel of [
+    path.join('scripts', 'node-compat.mjs'),
     path.join('scripts', 'vertice-server.mjs'),
     path.join('scripts', 'vertice-source-reader.mjs'),
     path.join('scripts', 'vertice-folder-picker.mjs'),
+    path.join('scripts', 'vertice-workspace-diff.mjs'),
   ]) {
     const abs = path.join(rootDir, rel);
     hash.update(rel);
@@ -279,7 +275,7 @@ async function cmdDoctor(rootDir = defaultRootDir) {
 
   if (!nodeSupported) {
     recoverySteps.push(
-      'Node.js fora da faixa suportada: instale ou ative Node ^22.12.0, ^24.x (recomendado) ou >=26.0.0 antes de executar build ou servidor.',
+      `Node.js fora da faixa suportada: instale ou ative Node ${SUPPORTED_NODE_RANGE} (recomendado 24.x LTS) antes de executar build ou servidor.`,
     );
   }
   if (!distBuilt) {
@@ -391,7 +387,7 @@ async function cmdDoctor(rootDir = defaultRootDir) {
 
   console.log('=== Diagnóstico Vértice Workspace (distribuição local) ===');
   console.log(
-    `- Node.js: ${process.version} (${nodeSupported ? 'compatível com ^22.12.0 || ^24.0.0 || >=26.0.0' : 'incompatível: exige ^22.12.0 || ^24.0.0 || >=26.0.0'})`,
+    `- Node.js: ${process.version} (${nodeSupported ? `compatível com ${SUPPORTED_NODE_RANGE}` : `incompatível: exige ${SUPPORTED_NODE_RANGE}`})`,
   );
   console.log(
     `- Build estático (dist/index.html): ${distBuilt ? 'encontrado' : 'ausente (execute npm run build)'}`,
@@ -433,6 +429,7 @@ async function cmdDoctor(rootDir = defaultRootDir) {
 }
 
 async function cmdStart(rootDir = defaultRootDir) {
+  assertSupportedNodeVersion('server:start');
   const { host, port } = getRuntimeConfig(rootDir);
   const { stateDir, logsDir, pidFile } = getPaths(rootDir);
   const distIndex = path.join(rootDir, 'dist', 'index.html');

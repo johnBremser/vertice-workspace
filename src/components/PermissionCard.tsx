@@ -7,6 +7,7 @@ interface PermissionCardProps {
   participant?: Participant;
   taskTitle?: string;
   onApprove: (requestId: string) => void;
+  onApproveAlways?: (requestId: string) => void;
   onDeny: (requestId: string) => void;
 }
 
@@ -15,6 +16,7 @@ export function PermissionCard({
   participant,
   taskTitle,
   onApprove,
+  onApproveAlways,
   onDeny,
 }: PermissionCardProps) {
   const isPending = request.status === 'pending';
@@ -82,6 +84,15 @@ export function PermissionCard({
             {PT_BR.actions.approve}
             {request.isSimulated ? ' no escopo simulado' : ' neste escopo'}
           </button>
+          {request.canAllowAlways && onApproveAlways && (
+            <button
+              type="button"
+              onClick={() => onApproveAlways(request.id)}
+              className="whitespace-nowrap rounded-md border border-[var(--accent)] bg-[var(--accent-soft)] px-3 py-1.5 text-xs font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--accent-contrast)]"
+            >
+              Aprovar sempre este tipo nesta conversa
+            </button>
+          )}
           <button
             type="button"
             onClick={() => onDeny(request.id)}

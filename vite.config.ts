@@ -5,6 +5,10 @@ import path from 'path';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { handleLocalFolderRequest } from './scripts/vertice-folder-picker.mjs';
 import { handleAssistantSourceRequest } from './scripts/vertice-source-reader.mjs';
+import {
+  handleWorkspaceDiffRequest,
+  shouldHandleWorkspaceDiffRequest,
+} from './scripts/vertice-workspace-diff.mjs';
 
 function verticeAssistantSourcePlugin(rootDir: string): Plugin {
   return {
@@ -15,6 +19,10 @@ function verticeAssistantSourcePlugin(rootDir: string): Plugin {
           return;
         }
         if (handleLocalFolderRequest(req, res)) {
+          return;
+        }
+        if (shouldHandleWorkspaceDiffRequest(req.url)) {
+          void handleWorkspaceDiffRequest(req, res);
           return;
         }
         next();

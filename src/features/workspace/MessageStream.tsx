@@ -949,6 +949,9 @@ export function MessageStream() {
                   : undefined
               }
               onApprove={(id) => void respondPermission(id, 'approved')}
+              onApproveAlways={(id) =>
+                void respondPermission(id, 'approved', { alwaysAllow: true })
+              }
               onDeny={(id) => void respondPermission(id, 'denied')}
             />
           ))}

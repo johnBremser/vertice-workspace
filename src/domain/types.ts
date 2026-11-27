@@ -57,6 +57,11 @@ export type ConversationExecutionStatus =
   | 'completed'
   | 'failed';
 
+export type ConversationToolApprovalPolicy =
+  | 'manual'
+  | 'allow_read_edit'
+  | 'allow_all_in_conversation';
+
 export type ConversationSyncState =
   | 'synced'
   | 'gap_detected'
@@ -424,6 +429,7 @@ export interface PermissionRequest {
   commandSimulated: string;
   scopeDescription: string;
   status: 'pending' | 'approved' | 'denied';
+  canAllowAlways?: boolean;
   createdAt: string;
   resolvedAt?: string;
   sourceEventId: string;
@@ -479,6 +485,7 @@ export interface WorkspaceConversation {
   importedExternalTeamId?: string;
   status: 'active' | 'archived';
   executionStatus: ConversationExecutionStatus;
+  toolApprovalPolicy?: ConversationToolApprovalPolicy;
   coordinatorParticipantId: string;
   syncState: ConversationSyncState;
   missingFromSeq?: number;

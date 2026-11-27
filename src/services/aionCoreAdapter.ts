@@ -20,6 +20,9 @@ import {
 import { getLatestContextRevision } from '../domain/selectors';
 import {
   areTaskDependenciesSatisfied,
+  classifyToolPermissionKind,
+  hasBlockingDenialForAutoApproval,
+  shouldAutoApprovePermission,
   validateTaskInput,
 } from '../domain/taskRules';
 import {
@@ -36,6 +39,7 @@ import type {
   ConnectionAdapterConfig,
   ContextReceipt,
   ConversationProjection,
+  ConversationToolApprovalPolicy,
   CoreRuntimeSettings,
   DemoModelTier,
   ExecutionEvent,
@@ -589,6 +593,9 @@ export class AionCoreAdapterSkeleton implements AgentWorkspaceGateway {
   async dispatchTask(): Promise<void> {
     return this.notConnected('dispatchTask');
   }
+  async setConversationToolApprovalPolicy(): Promise<void> {
+    return this.notConnected('setConversationToolApprovalPolicy');
+  }
   async respondPermission(): Promise<void> {
     return this.notConnected('respondPermission');
   }
@@ -690,6 +697,7 @@ export class AionCoreAdapter
       callId: string;
       msgId: string;
       allowData: unknown;
+      allowAlwaysData?: unknown;
       denyData: unknown;
     }
   >();
@@ -3168,10 +3176,14 @@ export class AionCoreAdapter
               ? permInner.options.filter(isRecord)
               : [];
             let allowData: unknown = 'allow';
+            let allowAlwaysData: unknown;
             let denyData: unknown = 'reject';
             for (const opt of rawOptions) {
               const kindStr = String(opt.kind ?? '').toLowerCase();
               const optVal = opt.option_id ?? opt.value ?? opt.label;
+              if (kindStr === 'allow_always' && optVal !== undefined && allowAlwaysData === undefined) {
+                allowAlwaysData = optVal;
+              }
               if ((kindStr === 'allow_once' || kindStr === 'allow_always') && optVal !== undefined) {
                 if (kindStr === 'allow_once' || allowData === 'allow') {
                   allowData = optVal;
@@ -3209,6 +3221,8 @@ export class AionCoreAdapter
             );
             const activeAttempt = activeTask?.attempts[activeTask.attempts.length - 1];
             const reqEvtId = `evt_ws_perm_req_${convId}_${rawCallId}`;
+            const scopeKey = `${extConvId}:${rawCallId}`;
+            const previousPermissions = latestProj.permissions;
 
             this.pendingCoreConfirmations.set(reqId, {
               convId,
@@ -3217,6 +3231,7 @@ export class AionCoreAdapter
               callId: rawCallId,
               msgId: msgId ?? rawCallId,
               allowData,
+              allowAlwaysData,
               denyData,
             });
 
@@ -3242,11 +3257,12 @@ export class AionCoreAdapter
                     taskId: activeTask?.id,
                     attemptId: activeAttempt?.id,
                     actionKey: kindLabel,
-                    scopeKey: `${extConvId}:${rawCallId}`,
+                    scopeKey,
                     actionTitle: title,
                     commandSimulated: rawCmd,
                     scopeDescription: `Solicitação real do Core (${extConvId}, call=${rawCallId}).`,
                     status: 'pending',
+                    canAllowAlways: allowAlwaysData !== undefined,
                     createdAt: now,
                     sourceEventId: reqEvtId,
                     isSimulated: false,
@@ -3254,6 +3270,88 @@ export class AionCoreAdapter
                   generalSummary: `${participant.displayName} aguarda confirmação do usuário para "${title}".`,
                 },
               });
+
+              const policy = latestProj.conversation.toolApprovalPolicy ?? 'manual';
+              const permKind = classifyToolPermissionKind(kindLabel, title, rawCmd);
+              const blockedByPriorDenial = hasBlockingDenialForAutoApproval(
+                previousPermissions,
+                participant.id,
+                kindLabel,
+                scopeKey,
+                activeTask?.id,
+              );
+              if (
+                latestProj.conversation.executionStatus !== 'paused_queue' &&
+                shouldAutoApprovePermission(policy, permKind) &&
+                !blockedByPriorDenial
+              ) {
+                const resolvedMsgId = msgId ?? rawCallId;
+                this.enqueueBackgroundWork(async () => {
+                  const currentProj = this.state?.conversations[convId];
+                  const currentPerm = currentProj?.permissions.find(
+                    (p) => p.id === reqId,
+                  );
+                  if (
+                    !currentProj ||
+                    !currentPerm ||
+                    currentPerm.status !== 'pending' ||
+                    currentProj.conversation.executionStatus === 'paused_queue'
+                  ) {
+                    return;
+                  }
+                  const activePolicy =
+                    currentProj.conversation.toolApprovalPolicy ?? 'manual';
+                  if (!shouldAutoApprovePermission(activePolicy, permKind)) {
+                    return;
+                  }
+                  await this.httpClient.requestJson<unknown>({
+                    method: 'POST',
+                    path: `/api/conversations/${encodeURIComponent(extConvId)}/confirmations/${encodeURIComponent(rawCallId)}/confirm`,
+                    body: {
+                      msg_id: resolvedMsgId,
+                      data: allowData,
+                      always_allow: false,
+                    },
+                    idempotent: false,
+                    operationName: 'core.autoApprovePermission',
+                    teamId: currentProj.conversation.externalTeamId,
+                    slotId: participant.sessionRef.externalSlotId,
+                  });
+                  this.pendingCoreConfirmations.delete(reqId);
+                  const afterProj = this.state?.conversations[convId];
+                  if (!afterProj) return;
+                  const decidedAt = new Date().toISOString();
+                  const decEvtId = `evt_core_perm_dec_${convId}_${rawCallId}_approved`;
+                  if (!afterProj.seenEventIds.includes(decEvtId)) {
+                    const policyDesc =
+                      activePolicy === 'allow_read_edit'
+                        ? 'auto leitura/edição'
+                        : 'auto nesta sessão';
+                    this.emitAndIngest(convId, {
+                      id: decEvtId,
+                      seq: this.nextLocalSeq(afterProj),
+                      conversationId: convId,
+                      timestamp: decidedAt,
+                      origin: 'gateway',
+                      originSource: 'aion_core',
+                      participantId: participant.id,
+                      taskId: activeTask?.id,
+                      attemptId: activeAttempt?.id,
+                      type: 'permission_decided',
+                      payload: {
+                        decision: {
+                          requestId: reqId,
+                          decision: 'approved',
+                          decidedBy: 'Política automática da conversa',
+                          note: `Aprovado automaticamente (${policyDesc} · tipo ${permKind}) via POST /confirmations/.../confirm no AionCore.`,
+                          decidedAt,
+                        },
+                        generalSummary: `Permissão "${title}" aprovada automaticamente pela política da conversa (${policyDesc}).`,
+                      },
+                    });
+                  }
+                });
+              }
             }
           }
         }
@@ -7063,10 +7161,44 @@ export class AionCoreAdapter
     );
   }
 
+  async setConversationToolApprovalPolicy(
+    conversationId: string,
+    policy: ConversationToolApprovalPolicy,
+  ): Promise<void> {
+    const state = this.getStateSnapshot();
+    const proj = state.conversations[conversationId];
+    if (!proj) {
+      throw new GatewayCapabilityError(
+        'CONVERSATION_NOT_FOUND',
+        'Conversa não encontrada para atualizar política de aprovação.',
+      );
+    }
+    if ((proj.conversation.toolApprovalPolicy ?? 'manual') === policy) {
+      return;
+    }
+    this.state = {
+      ...state,
+      conversations: {
+        ...state.conversations,
+        [conversationId]: {
+          ...proj,
+          conversation: {
+            ...proj.conversation,
+            toolApprovalPolicy: policy,
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      },
+    };
+    this.notifyState();
+  }
+
   async respondPermission(input: {
     conversationId: string;
     requestId: string;
     decision: 'approved' | 'denied';
+    note?: string;
+    alwaysAllow?: boolean;
   }): Promise<void> {
     const state = this.getStateSnapshot();
     const proj = state.conversations[input.conversationId];
@@ -7098,9 +7230,15 @@ export class AionCoreAdapter
       pendingMeta?.callId ??
       (perm.scopeKey.includes(':') ? perm.scopeKey.split(':').slice(1).join(':') : perm.id);
     const msgId = pendingMeta?.msgId ?? callId;
+    const useAlwaysAllow =
+      input.decision === 'approved' &&
+      Boolean(input.alwaysAllow) &&
+      pendingMeta?.allowAlwaysData !== undefined;
     const confirmData =
       input.decision === 'approved'
-        ? (pendingMeta?.allowData ?? 'allow')
+        ? useAlwaysAllow
+          ? pendingMeta!.allowAlwaysData
+          : (pendingMeta?.allowData ?? 'allow')
         : (pendingMeta?.denyData ?? 'reject');
 
     await this.httpClient.requestJson<unknown>({
@@ -7109,7 +7247,7 @@ export class AionCoreAdapter
       body: {
         msg_id: msgId,
         data: confirmData,
-        always_allow: false,
+        always_allow: useAlwaysAllow,
       },
       idempotent: false,
       operationName: 'core.confirmPermission',
@@ -7139,11 +7277,19 @@ export class AionCoreAdapter
             decidedBy: 'Você',
             note:
               input.decision === 'approved'
-                ? 'Permitido via POST /confirmations/.../confirm no AionCore.'
+                ? useAlwaysAllow
+                  ? 'Permitido sempre para este tipo nesta conversa via POST /confirmations/.../confirm no AionCore.'
+                  : 'Permitido via POST /confirmations/.../confirm no AionCore.'
                 : 'Recusado via POST /confirmations/.../confirm no AionCore.',
             decidedAt: now,
           },
-          generalSummary: `Permissão "${perm.actionTitle}" ${input.decision === 'approved' ? 'aprovada' : 'recusada'} no AionCore.`,
+          generalSummary: `Permissão "${perm.actionTitle}" ${
+            input.decision === 'approved'
+              ? useAlwaysAllow
+                ? 'aprovada sempre para este tipo'
+                : 'aprovada'
+              : 'recusada'
+          } no AionCore.`,
         },
       });
     }

@@ -20,7 +20,7 @@ export interface UiPreferences {
   theme: ThemePreference;
   sidebarCollapsed: boolean;
   drawerOpen: boolean;
-  drawerTab: 'tasks' | 'context';
+  drawerTab: 'tasks' | 'context' | 'files';
 }
 
 const DEFAULT_PREFS: UiPreferences = {
@@ -45,7 +45,10 @@ export function loadUiPreferences(): UiPreferences {
           : 'system',
       sidebarCollapsed: Boolean(parsed.sidebarCollapsed),
       drawerOpen: Boolean(parsed.drawerOpen),
-      drawerTab: parsed.drawerTab === 'context' ? 'context' : 'tasks',
+      drawerTab:
+        parsed.drawerTab === 'context' || parsed.drawerTab === 'files'
+          ? parsed.drawerTab
+          : 'tasks',
     };
   } catch {
     return DEFAULT_PREFS;
@@ -224,12 +227,17 @@ export class WorkspacePersistenceManager {
         const migrated = migrateWorkspaceState(loaded);
         const sanitized = sanitizeLoadedStateAfterReload(migrated);
         this.memoryFallbackState = sanitized;
-        const reloadPausedAny = Object.keys(sanitized.conversations).some(
-          (cid) =>
-            sanitized.conversations[cid]?.conversation.executionStatus !==
-            migrated.conversations[cid]?.conversation.executionStatus,
+        const reloadChangedConversation = Object.keys(sanitized.conversations).some(
+          (cid) => {
+            const nextConv = sanitized.conversations[cid]?.conversation;
+            const prevConv = migrated.conversations[cid]?.conversation;
+            return (
+              nextConv?.executionStatus !== prevConv?.executionStatus ||
+              nextConv?.toolApprovalPolicy !== prevConv?.toolApprovalPolicy
+            );
+          },
         );
-        if (previousSchema < APP_BRAND.storageSchemaVersion || reloadPausedAny) {
+        if (previousSchema < APP_BRAND.storageSchemaVersion || reloadChangedConversation) {
           await this.driver.save(sanitized);
         }
         this.emit('saved');
@@ -406,6 +414,11 @@ export function sanitizeLoadedStateAfterReload(
             ? 'paused_queue'
             : 'paused_demo'
           : projection.conversation.executionStatus,
+        // Never preserve blanket session auto-approval across page reloads.
+        toolApprovalPolicy:
+          projection.conversation.toolApprovalPolicy === 'allow_all_in_conversation'
+            ? 'manual'
+            : projection.conversation.toolApprovalPolicy,
         autoPlayWasRunning: false,
       },
     };

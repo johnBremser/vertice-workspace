@@ -111,6 +111,26 @@ export const PT_BR = {
   drawerTabs: {
     tasks: 'Tarefas',
     context: 'Contexto compartilhado',
+    files: 'Arquivos',
+  },
+  toolApprovalPolicies: {
+    manual: {
+      label: 'Manual (padrão)',
+      shortLabel: 'Aprovação manual',
+      description: 'Pergunta antes de cada leitura, edição ou comando.',
+    },
+    allow_read_edit: {
+      label: 'Auto: leitura/edição',
+      shortLabel: 'Auto leitura/edição',
+      description:
+        'Aprova leitura e edição no workspace; comandos shell continuam manuais.',
+    },
+    allow_all_in_conversation: {
+      label: 'Auto: tudo nesta sessão',
+      shortLabel: 'Auto nesta sessão',
+      description:
+        'Aprova qualquer ferramenta nesta conversa enquanto a aba estiver aberta. Volta para Manual ao recarregar.',
+    },
   },
   actions: {
     openTasks: 'Tarefas',

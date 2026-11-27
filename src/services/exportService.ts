@@ -150,6 +150,10 @@ function detachExternalBindingsFromProjection(
     conversation: {
       ...proj.conversation,
       executionStatus: nextStatus,
+      toolApprovalPolicy:
+        proj.conversation.toolApprovalPolicy === 'allow_all_in_conversation'
+          ? 'manual'
+          : proj.conversation.toolApprovalPolicy,
       externalTeamId: undefined,
       importedExternalTeamId: hasTeamRef
         ? proj.conversation.externalTeamId
@@ -384,11 +388,23 @@ export function buildWorkspaceJsonExport(
   state: WorkspaceStoreState,
   onlyConversationId?: string,
 ): string {
-  const conversations = onlyConversationId
+  const rawConversations = onlyConversationId
     ? Object.values(state.conversations).filter(
       (c) => c.conversation.id === onlyConversationId,
     )
     : Object.values(state.conversations);
+
+  const conversations = rawConversations.map((proj) =>
+    proj.conversation.toolApprovalPolicy === 'allow_all_in_conversation'
+      ? {
+          ...proj,
+          conversation: {
+            ...proj.conversation,
+            toolApprovalPolicy: 'manual' as const,
+          },
+        }
+      : proj,
+  );
 
   const projectIds = new Set(
     conversations.map((c) => c.conversation.projectId),

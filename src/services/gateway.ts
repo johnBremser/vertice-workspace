@@ -1,6 +1,7 @@
 import type {
   ConversationProjection,
   ConversationSnapshot,
+  ConversationToolApprovalPolicy,
   CoreRuntimeSettings,
   DemoModelTier,
   ExecutionEvent,
@@ -304,11 +305,16 @@ export interface AgentWorkspaceGateway {
     conversationId: string;
     taskId: string;
   }): Promise<void>;
+  setConversationToolApprovalPolicy?(
+    conversationId: string,
+    policy: ConversationToolApprovalPolicy,
+  ): Promise<void>;
   respondPermission(input: {
     conversationId: string;
     requestId: string;
     decision: 'approved' | 'denied';
     note?: string;
+    alwaysAllow?: boolean;
   }): Promise<void>;
   resolveEscalation(input: {
     conversationId: string;

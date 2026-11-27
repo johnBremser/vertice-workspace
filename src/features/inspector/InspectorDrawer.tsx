@@ -1,5 +1,5 @@
 import { X } from 'lucide-react';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   getLatestContextRevision,
   getTaskSummaryCounts,
@@ -7,6 +7,7 @@ import {
 import { PT_BR } from '../../i18n/ptBR';
 import { useWorkspace } from '../workspace/WorkspaceContext';
 import { ContextPanel } from './ContextPanel';
+import { FilesPanel } from './FilesPanel';
 import { TasksPanel } from './TasksPanel';
 
 export function InspectorDrawer() {
@@ -14,6 +15,12 @@ export function InspectorDrawer() {
     useWorkspace();
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const wasOpenRef = useRef(drawerOpen);
+  const [filesCount, setFilesCount] = useState<number | null>(null);
+  const projectId = activeConversation?.conversation.projectId ?? '';
+
+  useEffect(() => {
+    setFilesCount(null);
+  }, [projectId]);
 
   useEffect(() => {
     const isNarrowViewport =
@@ -49,8 +56,11 @@ export function InspectorDrawer() {
       />
 
       <aside
-        aria-label="Painel auxiliar de tarefas e contexto"
-        className="fixed inset-y-0 right-0 z-40 flex w-full max-w-full flex-col border-l border-[var(--border-hairline)] bg-[var(--bg-sidebar)] shadow-xl sm:w-[360px] xl:static xl:z-auto xl:w-[320px] xl:shrink-0 xl:shadow-none 2xl:w-[340px]"
+        aria-label="Painel auxiliar de tarefas, contexto e arquivos"
+        className={`fixed inset-y-0 right-0 z-40 flex w-full max-w-full flex-col border-l border-[var(--border-hairline)] bg-[var(--bg-sidebar)] shadow-xl sm:w-[360px] xl:static xl:z-auto xl:shrink-0 xl:shadow-none ${drawerTab === 'files'
+            ? 'xl:w-[440px] 2xl:w-[500px]'
+            : 'xl:w-[320px] 2xl:w-[340px]'
+          }`}
       >
         <div className="flex items-center justify-between border-b border-[var(--border-hairline)] px-4 py-3">
           <div>
@@ -84,11 +94,10 @@ export function InspectorDrawer() {
             role="tab"
             aria-selected={drawerTab === 'tasks'}
             onClick={() => openDrawer('tasks')}
-            className={`flex-1 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
-              drawerTab === 'tasks'
+            className={`flex-1 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${drawerTab === 'tasks'
                 ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
                 : 'text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]'
-            }`}
+              }`}
           >
             {PT_BR.drawerTabs.tasks}
           </button>
@@ -97,18 +106,36 @@ export function InspectorDrawer() {
             role="tab"
             aria-selected={drawerTab === 'context'}
             onClick={() => openDrawer('context')}
-            className={`flex-1 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
-              drawerTab === 'context'
+            className={`flex-1 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${drawerTab === 'context'
                 ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
                 : 'text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]'
-            }`}
+              }`}
           >
             {PT_BR.drawerTabs.context}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={drawerTab === 'files'}
+            onClick={() => openDrawer('files')}
+            className={`flex-1 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${drawerTab === 'files'
+                ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
+                : 'text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]'
+              }`}
+          >
+            {PT_BR.drawerTabs.files}
+            {filesCount !== null ? ` (${filesCount})` : ''}
           </button>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
-          {drawerTab === 'tasks' ? <TasksPanel /> : <ContextPanel />}
+          {drawerTab === 'tasks' ? (
+            <TasksPanel />
+          ) : drawerTab === 'context' ? (
+            <ContextPanel />
+          ) : (
+            <FilesPanel onCountChange={setFilesCount} />
+          )}
         </div>
       </aside>
     </>

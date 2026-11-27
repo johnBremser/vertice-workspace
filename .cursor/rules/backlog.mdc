@@ -1,0 +1,12 @@
+---
+description: Organização e manutenção das listas de backlog do Vértice Workspace
+alwaysApply: true
+---
+
+# Organização do backlog
+
+- Concentre todas as listas de backlog e propostas de melhorias futuras em `docs/backlog/`.
+- Consulte e atualize o índice `docs/backlog/README.md` ao adicionar, mover ou retirar listas. Exemplo: registre uma nova lista em `docs/backlog/nova-melhoria.md` e acrescente seu link ao índice.
+- Use referências para essa pasta nos demais documentos, mantendo ali a lista de pendências.
+- Itens concluídos podem ser retirados do backlog ativo após registrar a entrega e suas verificações na documentação correspondente e atualizar links e dependências.
+- Preserve os IDs existentes e não reutilize IDs de itens retirados.

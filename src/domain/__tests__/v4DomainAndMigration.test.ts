@@ -10,7 +10,13 @@ import {
   instantiateParticipantsFromPreset,
   makeDemoModelRef,
 } from '../presets';
-import { isPermissionStillBlocked, validateTaskInput } from '../taskRules';
+import {
+  classifyToolPermissionKind,
+  hasBlockingDenialForAutoApproval,
+  isPermissionStillBlocked,
+  shouldAutoApprovePermission,
+  validateTaskInput,
+} from '../taskRules';
 import {
   checkAuditIndependence,
   sortParticipantsByTabOrder,
@@ -29,7 +35,11 @@ import {
   parseAndValidateWorkspaceBackup,
 } from '../../services/exportService';
 import { GatewayCapabilityError } from '../../services/gateway';
-import { MemoryOnlyStorageDriver, WorkspacePersistenceManager } from '../../services/storage';
+import {
+  MemoryOnlyStorageDriver,
+  sanitizeLoadedStateAfterReload,
+  WorkspacePersistenceManager,
+} from '../../services/storage';
 
 const SAMPLE_CORE_CONNECTION: ConnectionAdapterConfig = {
   id: 'conn_core_codex_1',
@@ -654,5 +664,149 @@ describe('V4 Domain, Migration, Configurable Teams, Protocol & Backup', () => {
     expect(directCopy.connections[0].catalogLoaded).toBe(true);
 
     gateway.dispose();
+  });
+
+  it('classifies tool permissions fail-closed and reverts allow_all_in_conversation on reload and backup (BL-01)', () => {
+    expect(classifyToolPermissionKind('read_file', 'Ler arquivo', 'src/App.tsx')).toBe('read');
+    expect(classifyToolPermissionKind('edit_file', 'Editar arquivo', 'src/App.tsx')).toBe('edit');
+    expect(classifyToolPermissionKind('edit_file', 'Editar arquivo fora', '../.env')).toBe('execute');
+    expect(classifyToolPermissionKind('execute', 'Executar testes', 'npm test')).toBe('execute');
+    expect(classifyToolPermissionKind('unknown_tool', 'Ação desconhecida', 'foo')).toBe('execute');
+
+    expect(shouldAutoApprovePermission(undefined, 'read')).toBe(false);
+    expect(shouldAutoApprovePermission('manual', 'read')).toBe(false);
+    expect(shouldAutoApprovePermission('allow_read_edit', 'read')).toBe(true);
+    expect(shouldAutoApprovePermission('allow_read_edit', 'edit')).toBe(true);
+    expect(shouldAutoApprovePermission('allow_read_edit', 'execute')).toBe(false);
+    expect(shouldAutoApprovePermission('allow_all_in_conversation', 'execute')).toBe(true);
+
+    const deniedPerms: PermissionRequest[] = [
+      {
+        id: 'perm_denied_1',
+        conversationId: 'conv_1',
+        participantId: 'part_exec',
+        actionKey: 'execute',
+        scopeKey: 'ext_1:call_1',
+        actionTitle: 'Rodar shell',
+        commandSimulated: 'rm -rf tmp',
+        scopeDescription: 'Core',
+        status: 'denied',
+        createdAt: '2026-11-27T10:00:00Z',
+        sourceEventId: 'evt_1',
+        isSimulated: false,
+      },
+    ];
+    expect(
+      hasBlockingDenialForAutoApproval(deniedPerms, 'part_exec', 'execute', 'ext_1:call_2'),
+    ).toBe(true);
+
+    const baseState: WorkspaceStoreState = {
+      schemaVersion: 2,
+      executionMode: 'aion_core',
+      coreSettings: { baseUrl: '', workspacePath: '', authMode: 'cookie_or_bearer' },
+      projects: [
+        {
+          id: 'proj_1',
+          name: 'Proj',
+          description: '',
+          workspacePathInfo: 'C:/repo',
+          executionMode: 'aion_core',
+          status: 'active',
+          createdAt: '2026-11-27T10:00:00Z',
+          updatedAt: '2026-11-27T10:00:00Z',
+        },
+      ],
+      connections: [],
+      agentProfiles: [],
+      participantProfiles: [],
+      teamPresets: [],
+      modelPolicy: {
+        defaultExecutorTier: 'fast',
+        reviewerTier: 'review',
+        escalationTargetTier: 'advanced',
+        qualityRejectionsBeforeSuggest: 2,
+        approvalMode: 'manual',
+      },
+      conversations: {
+        conv_auto_all: {
+          conversation: {
+            id: 'conv_auto_all',
+            projectId: 'proj_1',
+            title: 'Auto All',
+            executionMode: 'aion_core',
+            status: 'active',
+            executionStatus: 'idle',
+            toolApprovalPolicy: 'allow_all_in_conversation',
+            coordinatorParticipantId: 'p1',
+            syncState: 'synced',
+            lastAppliedSeq: 0,
+            scenarioStepIndex: 0,
+            createdAt: '2026-11-27T10:00:00Z',
+            updatedAt: '2026-11-27T10:00:00Z',
+          },
+          participants: [],
+          messagesByTab: { general: [] },
+          generalFeed: [],
+          tasks: [],
+          planRevisions: [],
+          contextRevisions: [],
+          permissions: [],
+          escalations: [],
+          coordinatorHistory: [],
+          configChanges: [],
+          seenEventIds: [],
+          pendingOutOfOrder: {},
+          eventLog: [],
+        },
+        conv_read_edit: {
+          conversation: {
+            id: 'conv_read_edit',
+            projectId: 'proj_1',
+            title: 'Read Edit',
+            executionMode: 'aion_core',
+            status: 'active',
+            executionStatus: 'idle',
+            toolApprovalPolicy: 'allow_read_edit',
+            coordinatorParticipantId: 'p1',
+            syncState: 'synced',
+            lastAppliedSeq: 0,
+            scenarioStepIndex: 0,
+            createdAt: '2026-11-27T10:00:00Z',
+            updatedAt: '2026-11-27T10:00:00Z',
+          },
+          participants: [],
+          messagesByTab: { general: [] },
+          generalFeed: [],
+          tasks: [],
+          planRevisions: [],
+          contextRevisions: [],
+          permissions: [],
+          escalations: [],
+          coordinatorHistory: [],
+          configChanges: [],
+          seenEventIds: [],
+          pendingOutOfOrder: {},
+          eventLog: [],
+        },
+      },
+      activeProjectId: 'proj_1',
+      activeConversationId: 'conv_auto_all',
+    };
+
+    const reloaded = sanitizeLoadedStateAfterReload(baseState);
+    expect(reloaded.conversations.conv_auto_all.conversation.toolApprovalPolicy).toBe('manual');
+    expect(reloaded.conversations.conv_read_edit.conversation.toolApprovalPolicy).toBe('allow_read_edit');
+
+    const exportedJson = buildWorkspaceJsonExport(baseState);
+    const parsed = parseAndValidateWorkspaceBackup(exportedJson);
+    expect(parsed.valid).toBe(true);
+    if (parsed.valid) {
+      expect(parsed.migratedState.conversations.conv_auto_all.conversation.toolApprovalPolicy).toBe('manual');
+      const replaced = applyImportedWorkspaceBackup(baseState, baseState, 'replace');
+      expect(replaced.conversations.conv_auto_all.conversation.toolApprovalPolicy).toBe('manual');
+      const copied = applyImportedWorkspaceBackup(baseState, baseState, 'copy');
+      const copiedId = Object.keys(copied.conversations).find((id) => id.startsWith('conv_auto_all_copia_'))!;
+      expect(copied.conversations[copiedId].conversation.toolApprovalPolicy).toBe('manual');
+    }
   });
 });

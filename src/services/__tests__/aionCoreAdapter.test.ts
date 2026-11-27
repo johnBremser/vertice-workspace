@@ -6430,4 +6430,276 @@ describe('AionCoreAdapter HTTP/CSRF/Refresh/WS & Collaboration Pipeline integrat
 
     adapter.dispose();
   });
+
+  it('enforces per-conversation acp_permission auto-approval policies, audit trail, prior-denial protection, allow_always, and assistant isolation (BL-01)', async () => {
+    const confirmCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let sock: MockSocket | null = null;
+
+    const fetchFn: typeof fetch = async (input, init) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/health')) return jsonResponse(REAL_CORE_HEALTH_V022);
+      if (url.endsWith('/api/auth/status')) {
+        return jsonResponse({ success: true, ...REAL_CORE_AUTH_STATUS_V022 });
+      }
+      if (url.endsWith('/login') && method === 'POST') {
+        return jsonResponse({ success: true, user: { username: 'admin' } });
+      }
+      if (url.endsWith('/api/ws-token')) {
+        return jsonResponse({
+          success: true,
+          ws_token: 'ws_tok_bl01',
+          expires_in: 300,
+        });
+      }
+      if (url.endsWith('/api/assistants')) {
+        return jsonResponse({ success: true, data: REAL_CORE_ASSISTANTS_V022 });
+      }
+      if (url.endsWith('/api/agents/management')) {
+        return jsonResponse({
+          success: true,
+          data: REAL_CORE_AGENTS_MANAGEMENT_V022,
+        });
+      }
+      if (url.endsWith('/api/teams') && method === 'GET') {
+        return jsonResponse({ success: true, data: [] });
+      }
+      if (url.endsWith('/api/teams') && method === 'POST') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as {
+          name?: string;
+          agents?: Array<{ name: string; role: string; model?: string }>;
+        };
+        const isAst = body.name === '__vertice_internal_assistant__';
+        return jsonResponse({
+          success: true,
+          data: {
+            id: isAst ? 'team_ast_bl01' : 'team_bl01_1',
+            name: body.name ?? 'BL01 Team',
+            assistants: (body.agents ?? []).map((a, idx) => ({
+              slot_id: isAst ? `slot_ast_${idx + 1}` : `slot_bl01_${idx + 1}`,
+              conversation_id: isAst
+                ? `ext_conv_ast_${idx + 1}`
+                : `ext_conv_bl01_${idx + 1}`,
+              name: a.name,
+              role: a.role,
+              model: a.model,
+            })),
+          },
+        });
+      }
+      if (url.includes('/confirmations/') && url.endsWith('/confirm') && method === 'POST') {
+        confirmCalls.push({ url, body: JSON.parse(String(init?.body ?? '{}')) });
+        return jsonResponse({ success: true });
+      }
+      return jsonResponse({ success: true, data: { message_id: 'ack', enqueue_status: 'started' } });
+    };
+
+    const persistence = new WorkspacePersistenceManager(new MemoryOnlyStorageDriver());
+    const adapter = new AionCoreAdapter(persistence, {
+      baseUrl: 'http://127.0.0.1:25828',
+      fetchFn,
+      wsFactory: (url, protocols) => {
+        sock = new MockSocket(url, protocols);
+        return sock;
+      },
+      readCookie: () => 'csrf_bl01',
+    });
+
+    await adapter.loadWorkspace();
+    await adapter.login('admin', 'secret');
+    await adapter.refreshCoreCatalog();
+    const proj = await adapter.createProject({
+      name: 'Projeto BL-01',
+      description: 'Auto approval',
+      workspacePathInfo: 'C:/tmp/bl01',
+    });
+    const conv = await adapter.createConversation({ projectId: proj.id, title: 'BL-01 Conv' });
+    const convId = conv.conversation.id;
+    await adapter.createCoreTeamForConversation(convId);
+    await adapter.connectWebSocket(convId);
+
+    const execPart = adapter
+      .getStateSnapshot()
+      .conversations[convId].participants.find((p) => p.roles.includes('executor'))!;
+    const extConvId = execPart.sessionRef.externalConversationId!;
+
+    // 1. Default policy ('manual') leaves acp_permission pending and exposes canAllowAlways
+    sock!.emitMessage({
+      name: 'message.stream',
+      data: {
+        conversation_id: extConvId,
+        msg_id: 'm_manual_1',
+        type: 'acp_permission',
+        data: {
+          tool_call: {
+            tool_call_id: 'call_manual_read',
+            title: 'Ler package.json',
+            kind: 'read',
+            raw_input: { path: 'package.json' },
+          },
+          options: [
+            { option_id: 'opt_once_1', kind: 'allow_once' },
+            { option_id: 'opt_always_1', kind: 'allow_always' },
+            { option_id: 'opt_reject_1', kind: 'reject_once' },
+          ],
+        },
+      },
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(confirmCalls).toHaveLength(0);
+    const manualPerm = adapter.getStateSnapshot().conversations[convId].permissions[0];
+    expect(manualPerm.status).toBe('pending');
+    expect(manualPerm.canAllowAlways).toBe(true);
+
+    // Explicit alwaysAllow approval sends allowAlwaysData + always_allow: true
+    await adapter.respondPermission({
+      conversationId: convId,
+      requestId: manualPerm.id,
+      decision: 'approved',
+      alwaysAllow: true,
+    });
+    expect(confirmCalls).toHaveLength(1);
+    expect(confirmCalls[0].body).toEqual({
+      msg_id: 'm_manual_1',
+      data: 'opt_always_1',
+      always_allow: true,
+    });
+
+    // 2. 'allow_read_edit' auto-approves read & edit, records audit trail, and leaves execute pending
+    await adapter.setConversationToolApprovalPolicy(convId, 'allow_read_edit');
+    sock!.emitMessage({
+      name: 'message.stream',
+      data: {
+        conversation_id: extConvId,
+        msg_id: 'm_auto_edit',
+        type: 'acp_permission',
+        data: {
+          tool_call: {
+            tool_call_id: 'call_auto_edit',
+            title: 'Editar src/App.tsx',
+            kind: 'edit',
+            raw_input: { path: 'src/App.tsx' },
+          },
+          options: [
+            { option_id: 'opt_edit_once', kind: 'allow_once' },
+            { option_id: 'opt_edit_always', kind: 'allow_always' },
+          ],
+        },
+      },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(confirmCalls).toHaveLength(2);
+    expect(confirmCalls[1].body).toEqual({
+      msg_id: 'm_auto_edit',
+      data: 'opt_edit_once',
+      always_allow: false,
+    });
+    const afterEditSnap = adapter.getStateSnapshot().conversations[convId];
+    expect(afterEditSnap.permissions.find((p) => p.id.endsWith('call_auto_edit'))?.status).toBe('approved');
+    expect(
+      afterEditSnap.generalFeed.some((g) =>
+        g.actorLabel === 'Política automática da conversa' && g.summary.includes('Editar src/App.tsx'),
+      ),
+    ).toBe(true);
+
+    // Execute stays pending under 'allow_read_edit'
+    sock!.emitMessage({
+      name: 'message.stream',
+      data: {
+        conversation_id: extConvId,
+        msg_id: 'm_exec_blocked',
+        type: 'acp_permission',
+        data: {
+          tool_call: {
+            tool_call_id: 'call_exec_1',
+            title: 'Executar npm test',
+            kind: 'execute',
+            raw_input: { command: 'npm test' },
+          },
+          options: [
+            { option_id: 'opt_exec_once', kind: 'allow_once' },
+            { option_id: 'opt_exec_reject', kind: 'reject_once' },
+          ],
+        },
+      },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(confirmCalls).toHaveLength(2);
+    const execPerm = afterEditSnap.permissions.find((p) => p.id.endsWith('call_exec_1'))
+      ?? adapter.getStateSnapshot().conversations[convId].permissions.find((p) => p.id.endsWith('call_exec_1'))!;
+    expect(execPerm.status).toBe('pending');
+
+    // Deny the execute permission -> blocks future auto-approval for same participant/action even in allow_all_in_conversation
+    await adapter.respondPermission({
+      conversationId: convId,
+      requestId: execPerm.id,
+      decision: 'denied',
+    });
+    expect(confirmCalls).toHaveLength(3);
+
+    await adapter.setConversationToolApprovalPolicy(convId, 'allow_all_in_conversation');
+    sock!.emitMessage({
+      name: 'message.stream',
+      data: {
+        conversation_id: extConvId,
+        msg_id: 'm_exec_after_deny',
+        type: 'acp_permission',
+        data: {
+          tool_call: {
+            tool_call_id: 'call_exec_2',
+            title: 'Executar npm run build',
+            kind: 'execute',
+            raw_input: { command: 'npm run build' },
+          },
+          options: [{ option_id: 'opt_exec_2', kind: 'allow_once' }],
+        },
+      },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    // Must remain pending and NOT call /confirm automatically
+    expect(confirmCalls).toHaveLength(3);
+    expect(
+      adapter
+        .getStateSnapshot()
+        .conversations[convId].permissions.find((p) => p.id.endsWith('call_exec_2'))?.status,
+    ).toBe('pending');
+
+    // 3. Read-only Vertice Assistant NEVER inherits conversation auto-approval
+    const assistantConn = adapter
+      .getStateSnapshot()
+      .connections.find((c) => Boolean(c.coreAssistantId))!;
+    await adapter.core.configureVerticeAssistant({
+      connectionId: assistantConn.id,
+      modelExternalId: assistantConn.availableModels[0].externalId,
+      modelDisplayName: assistantConn.availableModels[0].displayName,
+    });
+    const astExtConvId =
+      adapter.getStateSnapshot().assistantState!.config!.externalConversationId!;
+    sock!.emitMessage({
+      name: 'message.stream',
+      data: {
+        conversation_id: astExtConvId,
+        msg_id: 'm_ast_perm',
+        type: 'acp_permission',
+        data: {
+          tool_call: {
+            tool_call_id: 'call_ast_write',
+            title: 'Editar arquivo pelo Assistente',
+            kind: 'edit',
+            raw_input: { path: 'src/App.tsx' },
+          },
+          options: [{ option_id: 'opt_ast_once', kind: 'allow_once' }],
+        },
+      },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(confirmCalls).toHaveLength(3);
+    const astPermMsg = adapter
+      .getStateSnapshot()
+      .assistantState!.messages.find((m) => m.permissionRequest?.requestId === 'ast_perm_call_ast_write');
+    expect(astPermMsg?.permissionRequest?.status).toBe('pending');
+
+    adapter.dispose();
+  });
 });

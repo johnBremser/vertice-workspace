@@ -22,6 +22,13 @@ try {
   localFolderPicker = null;
 }
 
+let workspaceDiffReader = null;
+try {
+  workspaceDiffReader = await import('./vertice-workspace-diff.mjs');
+} catch {
+  workspaceDiffReader = null;
+}
+
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
@@ -503,6 +510,14 @@ export async function startVerticeServer(options = {}) {
         localFolderPicker.shouldHandleLocalFolderRequest(reqUrl)
       ) {
         localFolderPicker.handleLocalFolderRequest(req, res);
+        return;
+      }
+
+      if (
+        workspaceDiffReader &&
+        workspaceDiffReader.shouldHandleWorkspaceDiffRequest(reqUrl)
+      ) {
+        void workspaceDiffReader.handleWorkspaceDiffRequest(req, res);
         return;
       }
 

@@ -11,6 +11,7 @@ import {
 import type {
   ConnectionAdapterConfig,
   ConversationProjection,
+  ConversationToolApprovalPolicy,
   CoreRuntimeSettings,
   DemoModelTier,
   ExecutionMode,
@@ -103,7 +104,7 @@ interface WorkspaceContextValue {
   sidebarCollapsed: boolean;
   mobileSidebarOpen: boolean;
   drawerOpen: boolean;
-  drawerTab: 'tasks' | 'context';
+  drawerTab: 'tasks' | 'context' | 'files';
   mainSurface: 'conversation' | 'settings';
   selectedTaskId: string | null;
   highlightedEvent: HighlightTarget | null;
@@ -116,7 +117,7 @@ interface WorkspaceContextValue {
   setThemePreference: (theme: ThemePreference) => void;
   toggleSidebar: () => void;
   closeMobileSidebar: () => void;
-  openDrawer: (tab: 'tasks' | 'context', taskId?: string) => void;
+  openDrawer: (tab: 'tasks' | 'context' | 'files', taskId?: string) => void;
   closeDrawer: () => void;
   setMainSurface: (surface: 'conversation' | 'settings') => void;
   selectConversation: (projectId: string, conversationId: string) => void;
@@ -227,9 +228,13 @@ interface WorkspaceContextValue {
     participantId?: string,
   ) => Promise<void>;
   dispatchTask: (taskId: string) => Promise<void>;
+  setConversationToolApprovalPolicy: (
+    policy: ConversationToolApprovalPolicy,
+  ) => Promise<void>;
   respondPermission: (
     requestId: string,
     decision: 'approved' | 'denied',
+    options?: { alwaysAllow?: boolean },
   ) => Promise<void>;
   resolveEscalation: (
     escalationId: string,
@@ -357,7 +362,7 @@ export function WorkspaceProvider({
     }
     return initialPrefs.drawerOpen;
   });
-  const [drawerTab, setDrawerTab] = useState<'tasks' | 'context'>(
+  const [drawerTab, setDrawerTab] = useState<'tasks' | 'context' | 'files'>(
     initialPrefs.drawerTab,
   );
   const [mainSurface, setMainSurface] = useState<'conversation' | 'settings'>(
@@ -535,13 +540,16 @@ export function WorkspaceProvider({
     [activeConversationId],
   );
 
-  const openDrawer = useCallback((tab: 'tasks' | 'context', taskId?: string) => {
-    setDrawerTab(tab);
-    setDrawerOpen(true);
-    if (taskId) {
-      setSelectedTaskId(taskId);
-    }
-  }, []);
+  const openDrawer = useCallback(
+    (tab: 'tasks' | 'context' | 'files', taskId?: string) => {
+      setDrawerTab(tab);
+      setDrawerOpen(true);
+      if (taskId) {
+        setSelectedTaskId(taskId);
+      }
+    },
+    [],
+  );
 
   const closeDrawer = useCallback(() => {
     setDrawerOpen(false);
@@ -930,13 +938,22 @@ export function WorkspaceProvider({
           });
         }
       }),
-    respondPermission: async (requestId, decision) =>
+    setConversationToolApprovalPolicy: async (policy) =>
+      runAction(async () => {
+        if (!activeConversationId) return;
+        const gw = gatewayRef.current!;
+        if (gw.setConversationToolApprovalPolicy) {
+          await gw.setConversationToolApprovalPolicy(activeConversationId, policy);
+        }
+      }),
+    respondPermission: async (requestId, decision, options) =>
       runAction(async () => {
         if (!activeConversationId) return;
         await gatewayRef.current!.respondPermission({
           conversationId: activeConversationId,
           requestId,
           decision,
+          alwaysAllow: options?.alwaysAllow,
         });
       }),
     resolveEscalation: async (escalationId, resolution) =>

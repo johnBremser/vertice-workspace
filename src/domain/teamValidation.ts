@@ -1,5 +1,6 @@
 import type {
   ConnectionAdapterConfig,
+  ConversationProjection,
   Participant,
   ParticipantRole,
   Task,
@@ -39,7 +40,7 @@ export function getPrimaryRole(roles: ParticipantRole[]): ParticipantRole {
  * never be migrated to a real assistant from the Core catalog.
  */
 export function selectableConnectionsForMode<
-  T extends { id: string; mode: 'demo' | 'aion_core' },
+  T extends { id: string; mode: 'demo' | 'aion_core'; executableStatus?: string },
 >(
   connections: T[],
   currentConnectionId: string,
@@ -48,6 +49,7 @@ export function selectableConnectionsForMode<
 ): T[] {
   return connections.filter((conn) => {
     if (conn.id === currentConnectionId) return true;
+    if (conn.executableStatus === 'missing') return false;
     if (workspaceMode === 'aion_core') return conn.mode === 'aion_core';
     return conn.mode === currentConnectionMode;
   });
@@ -242,4 +244,114 @@ export function checkAuditIndependence(
     };
   }
   return { independent: true };
+}
+
+export interface CoreTeamSyncStatus {
+  hasExternalTeam: boolean;
+  needsResync: boolean;
+  unmappedParticipants: Participant[];
+  archivedBoundParticipants: Participant[];
+  coordinatorChanged: boolean;
+  reasons: string[];
+}
+
+/**
+ * Detects structural divergences between the active local conversation team
+ * configuration and the currently linked AionCore team (`externalTeamId`).
+ * Structural edits (adding/archiving participants, swapping CLI connections,
+ * changing Coordinator/lead, or applying another preset) require recreating
+ * the team in Core because Core assigns fixed `slot_id` and `lead` per team.
+ */
+export function getCoreTeamSyncStatus(
+  projection: Pick<ConversationProjection, 'conversation' | 'participants'>,
+): CoreTeamSyncStatus {
+  const teamId = projection.conversation.externalTeamId?.trim();
+  if (!teamId) {
+    return {
+      hasExternalTeam: false,
+      needsResync: false,
+      unmappedParticipants: [],
+      archivedBoundParticipants: [],
+      coordinatorChanged: false,
+      reasons: [],
+    };
+  }
+
+  const hasAnyBoundSlotForTeam = projection.participants.some(
+    (p) =>
+      p.sessionRef?.externalTeamId === teamId &&
+      Boolean(p.sessionRef?.externalSlotId),
+  );
+  const needsExplicitResync = Boolean(
+    projection.conversation.coreTeamNeedsResync,
+  );
+  const unmappedParticipants = projection.participants.filter((p) => {
+    if (p.archived) return false;
+    const isBoundToCurrentTeam =
+      Boolean(p.sessionRef?.externalSlotId) &&
+      p.sessionRef?.externalTeamId === teamId;
+    if (isBoundToCurrentTeam) return false;
+    // Flag unmapped coordinator on a team that already has bound slots (handles legacy pre-fix state)
+    // or any unmapped active participant when an explicit local structural edit occurred.
+    return (
+      needsExplicitResync ||
+      (hasAnyBoundSlotForTeam &&
+        (hasRole(p, 'coordinator') ||
+          p.id === projection.conversation.coordinatorParticipantId))
+    );
+  });
+  const archivedBoundParticipants = projection.participants.filter(
+    (p) =>
+      Boolean(p.archived) &&
+      p.sessionRef?.externalTeamId === teamId &&
+      Boolean(p.sessionRef.externalSlotId),
+  );
+  const coordinatorChanged = Boolean(
+    projection.conversation.coreLeadParticipantId &&
+      projection.conversation.coordinatorParticipantId &&
+      projection.conversation.coreLeadParticipantId !==
+        projection.conversation.coordinatorParticipantId,
+  );
+
+  const reasons: string[] = [];
+  if (unmappedParticipants.length > 0) {
+    reasons.push(
+      `Participante(s) sem vínculo ativo de slot no Core: ${unmappedParticipants
+        .map((p) => p.displayName)
+        .join(', ')}.`,
+    );
+  }
+  if (archivedBoundParticipants.length > 0) {
+    reasons.push(
+      `Participante(s) arquivado(s) ainda presente(s) no time antigo do Core: ${archivedBoundParticipants
+        .map((p) => p.displayName)
+        .join(', ')}.`,
+    );
+  }
+  if (coordinatorChanged) {
+    const coord = projection.participants.find(
+      (p) => p.id === projection.conversation.coordinatorParticipantId,
+    );
+    reasons.push(
+      `Coordenador (lead no Core) alterado para ${coord?.displayName ?? projection.conversation.coordinatorParticipantId}.`,
+    );
+  }
+  if (reasons.length === 0 && projection.conversation.coreTeamNeedsResync) {
+    reasons.push(
+      'Composição da equipe alterada localmente; o time no AionCore precisa ser recriado.',
+    );
+  }
+
+  return {
+    hasExternalTeam: true,
+    needsResync:
+      Boolean(projection.conversation.coreTeamNeedsResync) ||
+      unmappedParticipants.length > 0 ||
+      archivedBoundParticipants.length > 0 ||
+      coordinatorChanged,
+    unmappedParticipants,
+    archivedBoundParticipants,
+    coordinatorChanged,
+    reasons,
+  };
 }

@@ -196,493 +196,495 @@ export function SettingsView() {
           className="rounded-xl border border-[var(--border-hairline)] bg-[var(--bg-surface)] p-5"
         >
           <div>
-              <div className="flex items-center gap-2">
-                <Server
-                  className="h-4 w-4 text-[var(--accent)]"
-                  aria-hidden="true"
-                />
-                <h3
-                  id="settings-core-title"
-                  className="text-sm font-semibold text-[var(--text-primary)]"
-                >
-                  Conexão AionCore Local (WebUI v0.2.2)
-                </h3>
-              </div>
-              <p className="mt-1 text-xs text-[var(--text-secondary)]">
-                Comunicação direta via HTTP/WS com o servidor AionCore local. Credenciais e cookies nunca são salvos em IndexedDB, localStorage ou exportações.
-              </p>
-
-              {/* V5-06.1 Guided Onboarding Checklist (live-derived, never faked) */}
-              <div className="mt-4 rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-canvas)] p-3.5">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-xs font-semibold text-[var(--text-primary)]">
-                    Preparação guiada para operação real
-                  </span>
-                  <span className="tabular-nums text-[11px] text-[var(--text-muted)]">
-                    {setupSteps.filter((s) => s.done).length}/{setupSteps.length} etapas confirmadas
-                  </span>
-                </div>
-                <p className="mt-1 text-[11px] text-[var(--text-muted)]">
-                  Sinais ao vivo (/health, sessão e catálogo) são revalidados automaticamente ao recarregar neste modo, sem custo de modelo.
-                </p>
-                <ol className="mt-2.5 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  {setupSteps.map((step) => (
-                    <li
-                      key={step.id}
-                      className="flex items-start gap-2 text-xs"
-                    >
-                      {step.done ? (
-                        <CheckCircle2
-                          className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--status-success)]"
-                          aria-hidden="true"
-                        />
-                      ) : (
-                        <Circle
-                          className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]"
-                          aria-hidden="true"
-                        />
-                      )}
-                      <div className="min-w-0">
-                        <div
-                          className={
-                            step.done
-                              ? 'font-medium text-[var(--text-primary)]'
-                              : 'text-[var(--text-secondary)]'
-                          }
-                        >
-                          {step.label}
-                        </div>
-                        <div className="text-[11px] text-[var(--text-muted)]">
-                          {step.detail}
-                        </div>
-                      </div>
-                    </li>
-                  ))}
-                </ol>
-
-                {/* Objective next-step & empty/error/no-agent guidance */}
-                <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border-hairline)] pt-2.5 text-xs">
-                  {hasUnreachableError ? (
-                    <span className="text-[var(--status-danger)]">
-                      Runtime local inacessível no endereço configurado. Inicie o AionCore ou teste o endereço com <strong>Verificar /health</strong>.
-                    </span>
-                  ) : catalogSyncedEmpty || hasMissingExecutables ? (
-                    <span className="text-[var(--status-warning)]">
-                      Nenhum agente ou modelo confirmado foi encontrado no catálogo atual. Verifique os CLIs locais (<code>aioncore doctor</code> / login do provedor) e clique em <strong>Sincronizar catálogo</strong>.
-                    </span>
-                  ) : nextPendingStep ? (
-                    <span className="text-[var(--text-secondary)]">
-                      <strong className="font-medium text-[var(--text-primary)]">
-                        Próximo passo:
-                      </strong>{' '}
-                      {nextPendingStep.label} — {nextPendingStep.detail}
-                    </span>
-                  ) : (
-                    <span className="font-medium text-[var(--status-success)]">
-                      Todas as 5 etapas reais confirmadas nesta sessão.
-                    </span>
-                  )}
-
-                  {isCoreModeActive && nextPendingStep && (
-                    <div className="flex flex-wrap items-center gap-2">
-                      {nextPendingStep.id === 'health' && (
-                        <button
-                          type="button"
-                          onClick={() => void coreCheckHealth()}
-                          className="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
-                        >
-                          Verificar /health agora
-                        </button>
-                      )}
-                      {nextPendingStep.id === 'auth' && (
-                        <button
-                          type="button"
-                          onClick={() => void coreCheckAuthStatus()}
-                          className="rounded-md border border-[var(--border-strong)] bg-[var(--bg-surface)] px-2.5 py-1 text-[11px] font-medium text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]"
-                        >
-                          Checar sessão (/api/auth/status)
-                        </button>
-                      )}
-                      {nextPendingStep.id === 'catalog' && (
-                        <button
-                          type="button"
-                          onClick={() => void coreRefreshCatalog()}
-                          className="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
-                        >
-                          Sincronizar catálogo agora
-                        </button>
-                      )}
-                      {nextPendingStep.id === 'team' && (
-                        <button
-                          type="button"
-                          disabled={!activeConversation}
-                          onClick={() =>
-                            void coreCreateTeamForActiveConversation(
-                              teamNameDraft.trim() || undefined,
-                            )
-                          }
-                          className="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50"
-                        >
-                          Criar time no Core
-                        </button>
-                      )}
-                      {nextPendingStep.id === 'first_order' && (
-                        <button
-                          type="button"
-                          onClick={() => setMainSurface('conversation')}
-                          className="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
-                        >
-                          Ir para a conversa
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* V5-05.4 Browser Tab Close Policy */}
-              <p className="mt-3 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-elevated)] px-3 py-2 text-[11px] leading-relaxed text-[var(--text-secondary)]">
-                <strong className="font-semibold text-[var(--text-primary)]">
-                  Política ao fechar a aba (v1):
-                </strong>{' '}
-                o {APP_BRAND.name} não roda como serviço em segundo plano no navegador. Fechar todas as abas interrompe novas coordenações pela UI; ao reabrir, o histórico e tarefas já aceitas pelo Core são reconstruídos por catch-up sem reenviar pedidos concluídos.
-              </p>
-
-              <form
-                onSubmit={(e) => void handleSaveCoreSettings(e)}
-                className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2"
+            <div className="flex items-center gap-2">
+              <Server
+                className="h-4 w-4 text-[var(--accent)]"
+                aria-hidden="true"
+              />
+              <h3
+                id="settings-core-title"
+                className="text-sm font-semibold text-[var(--text-primary)]"
               >
-                <label className="block text-xs font-medium text-[var(--text-primary)]">
-                  Base URL do AionCore (opcional se mesma origem/proxy)
-                  <input
-                    type="text"
-                    value={baseUrl}
-                    onChange={(e) => setBaseUrl(e.target.value)}
-                    placeholder="Ex.: http://127.0.0.1:25808 ou vazio para proxy"
-                    className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 font-mono text-xs text-[var(--text-primary)]"
-                  />
-                </label>
+                Conexão AionCore Local (WebUI v0.2.2)
+              </h3>
+            </div>
+            <p className="mt-1 text-xs text-[var(--text-secondary)]">
+              Comunicação direta via HTTP/WS com o servidor AionCore local. Credenciais e cookies nunca são salvos em IndexedDB, localStorage ou exportações.
+            </p>
 
-                <div>
-                  <label
-                    htmlFor="aion-core-workspace-path"
-                    className="mb-1 block text-xs font-medium text-[var(--text-primary)]"
+            {/* V5-06.1 Guided Onboarding Checklist (live-derived, never faked) */}
+            <div className="mt-4 rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-canvas)] p-3.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-[var(--text-primary)]">
+                  Preparação guiada para operação real
+                </span>
+                <span className="tabular-nums text-[11px] text-[var(--text-muted)]">
+                  {setupSteps.filter((s) => s.done).length}/{setupSteps.length} etapas confirmadas
+                </span>
+              </div>
+              <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+                Sinais ao vivo (/health, sessão e catálogo) são revalidados automaticamente ao recarregar neste modo, sem custo de modelo.
+              </p>
+              <ol className="mt-2.5 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {setupSteps.map((step) => (
+                  <li
+                    key={step.id}
+                    className="flex items-start gap-2 text-xs"
                   >
-                    Caminho de workspace no Core
-                  </label>
-                  <WorkspacePathInput
-                    id="aion-core-workspace-path"
-                    value={workspacePath}
-                    onChange={setWorkspacePath}
-                    placeholder="Ex.: C:/projetos/meu-app"
-                    suggestions={(store?.projects ?? []).map((p) => p.workspacePathInfo)}
-                  />
-                </div>
+                    {step.done ? (
+                      <CheckCircle2
+                        className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--status-success)]"
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <Circle
+                        className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]"
+                        aria-hidden="true"
+                      />
+                    )}
+                    <div className="min-w-0">
+                      <div
+                        className={
+                          step.done
+                            ? 'font-medium text-[var(--text-primary)]'
+                            : 'text-[var(--text-secondary)]'
+                        }
+                      >
+                        {step.label}
+                      </div>
+                      <div className="text-[11px] text-[var(--text-muted)]">
+                        {step.detail}
+                      </div>
+                    </div>
+                  </li>
+                ))}
+              </ol>
 
-                {activeConversation && (
-                  <label className="sm:col-span-2 block text-xs font-medium text-[var(--text-primary)]">
-                    Nome da equipe no Core (por padrão usa o título da conversa ativa)
-                    <input
-                      type="text"
-                      value={teamNameDraft}
-                      onChange={(e) => setTeamNameDraft(e.target.value)}
-                      placeholder={activeConversation.conversation.title}
-                      className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 text-xs text-[var(--text-primary)]"
-                    />
-                  </label>
+              {/* Objective next-step & empty/error/no-agent guidance */}
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border-hairline)] pt-2.5 text-xs">
+                {hasUnreachableError ? (
+                  <span className="text-[var(--status-danger)]">
+                    Runtime local inacessível no endereço configurado. Inicie o AionCore ou teste o endereço com <strong>Verificar /health</strong>.
+                  </span>
+                ) : catalogSyncedEmpty || hasMissingExecutables ? (
+                  <span className="text-[var(--status-warning)]">
+                    Nenhum agente ou modelo confirmado foi encontrado no catálogo atual. Verifique os CLIs locais (<code>aioncore doctor</code> / login do provedor) e clique em <strong>Sincronizar catálogo</strong>.
+                  </span>
+                ) : nextPendingStep ? (
+                  <span className="text-[var(--text-secondary)]">
+                    <strong className="font-medium text-[var(--text-primary)]">
+                      Próximo passo:
+                    </strong>{' '}
+                    {nextPendingStep.label} — {nextPendingStep.detail}
+                  </span>
+                ) : (
+                  <span className="font-medium text-[var(--status-success)]">
+                    Todas as 5 etapas reais confirmadas nesta sessão.
+                  </span>
                 )}
 
-                <div className="sm:col-span-2 flex flex-wrap items-center gap-2 pt-1">
-                  <button
-                    type="submit"
-                    className="rounded-md bg-[var(--accent)] px-3.5 py-2 text-xs font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
-                  >
-                    Salvar endereço do Core
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void coreCheckHealth()}
-                    className="rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]"
-                  >
-                    Verificar /health
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void coreCheckAuthStatus()}
-                    className="rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]"
-                  >
-                    Verificar autenticação
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void coreRefreshCatalog()}
-                    className="rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]"
-                  >
-                    Sincronizar catálogo
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void coreSyncTeams()}
-                    className="rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]"
-                  >
-                    Listar times (/api/teams)
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!activeConversation}
-                    onClick={() =>
-                      void coreCreateTeamForActiveConversation(
-                        teamNameDraft.trim() || undefined,
-                      )
-                    }
-                    className="rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] disabled:opacity-50"
-                  >
-                    Criar time da conversa no Core
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void coreConnectWs()}
-                    className="rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]"
-                  >
-                    Conectar WebSocket
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => coreDisconnectWs()}
-                    className="rounded-md border border-[var(--border-hairline)] bg-[var(--bg-canvas)] px-3 py-2 text-xs text-[var(--text-secondary)]"
-                  >
-                    Desconectar WS
-                  </button>
-                </div>
-              </form>
-
-              {store?.coreSessionAuthenticated ? (
-                <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border-hairline)] pt-4 text-xs">
-                  <span className="inline-flex items-center gap-1.5 font-medium text-[var(--status-success)]">
-                    <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-                    Sessão WebUI autenticada no navegador (cookie HttpOnly ativo)
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => void coreLogout()}
-                    className="rounded-md border border-[var(--border-hairline)] bg-[var(--bg-elevated)] px-3 py-1.5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                  >
-                    Encerrar sessão
-                  </button>
-                </div>
-              ) : (
-                <form
-                  onSubmit={(e) => void handleLogin(e)}
-                  className="mt-4 flex flex-wrap items-end gap-2 border-t border-[var(--border-hairline)] pt-4"
-                >
-                  <label className="min-w-[160px] flex-1 text-xs text-[var(--text-secondary)]">
-                    Usuário WebUI
-                    <input
-                      type="text"
-                      autoComplete="username"
-                      value={username}
-                      onChange={(e) => setUsername(e.target.value)}
-                      className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-2.5 py-2 text-xs text-[var(--text-primary)]"
-                    />
-                  </label>
-                  <label className="min-w-[160px] flex-1 text-xs text-[var(--text-secondary)]">
-                    Senha (não persistida)
-                    <input
-                      type="password"
-                      autoComplete="current-password"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-2.5 py-2 text-xs text-[var(--text-primary)]"
-                    />
-                  </label>
-                  <button
-                    type="submit"
-                    className="rounded-md bg-[var(--accent)] px-3.5 py-2 text-xs font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
-                  >
-                    Autenticar (/login)
-                  </button>
-                </form>
-              )}
-
-              <div className="mt-4 border-t border-[var(--border-hairline)] pt-3 space-y-3">
-                {coreTeamsList.length > 0 && (() => {
-                  const orphanTeams = coreTeamsList.filter(
-                    (t) =>
-                      !t.linkedConversationId &&
-                      !t.isInternalAssistant &&
-                      activeConversation?.conversation.externalTeamId !== t.id,
-                  );
-                  const linkedCount = coreTeamsList.length - orphanTeams.length;
-                  return (
-                    <div className="rounded-md border border-[var(--border-hairline)] bg-[var(--bg-canvas)] p-3 text-xs">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div>
-                          <div className="font-semibold text-[var(--text-primary)]">
-                            Equipes criadas no AionCore ({coreTeamsList.length})
-                          </div>
-                          <div className="text-[11px] text-[var(--text-muted)]">
-                            {linkedCount} vinculada(s) · {orphanTeams.length} sem vínculo local
-                          </div>
-                        </div>
-                        {orphanTeams.length > 0 && (
-                          <div className="flex items-center gap-1.5">
-                            {confirmOrphanCleanup ? (
-                              <>
-                                <button
-                                  type="button"
-                                  disabled={cleaningTeams}
-                                  onClick={() => {
-                                    setCleaningTeams(true);
-                                    void coreCleanupOrphanTeams().finally(() => {
-                                      setCleaningTeams(false);
-                                      setConfirmOrphanCleanup(false);
-                                    });
-                                  }}
-                                  className="inline-flex items-center gap-1 rounded-md bg-[var(--status-danger)] px-2.5 py-1 text-[11px] font-semibold text-white hover:opacity-90 disabled:opacity-50"
-                                >
-                                  <Trash2 className="h-3 w-3" aria-hidden="true" />
-                                  <span>
-                                    {cleaningTeams
-                                      ? 'Limpando...'
-                                      : `Confirmar exclusão (${orphanTeams.length})`}
-                                  </span>
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={cleaningTeams}
-                                  onClick={() => setConfirmOrphanCleanup(false)}
-                                  className="rounded-md border border-[var(--border-hairline)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-secondary)]"
-                                >
-                                  Cancelar
-                                </button>
-                              </>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => setConfirmOrphanCleanup(true)}
-                                className="inline-flex items-center gap-1.5 rounded-md border border-[var(--border-strong)] bg-[var(--bg-surface)] px-2.5 py-1 text-[11px] font-medium text-[var(--status-danger)] hover:border-[var(--status-danger)]"
-                              >
-                                <Trash2 className="h-3 w-3" aria-hidden="true" />
-                                <span>Limpar sem vínculo ({orphanTeams.length})</span>
-                              </button>
-                            )}
-                          </div>
-                        )}
-                      </div>
-
-                      <ul className="mt-2 max-h-80 space-y-1.5 overflow-y-auto pr-1">
-                        {coreTeamsList.map((team) => {
-                          const isLinkedToActive =
-                            activeConversation?.conversation.externalTeamId === team.id;
-                          return (
-                            <li
-                              key={team.id}
-                              className="flex flex-wrap items-center justify-between gap-2 rounded border border-[var(--border-hairline)] bg-[var(--bg-surface)] px-2.5 py-1.5"
-                            >
-                              <div className="min-w-0 flex-1">
-                                <span className="font-medium text-[var(--text-primary)]">
-                                  {team.name}
-                                </span>{' '}
-                                <span className="text-[11px] text-[var(--text-secondary)]">
-                                  · {team.agentsCount} agente(s)
-                                  {team.workspace ? ` · ${team.workspace}` : ''}
-                                </span>
-                                <div className="font-mono text-[10px] text-[var(--text-muted)]">
-                                  id: {team.id}
-                                </div>
-                              </div>
-                              <div className="flex shrink-0 items-center gap-1.5">
-                                {isLinkedToActive ? (
-                                  <span className="rounded bg-[var(--accent-soft)] px-2 py-0.5 text-[10px] font-semibold text-[var(--accent)]">
-                                    Conversa ativa
-                                  </span>
-                                ) : team.isInternalAssistant ? (
-                                  <span className="rounded bg-[var(--bg-elevated)] px-2 py-0.5 text-[10px] text-[var(--text-secondary)]">
-                                    Assistente interno
-                                  </span>
-                                ) : team.linkedConversationId ? (
-                                  <span className="rounded bg-[var(--bg-elevated)] px-2 py-0.5 text-[10px] text-[var(--text-secondary)]">
-                                    Vinculada a conversa local
-                                  </span>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    disabled={
-                                      deletingTeamId === team.id || cleaningTeams
-                                    }
-                                    onClick={() => {
-                                      setDeletingTeamId(team.id);
-                                      void coreDeleteTeam(team.id).finally(() =>
-                                        setDeletingTeamId((curr) =>
-                                          curr === team.id ? null : curr,
-                                        ),
-                                      );
-                                    }}
-                                    title={`Excluir equipe sem vínculo "${team.name}" no AionCore`}
-                                    aria-label={`Excluir equipe ${team.name}`}
-                                    className="inline-flex items-center gap-1 rounded border border-[var(--border-hairline)] bg-[var(--bg-canvas)] px-2 py-0.5 text-[10px] font-medium text-[var(--text-secondary)] hover:border-[var(--status-danger)] hover:text-[var(--status-danger)] disabled:opacity-50"
-                                  >
-                                    <Trash2 className="h-2.5 w-2.5" aria-hidden="true" />
-                                    <span>
-                                      {deletingTeamId === team.id
-                                        ? 'Excluindo...'
-                                        : 'Excluir'}
-                                    </span>
-                                  </button>
-                                )}
-                              </div>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    </div>
-                  );
-                })()}
-
-                <button
-                  type="button"
-                  onClick={() => setShowDiagnostics((s) => !s)}
-                  className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                >
-                  {showDiagnostics ? (
-                    <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
-                  ) : (
-                    <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
-                  )}
-                  <span>Diagnóstico técnico HTTP/WS ({diagnostics.length})</span>
-                </button>
-
-                {showDiagnostics && (
-                  <div className="mt-2 max-h-48 overflow-y-auto rounded-md border border-[var(--border-hairline)] bg-[var(--bg-canvas)] p-2.5 font-mono text-[11px]">
-                    {diagnostics.length === 0 ? (
-                      <span className="text-[var(--text-muted)]">
-                        Nenhuma chamada registrada ao AionCore ainda.
-                      </span>
-                    ) : (
-                      <ul className="space-y-1">
-                        {diagnostics
-                          .slice()
-                          .reverse()
-                          .map((entry, idx) => (
-                            <li
-                              key={`${entry.timestamp}-${idx}`}
-                              className={
-                                entry.status === 'error'
-                                  ? 'text-[var(--status-danger)]'
-                                  : 'text-[var(--text-secondary)]'
-                              }
-                            >
-                              [{entry.timestamp.slice(11, 19)}] {entry.operation}{' '}
-                              {entry.code ? `(${entry.code}) ` : ''}
-                              — {entry.detail}
-                            </li>
-                          ))}
-                      </ul>
+                {isCoreModeActive && nextPendingStep && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    {nextPendingStep.id === 'health' && (
+                      <button
+                        type="button"
+                        onClick={() => void coreCheckHealth()}
+                        className="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
+                      >
+                        Verificar /health agora
+                      </button>
+                    )}
+                    {nextPendingStep.id === 'auth' && (
+                      <button
+                        type="button"
+                        onClick={() => void coreCheckAuthStatus()}
+                        className="rounded-md border border-[var(--border-strong)] bg-[var(--bg-surface)] px-2.5 py-1 text-[11px] font-medium text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]"
+                      >
+                        Checar sessão (/api/auth/status)
+                      </button>
+                    )}
+                    {nextPendingStep.id === 'catalog' && (
+                      <button
+                        type="button"
+                        onClick={() => void coreRefreshCatalog()}
+                        className="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
+                      >
+                        Sincronizar catálogo agora
+                      </button>
+                    )}
+                    {nextPendingStep.id === 'team' && (
+                      <button
+                        type="button"
+                        disabled={!activeConversation}
+                        onClick={() =>
+                          void coreCreateTeamForActiveConversation(
+                            teamNameDraft.trim() || undefined,
+                          )
+                        }
+                        className="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50"
+                      >
+                        Criar time no Core
+                      </button>
+                    )}
+                    {nextPendingStep.id === 'first_order' && (
+                      <button
+                        type="button"
+                        onClick={() => setMainSurface('conversation')}
+                        className="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
+                      >
+                        Ir para a conversa
+                      </button>
                     )}
                   </div>
                 )}
               </div>
             </div>
+
+            {/* V5-05.4 Browser Tab Close Policy */}
+            <p className="mt-3 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-elevated)] px-3 py-2 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+              <strong className="font-semibold text-[var(--text-primary)]">
+                Política ao fechar a aba (v1):
+              </strong>{' '}
+              o {APP_BRAND.name} não roda como serviço em segundo plano no navegador. Fechar todas as abas interrompe novas coordenações pela UI; ao reabrir, o histórico e tarefas já aceitas pelo Core são reconstruídos por catch-up sem reenviar pedidos concluídos.
+            </p>
+
+            <form
+              onSubmit={(e) => void handleSaveCoreSettings(e)}
+              className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2"
+            >
+              <label className="block text-xs font-medium text-[var(--text-primary)]">
+                Base URL do AionCore (opcional se mesma origem/proxy)
+                <input
+                  type="text"
+                  value={baseUrl}
+                  onChange={(e) => setBaseUrl(e.target.value)}
+                  placeholder="Ex.: http://127.0.0.1:25808 ou vazio para proxy"
+                  className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 font-mono text-xs text-[var(--text-primary)]"
+                />
+              </label>
+
+              <div>
+                <label
+                  htmlFor="aion-core-workspace-path"
+                  className="mb-1 block text-xs font-medium text-[var(--text-primary)]"
+                >
+                  Caminho de workspace no Core
+                </label>
+                <WorkspacePathInput
+                  id="aion-core-workspace-path"
+                  value={workspacePath}
+                  onChange={setWorkspacePath}
+                  placeholder="Ex.: C:/projetos/meu-app"
+                  suggestions={(store?.projects ?? []).map((p) => p.workspacePathInfo)}
+                />
+              </div>
+
+              {activeConversation && (
+                <label className="sm:col-span-2 block text-xs font-medium text-[var(--text-primary)]">
+                  Nome da equipe no Core (por padrão usa o título da conversa ativa)
+                  <input
+                    type="text"
+                    value={teamNameDraft}
+                    onChange={(e) => setTeamNameDraft(e.target.value)}
+                    placeholder={activeConversation.conversation.title}
+                    className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 text-xs text-[var(--text-primary)]"
+                  />
+                </label>
+              )}
+
+              <div className="sm:col-span-2 flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  type="submit"
+                  className="rounded-md bg-[var(--accent)] px-3.5 py-2 text-xs font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
+                >
+                  Salvar endereço do Core
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void coreCheckHealth()}
+                  className="rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]"
+                >
+                  Verificar /health
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void coreCheckAuthStatus()}
+                  className="rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]"
+                >
+                  Verificar autenticação
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void coreRefreshCatalog()}
+                  className="rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]"
+                >
+                  Sincronizar catálogo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void coreSyncTeams()}
+                  className="rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]"
+                >
+                  Listar times (/api/teams)
+                </button>
+                <button
+                  type="button"
+                  disabled={!activeConversation}
+                  onClick={() =>
+                    void coreCreateTeamForActiveConversation(
+                      teamNameDraft.trim() || undefined,
+                    )
+                  }
+                  className="rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-subtle)] disabled:opacity-50"
+                >
+                  {activeConversation?.conversation.externalTeamId
+                    ? 'Recriar time da conversa no Core'
+                    : 'Criar time da conversa no Core'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void coreConnectWs()}
+                  className="rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]"
+                >
+                  Conectar WebSocket
+                </button>
+                <button
+                  type="button"
+                  onClick={() => coreDisconnectWs()}
+                  className="rounded-md border border-[var(--border-hairline)] bg-[var(--bg-canvas)] px-3 py-2 text-xs text-[var(--text-secondary)]"
+                >
+                  Desconectar WS
+                </button>
+              </div>
+            </form>
+
+            {store?.coreSessionAuthenticated ? (
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border-hairline)] pt-4 text-xs">
+                <span className="inline-flex items-center gap-1.5 font-medium text-[var(--status-success)]">
+                  <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                  Sessão WebUI autenticada no navegador (cookie HttpOnly ativo)
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void coreLogout()}
+                  className="rounded-md border border-[var(--border-hairline)] bg-[var(--bg-elevated)] px-3 py-1.5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                >
+                  Encerrar sessão
+                </button>
+              </div>
+            ) : (
+              <form
+                onSubmit={(e) => void handleLogin(e)}
+                className="mt-4 flex flex-wrap items-end gap-2 border-t border-[var(--border-hairline)] pt-4"
+              >
+                <label className="min-w-[160px] flex-1 text-xs text-[var(--text-secondary)]">
+                  Usuário WebUI
+                  <input
+                    type="text"
+                    autoComplete="username"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-2.5 py-2 text-xs text-[var(--text-primary)]"
+                  />
+                </label>
+                <label className="min-w-[160px] flex-1 text-xs text-[var(--text-secondary)]">
+                  Senha (não persistida)
+                  <input
+                    type="password"
+                    autoComplete="current-password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-2.5 py-2 text-xs text-[var(--text-primary)]"
+                  />
+                </label>
+                <button
+                  type="submit"
+                  className="rounded-md bg-[var(--accent)] px-3.5 py-2 text-xs font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
+                >
+                  Autenticar (/login)
+                </button>
+              </form>
+            )}
+
+            <div className="mt-4 border-t border-[var(--border-hairline)] pt-3 space-y-3">
+              {coreTeamsList.length > 0 && (() => {
+                const orphanTeams = coreTeamsList.filter(
+                  (t) =>
+                    !t.linkedConversationId &&
+                    !t.isInternalAssistant &&
+                    activeConversation?.conversation.externalTeamId !== t.id,
+                );
+                const linkedCount = coreTeamsList.length - orphanTeams.length;
+                return (
+                  <div className="rounded-md border border-[var(--border-hairline)] bg-[var(--bg-canvas)] p-3 text-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <div className="font-semibold text-[var(--text-primary)]">
+                          Equipes criadas no AionCore ({coreTeamsList.length})
+                        </div>
+                        <div className="text-[11px] text-[var(--text-muted)]">
+                          {linkedCount} vinculada(s) · {orphanTeams.length} sem vínculo local
+                        </div>
+                      </div>
+                      {orphanTeams.length > 0 && (
+                        <div className="flex items-center gap-1.5">
+                          {confirmOrphanCleanup ? (
+                            <>
+                              <button
+                                type="button"
+                                disabled={cleaningTeams}
+                                onClick={() => {
+                                  setCleaningTeams(true);
+                                  void coreCleanupOrphanTeams().finally(() => {
+                                    setCleaningTeams(false);
+                                    setConfirmOrphanCleanup(false);
+                                  });
+                                }}
+                                className="inline-flex items-center gap-1 rounded-md bg-[var(--status-danger)] px-2.5 py-1 text-[11px] font-semibold text-white hover:opacity-90 disabled:opacity-50"
+                              >
+                                <Trash2 className="h-3 w-3" aria-hidden="true" />
+                                <span>
+                                  {cleaningTeams
+                                    ? 'Limpando...'
+                                    : `Confirmar exclusão (${orphanTeams.length})`}
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                disabled={cleaningTeams}
+                                onClick={() => setConfirmOrphanCleanup(false)}
+                                className="rounded-md border border-[var(--border-hairline)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-secondary)]"
+                              >
+                                Cancelar
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmOrphanCleanup(true)}
+                              className="inline-flex items-center gap-1.5 rounded-md border border-[var(--border-strong)] bg-[var(--bg-surface)] px-2.5 py-1 text-[11px] font-medium text-[var(--status-danger)] hover:border-[var(--status-danger)]"
+                            >
+                              <Trash2 className="h-3 w-3" aria-hidden="true" />
+                              <span>Limpar sem vínculo ({orphanTeams.length})</span>
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    <ul className="mt-2 max-h-80 space-y-1.5 overflow-y-auto pr-1">
+                      {coreTeamsList.map((team) => {
+                        const isLinkedToActive =
+                          activeConversation?.conversation.externalTeamId === team.id;
+                        return (
+                          <li
+                            key={team.id}
+                            className="flex flex-wrap items-center justify-between gap-2 rounded border border-[var(--border-hairline)] bg-[var(--bg-surface)] px-2.5 py-1.5"
+                          >
+                            <div className="min-w-0 flex-1">
+                              <span className="font-medium text-[var(--text-primary)]">
+                                {team.name}
+                              </span>{' '}
+                              <span className="text-[11px] text-[var(--text-secondary)]">
+                                · {team.agentsCount} agente(s)
+                                {team.workspace ? ` · ${team.workspace}` : ''}
+                              </span>
+                              <div className="font-mono text-[10px] text-[var(--text-muted)]">
+                                id: {team.id}
+                              </div>
+                            </div>
+                            <div className="flex shrink-0 items-center gap-1.5">
+                              {isLinkedToActive ? (
+                                <span className="rounded bg-[var(--accent-soft)] px-2 py-0.5 text-[10px] font-semibold text-[var(--accent)]">
+                                  Conversa ativa
+                                </span>
+                              ) : team.isInternalAssistant ? (
+                                <span className="rounded bg-[var(--bg-elevated)] px-2 py-0.5 text-[10px] text-[var(--text-secondary)]">
+                                  Assistente interno
+                                </span>
+                              ) : team.linkedConversationId ? (
+                                <span className="rounded bg-[var(--bg-elevated)] px-2 py-0.5 text-[10px] text-[var(--text-secondary)]">
+                                  Vinculada a conversa local
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled={
+                                    deletingTeamId === team.id || cleaningTeams
+                                  }
+                                  onClick={() => {
+                                    setDeletingTeamId(team.id);
+                                    void coreDeleteTeam(team.id).finally(() =>
+                                      setDeletingTeamId((curr) =>
+                                        curr === team.id ? null : curr,
+                                      ),
+                                    );
+                                  }}
+                                  title={`Excluir equipe sem vínculo "${team.name}" no AionCore`}
+                                  aria-label={`Excluir equipe ${team.name}`}
+                                  className="inline-flex items-center gap-1 rounded border border-[var(--border-hairline)] bg-[var(--bg-canvas)] px-2 py-0.5 text-[10px] font-medium text-[var(--text-secondary)] hover:border-[var(--status-danger)] hover:text-[var(--status-danger)] disabled:opacity-50"
+                                >
+                                  <Trash2 className="h-2.5 w-2.5" aria-hidden="true" />
+                                  <span>
+                                    {deletingTeamId === team.id
+                                      ? 'Excluindo...'
+                                      : 'Excluir'}
+                                  </span>
+                                </button>
+                              )}
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                );
+              })()}
+
+              <button
+                type="button"
+                onClick={() => setShowDiagnostics((s) => !s)}
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              >
+                {showDiagnostics ? (
+                  <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                ) : (
+                  <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
+                )}
+                <span>Diagnóstico técnico HTTP/WS ({diagnostics.length})</span>
+              </button>
+
+              {showDiagnostics && (
+                <div className="mt-2 max-h-48 overflow-y-auto rounded-md border border-[var(--border-hairline)] bg-[var(--bg-canvas)] p-2.5 font-mono text-[11px]">
+                  {diagnostics.length === 0 ? (
+                    <span className="text-[var(--text-muted)]">
+                      Nenhuma chamada registrada ao AionCore ainda.
+                    </span>
+                  ) : (
+                    <ul className="space-y-1">
+                      {diagnostics
+                        .slice()
+                        .reverse()
+                        .map((entry, idx) => (
+                          <li
+                            key={`${entry.timestamp}-${idx}`}
+                            className={
+                              entry.status === 'error'
+                                ? 'text-[var(--status-danger)]'
+                                : 'text-[var(--text-secondary)]'
+                            }
+                          >
+                            [{entry.timestamp.slice(11, 19)}] {entry.operation}{' '}
+                            {entry.code ? `(${entry.code}) ` : ''}
+                            — {entry.detail}
+                          </li>
+                        ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
         </section>
 
         {/* 2. Floating Assistant & Knowledge Base (above team/catalog for fast access) */}

@@ -1,6 +1,6 @@
 # Vértice Workspace
 
-Plano ativo: [Plano v6](docs/implementation_plan_v6_local.md) · Progresso: [docs/v6-progress.md](docs/v6-progress.md) · Candidata funcional: [docs/v6-09-release-candidate.md](docs/v6-09-release-candidate.md) · Licença: [Apache-2.0](LICENSE) · Terceiros: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).  
+Plano ativo: [Plano v6](docs/implementation_plan_v6_local.md) · Progresso: [docs/v6-progress.md](docs/v6-progress.md) · Backlog de melhorias: [docs/backlog-melhorias.md](docs/backlog-melhorias.md) · Candidata funcional: [docs/v6-09-release-candidate.md](docs/v6-09-release-candidate.md) · Licença: [Apache-2.0](LICENSE) · Terceiros: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).  
 Estado do pacote: `0.4.0` (pré-lançamento `v1.0.0` **não declarada**). A combinação suportada (`AionCore v0.2.2` + `Codex CLI` multi-sessão + `Cursor`) possui prontidão funcional validada no Windows 11; consulte as limitações conhecidas em [docs/compatibility-matrix.md](docs/compatibility-matrix.md).
 
 > **Seu time de agentes, do plano à entrega.**  

@@ -56,4 +56,26 @@ describe('selectableConnectionsForMode (V6-12)', () => {
     );
     expect(result.some((c) => c.id === 'conn_claude_demo')).toBe(true);
   });
+
+  it('oculta conexões cujo CLI está ausente no PATH, mantendo apenas se já estiver vinculada ao participante', () => {
+    const withMissing = [
+      { id: 'conn_codex_missing', displayName: 'Codex CLI', mode: 'aion_core' as const, executableStatus: 'missing' },
+      { id: 'conn_cursor_ok', displayName: 'Cursor', mode: 'aion_core' as const, executableStatus: 'verified' },
+    ];
+    const forOther = selectableConnectionsForMode(
+      withMissing,
+      'conn_cursor_ok',
+      'aion_core',
+      'aion_core',
+    );
+    expect(forOther.map((c) => c.id)).toEqual(['conn_cursor_ok']);
+
+    const forBound = selectableConnectionsForMode(
+      withMissing,
+      'conn_codex_missing',
+      'aion_core',
+      'aion_core',
+    );
+    expect(forBound.map((c) => c.id)).toEqual(['conn_codex_missing', 'conn_cursor_ok']);
+  });
 });

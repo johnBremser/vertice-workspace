@@ -24,6 +24,7 @@ import {
 } from '../domain/taskRules';
 import {
   checkAuditIndependence,
+  getCoreTeamSyncStatus,
   getParticipantRoles,
   getPrimaryRole,
   hasRole,
@@ -324,7 +325,10 @@ function resolvePresetMembersForCore(
   members: TeamPresetMember[],
 ): TeamPresetMember[] {
   const coreConns = state.connections.filter(
-    (c) => c.mode === 'aion_core' && Boolean(c.coreAssistantId),
+    (c) =>
+      c.mode === 'aion_core' &&
+      Boolean(c.coreAssistantId) &&
+      c.executableStatus !== 'missing',
   );
   if (coreConns.length === 0) {
     return members;
@@ -582,6 +586,9 @@ export class AionCoreAdapterSkeleton implements AgentWorkspaceGateway {
   async controlExecution(): Promise<void> {
     return this.notConnected('controlExecution');
   }
+  async dispatchTask(): Promise<void> {
+    return this.notConnected('dispatchTask');
+  }
   async respondPermission(): Promise<void> {
     return this.notConnected('respondPermission');
   }
@@ -806,6 +813,80 @@ export class AionCoreAdapter
     this.pendingCoreConfirmations.clear();
     this.assistantPendingConfirmations.clear();
     this.assistantStreamBuffers.clear();
+  }
+
+  private clearConversationCoreRuntimeCaches(
+    conversationId: string,
+    previousTeamId?: string,
+  ): void {
+    const convPrefix = `${conversationId}:`;
+    for (const [key, buf] of this.streamBuffers.entries()) {
+      if (buf.conversationId === conversationId || key.startsWith(convPrefix)) {
+        this.streamBuffers.delete(key);
+      }
+    }
+    for (const key of this.expectedKindByParticipant.keys()) {
+      if (key.startsWith(convPrefix)) {
+        this.expectedKindByParticipant.delete(key);
+      }
+    }
+    for (const key of this.expectedDispatchByParticipant.keys()) {
+      if (key.startsWith(convPrefix)) {
+        this.expectedDispatchByParticipant.delete(key);
+      }
+    }
+    for (const key of this.lastSentContextByParticipant.keys()) {
+      if (key.startsWith(convPrefix)) {
+        this.lastSentContextByParticipant.delete(key);
+      }
+    }
+    for (const key of this.inFlightSlotDispatches.keys()) {
+      if (key.startsWith(convPrefix)) {
+        this.inFlightSlotDispatches.delete(key);
+      }
+    }
+    this.lastReconciledSlotWorkByConv.delete(conversationId);
+    for (const [key, pending] of this.pendingCoreConfirmations.entries()) {
+      if (pending.convId === conversationId) {
+        this.pendingCoreConfirmations.delete(key);
+      }
+    }
+
+    const participantIds = new Set(
+      (this.state?.conversations[conversationId]?.participants ?? []).map(
+        (p) => p.id,
+      ),
+    );
+    for (const [turnId, participantId] of this.turnParticipantMap.entries()) {
+      if (participantIds.has(participantId)) {
+        this.turnParticipantMap.delete(turnId);
+      }
+    }
+
+    if (previousTeamId) {
+      const teamPrefix = `${previousTeamId}:`;
+      for (const key of this.lastSlotWorkSignature.keys()) {
+        if (key.startsWith(teamPrefix)) {
+          this.lastSlotWorkSignature.delete(key);
+        }
+      }
+      for (const key of this.slotReasoningApplied.keys()) {
+        if (key.startsWith(teamPrefix)) {
+          this.slotReasoningApplied.delete(key);
+        }
+      }
+    }
+  }
+
+  private async ensureCoreTeamSynchronized(
+    conversationId: string,
+    force = false,
+  ): Promise<void> {
+    const state = this.getStateSnapshot();
+    const proj = state.conversations[conversationId];
+    if (!proj?.conversation.externalTeamId) return;
+    if (!force && !getCoreTeamSyncStatus(proj).needsResync) return;
+    await this.createCoreTeamForConversation(conversationId);
   }
 
   private recordConsumedTurnBinding(
@@ -1366,11 +1447,19 @@ export class AionCoreAdapter
           linkedAgent?.config_options,
         );
 
+        const blockReason = `${assistant.team_block_reason ?? ''} ${assistant.agent_status ?? ''}`;
+        const blockedAsMissing =
+          !assistant.team_selectable &&
+          /missing|not[_\s-]?installed|not on \$?path|offline|not found/i.test(
+            blockReason,
+          );
         const executableStatus = linkedAgent
-          ? linkedAgent.installed
+          ? linkedAgent.installed && !blockedAsMissing
             ? 'verified'
             : 'missing'
-          : 'unknown';
+          : blockedAsMissing
+            ? 'missing'
+            : 'unknown';
 
         const coreAgentStatus = linkedAgent?.status ?? assistant.agent_status;
         const authStatus = mapCoreAgentStatusToAuthStatus(coreAgentStatus);
@@ -1518,7 +1607,12 @@ export class AionCoreAdapter
       });
       if (existingEntry) {
         const [convId, convProj] = existingEntry;
+        const leadAgent = team.assistants.find(
+          (a) => a.role === 'lead' || a.role === 'leader',
+        );
+        let mappedLeadParticipantId = convProj.conversation.coreLeadParticipantId;
         const mappedParticipants = convProj.participants.map((p) => {
+          if (p.archived) return p;
           const matchedAgent =
             team.assistants.find(
               (a) => a.slot_id === p.sessionRef.externalSlotId,
@@ -1528,6 +1622,9 @@ export class AionCoreAdapter
                 a.name.toLowerCase() === p.displayName.toLowerCase(),
             );
           if (!matchedAgent) return p;
+          if (leadAgent && matchedAgent.slot_id === leadAgent.slot_id) {
+            mappedLeadParticipantId = p.id;
+          }
           return {
             ...p,
             sessionRef: {
@@ -1545,6 +1642,9 @@ export class AionCoreAdapter
           conversation: {
             ...convProj.conversation,
             externalTeamId: team.id,
+            ...(mappedLeadParticipantId
+              ? { coreLeadParticipantId: mappedLeadParticipantId }
+              : {}),
           },
         };
         updated += 1;
@@ -1706,6 +1806,7 @@ export class AionCoreAdapter
       agents,
     };
 
+    const previousTeamId = proj.conversation.externalTeamId?.trim() || undefined;
     const raw = await this.httpClient.requestJson<unknown>({
       method: 'POST',
       path: '/api/teams',
@@ -1723,30 +1824,139 @@ export class AionCoreAdapter
         Array.isArray((d as TeamResponse).assistants),
     );
 
+    if (previousTeamId && previousTeamId !== team.id) {
+      try {
+        const delRaw = await this.httpClient.requestJson<unknown>({
+          method: 'DELETE',
+          path: `/api/teams/${encodeURIComponent(previousTeamId)}`,
+          idempotent: true,
+          operationName: 'core.deleteReplacedTeam',
+          teamId: previousTeamId,
+        });
+        unwrapApiResponse(delRaw, `DELETE /api/teams/${previousTeamId}`);
+      } catch (err) {
+        this.diagnostics.record({
+          operation: 'core.deleteReplacedTeam',
+          status: 'ok',
+          teamId: previousTeamId,
+          detail: `Time anterior "${previousTeamId}" não pôde ser removido após recriação (${err instanceof Error ? err.message : 'ignorado'}).`,
+        });
+      }
+      this.clearConversationCoreRuntimeCaches(conversationId, previousTeamId);
+    }
+
     const latestState = this.state ?? state;
     const latestProj = latestState.conversations[conversationId] ?? proj;
-    const mappedParticipants = latestProj.participants.map((p) => {
-      const matched =
+    const claimedSlotIds = new Set<string>();
+    const matchedSlotByParticipantId = new Map<string, TeamResponse['assistants'][number]>();
+    const leadSlot = team.assistants.find(
+      (a) => a.role === 'lead' || a.role === 'leader',
+    );
+    let resolvedCoordinatorId = latestProj.conversation.coordinatorParticipantId;
+    const now = new Date().toISOString();
+
+    // Pass 1: exact name matches across all active participants (prefer lead slot for coordinator)
+    for (const p of latestProj.participants) {
+      if (p.archived) continue;
+      const isCoord = hasRole(p, 'coordinator');
+      const exactMatch =
+        (isCoord &&
+        leadSlot &&
+        !claimedSlotIds.has(leadSlot.slot_id) &&
+        leadSlot.name.toLowerCase() === p.displayName.toLowerCase()
+          ? leadSlot
+          : undefined) ??
         team.assistants.find(
-          (a) => a.name.toLowerCase() === p.displayName.toLowerCase(),
-        ) ??
-        (hasRole(p, 'coordinator')
-          ? team.assistants.find(
-            (a) => a.role === 'lead' || a.role === 'leader',
-          )
-          : undefined);
+          (a) =>
+            !claimedSlotIds.has(a.slot_id) &&
+            a.name.toLowerCase() === p.displayName.toLowerCase(),
+        );
+      if (exactMatch) {
+        claimedSlotIds.add(exactMatch.slot_id);
+        matchedSlotByParticipantId.set(p.id, exactMatch);
+      }
+    }
+
+    // Pass 2: bind unmatched coordinator to leadSlot, or fallback for remaining active participants
+    for (const p of latestProj.participants) {
+      if (p.archived || matchedSlotByParticipantId.has(p.id)) continue;
+      const isCoord = hasRole(p, 'coordinator');
+      const fallback =
+        (isCoord && leadSlot && !claimedSlotIds.has(leadSlot.slot_id)
+          ? leadSlot
+          : undefined) ??
+        team.assistants.find((a) => !claimedSlotIds.has(a.slot_id));
+      if (fallback) {
+        claimedSlotIds.add(fallback.slot_id);
+        matchedSlotByParticipantId.set(p.id, fallback);
+      }
+    }
+
+    const mappedParticipants = latestProj.participants.map((p) => {
+      if (p.archived) {
+        return {
+          ...p,
+          status: 'disconnected' as const,
+          currentTaskId: undefined,
+          sessionRef: {
+            ...p.sessionRef,
+            externalTeamId: undefined,
+            externalSlotId: undefined,
+            externalConversationId: undefined,
+            nativeSessionId: undefined,
+            status: 'disconnected' as const,
+          },
+        };
+      }
+
+      const matched = matchedSlotByParticipantId.get(p.id);
       if (!matched) return p;
+
+      if (hasRole(p, 'coordinator')) {
+        resolvedCoordinatorId = p.id;
+      }
       return {
         ...p,
+        status: 'idle' as const,
+        currentTaskId: undefined,
         sessionRef: {
           ...p.sessionRef,
+          connectionId: p.connectionId,
           externalTeamId: team.id,
           externalSlotId: matched.slot_id,
           externalConversationId: matched.conversation_id,
+          nativeSessionId: previousTeamId ? undefined : p.sessionRef.nativeSessionId,
           status: 'active' as const,
         },
       };
     });
+
+    const normalizedTasks = previousTeamId
+      ? latestProj.tasks.map((task) => {
+          const hasRunningAttempt = task.attempts.some(
+            (a) => a.status === 'running',
+          );
+          if (!hasRunningAttempt) return task;
+          return {
+            ...task,
+            status:
+              task.status === 'running'
+                ? ('queued' as const)
+                : task.status,
+            attempts: task.attempts.map((a) =>
+              a.status === 'running'
+                ? {
+                    ...a,
+                    status: 'interrupted' as const,
+                    finishedAt: now,
+                    errorMessage:
+                      'Sessão anterior encerrada ao recriar a equipe no AionCore.',
+                  }
+                : a,
+            ),
+          };
+        })
+      : latestProj.tasks;
 
     this.state = {
       ...latestState,
@@ -1755,18 +1965,48 @@ export class AionCoreAdapter
         [conversationId]: {
           ...latestProj,
           participants: mappedParticipants,
+          tasks: normalizedTasks,
           conversation: {
             ...latestProj.conversation,
             externalTeamId: team.id,
+            coreLeadParticipantId: resolvedCoordinatorId,
+            coreTeamNeedsResync: false,
+            ...(previousTeamId &&
+            latestProj.conversation.executionStatus === 'running'
+              ? { executionStatus: 'idle' as const }
+              : {}),
+            updatedAt: now,
           },
         },
       },
     };
     this.notifyState();
 
+    if (previousTeamId) {
+      const updatedProj = this.state.conversations[conversationId];
+      if (updatedProj) {
+        this.emitAndIngest(conversationId, {
+          id: this.nextId('evt'),
+          seq: this.nextLocalSeq(updatedProj),
+          conversationId,
+          timestamp: now,
+          origin: 'system',
+          originSource: 'aion_desk_local',
+          type: 'execution_control_applied',
+          payload: {
+            control: 'resume_queue',
+            nextExecutionStatus: updatedProj.conversation.executionStatus,
+            generalSummary: `Equipe recriada no AionCore (${team.id}) com ${team.assistants.length} participante(s) ativos e slots atualizados.`,
+          },
+        });
+      }
+    }
+
     return {
       externalTeamId: team.id,
-      message: `Equipe "${team.name}" criada no AionCore (${team.id}) com ${team.assistants.length} participante(s).`,
+      message: previousTeamId
+        ? `Equipe "${team.name}" recriada e vinculada no AionCore (${team.id}) com ${team.assistants.length} participante(s).`
+        : `Equipe "${team.name}" criada no AionCore (${team.id}) com ${team.assistants.length} participante(s).`,
     };
   }
 
@@ -1925,6 +2165,7 @@ export class AionCoreAdapter
         participantName: targetParticipant.displayName,
         customInstructions: targetParticipant.instructions,
         expectedKind,
+        planOptional: expectedKind === 'plan_proposal' && proj.tasks.length > 0,
         conversationId: proj.conversation.id,
         taskId: task?.id,
         attemptId: attempt?.id,
@@ -1950,6 +2191,21 @@ export class AionCoreAdapter
       blocks.push(
         `[Equipe configurada no Aion Desk]\nPapéis resolvidos: Coordenador=${teamRoles.coordinator?.displayName ?? '—'}, Planejador=${teamRoles.planner?.displayName ?? '—'}, Executor=${teamRoles.executor?.displayName ?? '—'}, Auditor=${teamRoles.reviewer?.displayName ?? '—'}\n${rosterLines.join('\n')}`,
       );
+      const visibleTasks = proj.tasks.filter((t) => t.status !== 'cancelled');
+      if (visibleTasks.length > 0) {
+        const boardLines = visibleTasks.map((t) => {
+          const assignee = proj.participants.find(
+            (p) => p.id === t.assigneeParticipantId,
+          );
+          const reviewer = proj.participants.find(
+            (p) => p.id === t.reviewerParticipantId,
+          );
+          return `- ${t.id} · "${t.title}" · status=${t.status} · executor=${assignee?.displayName ?? '—'} · auditor=${reviewer?.displayName ?? '—'}`;
+        });
+        blocks.push(
+          `[Quadro atual de tarefas no Aion Desk (${visibleTasks.length} tarefa(s))]\n${boardLines.join('\n')}`,
+        );
+      }
     }
 
     const latestCtx = getLatestContextRevision(proj);
@@ -2005,8 +2261,11 @@ export class AionCoreAdapter
     }
 
     if (proj.participants.filter((p) => !p.archived).length > 1) {
+      const hasUnfinishedTasks = proj.tasks.some(
+        (t) => t.status !== 'completed' && t.status !== 'cancelled',
+      );
       blocks.push(
-        '[Regra estrita de orquestração do Aion Desk — NÃO usar ferramentas MCP de equipe]\nEste fluxo é orquestrado exclusivamente pelo Vértice Workspace (aion-desk/v1). NÃO chame team_send_message, team_task_create, team_task_update, team_spawn_agent nem team_interrupt_agent via MCP durante este fluxo. Nunca delegue diretamente por MCP; responda com seu parecer/trabalho e o bloco JSON aion-desk-json solicitado. Se posteriormente você receber idle_notification ou avisos internos do scheduler sem novo pedido explícito do usuário, NÃO reemita plan_proposal nem repita blocos aion-desk-json — responda apenas "OK".',
+        `[Regra estrita de orquestração do Aion Desk — NÃO usar ferramentas MCP de equipe]\nIMPORTANTE: Esta regra do Vértice Workspace (aion-desk/v1) prevalece sobre qualquer instrução nativa de governança do AionCore que mencione ferramentas team_*. Este fluxo é orquestrado exclusivamente pelo Vértice Workspace (aion-desk/v1). NÃO chame team_send_message, team_task_create, team_task_update, team_spawn_agent nem team_interrupt_agent via MCP durante este fluxo. Nunca delegue diretamente por MCP; para criar ou delegar tarefas para os executores, responda usando o bloco JSON \`\`\`aion-desk-json ... \`\`\` com kind="plan_proposal" descrito acima (e preencha "assigneeName" quando quiser direcionar a um executor específico). Se posteriormente você receber idle_notification ou avisos internos do scheduler sem novo pedido explícito do usuário, NÃO reemita plan_proposal nem repita blocos aion-desk-json — responda apenas "OK".${hasUnfinishedTasks ? ' Caso haja tarefas pendentes/interrompidas aguardando despacho para outros agentes (ex.: após reinício do servidor), oriente brevemente o usuário a clicar em "Retomar fluxo" ou em "Despachar / Retomar no Core" no painel Trabalho → Tarefas do Vértice Workspace.' : ''}`,
       );
     }
 
@@ -3727,8 +3986,13 @@ export class AionCoreAdapter
     const expectedKey = `${input.convId}:${input.participant.id}`;
     const expectedKind = this.expectedKindByParticipant.get(expectedKey);
     const containsStructuredBlock = /```aion-desk-json/i.test(trimmed);
+    const isOptionalPlanFollowUp =
+      expectedKind === 'plan_proposal' &&
+      proj.tasks.length > 0 &&
+      !containsStructuredBlock;
     const shouldValidateStructured =
-      expectedKind !== undefined || containsStructuredBlock;
+      !isOptionalPlanFollowUp &&
+      (expectedKind !== undefined || containsStructuredBlock);
 
     const parsedOutput = shouldValidateStructured
       ? parseStructuredAgentOutput(trimmed, undefined)
@@ -3921,6 +4185,9 @@ export class AionCoreAdapter
     }
 
     if (!validEnvelope) {
+      if (isOptionalPlanFollowUp) {
+        this.expectedKindByParticipant.delete(expectedKey);
+      }
       return;
     }
 
@@ -4052,16 +4319,33 @@ export class AionCoreAdapter
         }
       }
 
+      const findActiveParticipantByRef = (ref?: string): Participant | undefined => {
+        const clean = ref?.trim().toLowerCase();
+        if (!clean) return undefined;
+        return proj.participants.find(
+          (p) =>
+            !p.archived &&
+            (p.displayName.toLowerCase() === clean ||
+              p.id.toLowerCase() === clean ||
+              p.sessionRef.externalSlotId?.toLowerCase() === clean),
+        );
+      };
+
       const assignee =
+        findActiveParticipantByRef(rawTask.assigneeName) ??
         (rawTask.assigneeRole
           ? proj.participants.find(
-            (p) => !p.archived && hasRole(p, rawTask.assigneeRole!),
-          )
+              (p) => !p.archived && hasRole(p, rawTask.assigneeRole!),
+            )
           : undefined) ??
         roles.executor ??
         roles.coordinator ??
         author;
-      const reviewer = roles.reviewer ?? roles.coordinator ?? author;
+      const reviewer =
+        findActiveParticipantByRef(rawTask.reviewerName) ??
+        roles.reviewer ??
+        roles.coordinator ??
+        author;
 
       const latestCtx = getLatestContextRevision(proj);
       const taskObj: Task = {
@@ -4831,8 +5115,11 @@ export class AionCoreAdapter
     if (!updatedTask) return;
 
     if (decisionPayload.decision === 'rejected') {
+      const nonInterruptedAttempts = updatedTask.attempts.filter(
+        (a) => a.status !== 'interrupted',
+      ).length;
       if (
-        updatedTask.attempts.length >= MAX_CORE_TASK_ATTEMPTS ||
+        nonInterruptedAttempts >= MAX_CORE_TASK_ATTEMPTS ||
         updatedTask.qualityRejectionCount >= MAX_CORE_TASK_ATTEMPTS
       ) {
         this.emitAndIngest(convId, {
@@ -5014,21 +5301,40 @@ export class AionCoreAdapter
       return;
     }
 
-    const nextTask = unfinished.find(
-      (t) =>
-        t.status !== 'running' &&
-        t.status !== 'awaiting_review' &&
-        t.status !== 'failed' &&
-        t.status !== 'blocked' &&
-        !t.attempts.some((a) => a.status === 'running') &&
-        areTaskDependenciesSatisfied(t, proj.tasks).satisfied &&
-        !proj.escalations.some(
-          (e) => e.taskId === t.id && e.status === 'suggested',
-        ),
+    const busyExecutors = new Set<string>(
+      proj.tasks
+        .filter(
+          (t) =>
+            t.status === 'running' ||
+            t.attempts.some((a) => a.status === 'running'),
+        )
+        .map((t) => t.assigneeParticipantId),
     );
-    if (!nextTask) return;
+    const toDispatch: Task[] = [];
+    for (const t of unfinished) {
+      if (
+        t.status === 'running' ||
+        t.status === 'awaiting_review' ||
+        t.status === 'failed' ||
+        t.status === 'blocked' ||
+        t.attempts.some((a) => a.status === 'running') ||
+        !areTaskDependenciesSatisfied(t, proj.tasks).satisfied ||
+        proj.escalations.some(
+          (e) => e.taskId === t.id && e.status === 'suggested',
+        )
+      ) {
+        continue;
+      }
+      if (busyExecutors.has(t.assigneeParticipantId)) {
+        continue;
+      }
+      busyExecutors.add(t.assigneeParticipantId);
+      toDispatch.push(t);
+    }
 
-    await this.dispatchTaskAttemptInCore(convId, nextTask.id);
+    for (const nextTask of toDispatch) {
+      await this.dispatchTaskAttemptInCore(convId, nextTask.id);
+    }
   }
 
   private async dispatchTaskAttemptInCore(
@@ -5591,12 +5897,7 @@ export class AionCoreAdapter
         'Conversa ou preset inválido.',
       );
     }
-    if (proj.conversation.externalTeamId) {
-      throw new GatewayCapabilityError(
-        'CAPABILITY_UNSUPPORTED',
-        'Esta conversa já possui equipe criada no Core. Crie uma nova conversa para aplicar outro preset.',
-      );
-    }
+    const hasExistingTeam = Boolean(proj.conversation.externalTeamId);
     const nextParticipants = instantiateParticipantsFromPreset({
       preset: {
         ...preset,
@@ -5624,6 +5925,12 @@ export class AionCoreAdapter
             teamPresetId: preset.id,
             coordinatorParticipantId:
               resolved.coordinator?.id ?? nextParticipants[0]?.id ?? '',
+            ...(hasExistingTeam
+              ? {
+                  coreLeadParticipantId: undefined,
+                  coreTeamNeedsResync: true,
+                }
+              : {}),
             updatedAt: new Date().toISOString(),
           },
         },
@@ -5796,10 +6103,14 @@ export class AionCoreAdapter
     const teamId = proj.conversation.externalTeamId;
     const slotId = target.sessionRef.externalSlotId;
     const extConvId = target.sessionRef.externalConversationId;
+    const connectionChanged = Boolean(
+      input.connectionId && input.connectionId !== target.connectionId,
+    );
     if (
       proj.conversation.executionMode === 'aion_core' &&
       teamId &&
-      slotId
+      slotId &&
+      !connectionChanged
     ) {
       if (input.modelRef) {
         const nextModelId =
@@ -6091,6 +6402,26 @@ export class AionCoreAdapter
         'Conversa não encontrada.',
       );
     }
+    const unmappedDirectTarget =
+      input.targetTab !== 'general' &&
+      !proj.participants.find((p) => p.id === input.targetTab)?.sessionRef
+        .externalSlotId &&
+      proj.participants.some(
+        (p) =>
+          p.sessionRef.externalTeamId === proj.conversation.externalTeamId &&
+          Boolean(p.sessionRef.externalSlotId),
+      );
+    if (
+      proj.conversation.externalTeamId &&
+      (getCoreTeamSyncStatus(proj).needsResync || unmappedDirectTarget)
+    ) {
+      await this.ensureCoreTeamSynchronized(
+        input.conversationId,
+        unmappedDirectTarget,
+      );
+      state = this.getStateSnapshot();
+      proj = state.conversations[input.conversationId]!;
+    }
     const teamId = proj.conversation.externalTeamId;
     if (!teamId) {
       throw new GatewayCapabilityError(
@@ -6160,17 +6491,16 @@ export class AionCoreAdapter
       (p) => !p.archived,
     ).length;
     let expectedKind: StructuredEnvelopeKind | undefined;
-    if (
+    if (runningTask) {
+      expectedKind = 'delivery_report';
+    } else if (awaitingReviewTask) {
+      expectedKind = 'review_decision';
+    } else if (
       activeParticipantCount > 1 &&
-      proj.tasks.length === 0 &&
       (hasRole(targetParticipant, 'planner') ||
         hasRole(targetParticipant, 'coordinator'))
     ) {
       expectedKind = 'plan_proposal';
-    } else if (runningTask) {
-      expectedKind = 'delivery_report';
-    } else if (awaitingReviewTask) {
-      expectedKind = 'review_decision';
     }
 
     const activeTask = runningTask ?? awaitingReviewTask;
@@ -6300,6 +6630,178 @@ export class AionCoreAdapter
     };
   }
 
+  async dispatchTask(input: {
+    conversationId: string;
+    taskId: string;
+  }): Promise<void> {
+    let state = this.getStateSnapshot();
+    let proj = state.conversations[input.conversationId];
+    if (!proj) {
+      throw new GatewayCapabilityError(
+        'CONVERSATION_NOT_FOUND',
+        'Conversa não encontrada.',
+      );
+    }
+    if (
+      proj.conversation.externalTeamId &&
+      getCoreTeamSyncStatus(proj).needsResync
+    ) {
+      await this.ensureCoreTeamSynchronized(input.conversationId);
+      state = this.getStateSnapshot();
+      proj = state.conversations[input.conversationId]!;
+    }
+    const teamId = proj.conversation.externalTeamId;
+    if (!teamId) {
+      throw new GatewayCapabilityError(
+        'NOT_CONNECTED_LOCAL_CORE',
+        'Vincule ou crie uma equipe no Core antes de despachar tarefas.',
+        true,
+      );
+    }
+
+    const reconcileResult = await this.reconcileConversation(
+      input.conversationId,
+    );
+    if (!reconcileResult.synced) {
+      throw new GatewayCapabilityError(
+        'OPERATION_FAILED',
+        'Não foi possível despachar a tarefa porque a reconciliação com o Core ficou incompleta. Verifique conexão/autenticação e reconcilie novamente.',
+        true,
+      );
+    }
+
+    const reconciledProj =
+      this.getStateSnapshot().conversations[input.conversationId];
+    const task = reconciledProj?.tasks.find((t) => t.id === input.taskId);
+    if (!reconciledProj || !task) {
+      throw new GatewayCapabilityError(
+        'VALIDATION_ERROR',
+        'Tarefa não encontrada.',
+      );
+    }
+    if (task.status === 'completed' || task.status === 'cancelled') {
+      return;
+    }
+
+    const depCheck = areTaskDependenciesSatisfied(task, reconciledProj.tasks);
+    if (!depCheck.satisfied) {
+      throw new GatewayCapabilityError(
+        'VALIDATION_ERROR',
+        `A tarefa "${task.title}" depende de etapas ainda não concluídas.`,
+      );
+    }
+
+    const slotWorkMap =
+      this.lastReconciledSlotWorkByConv.get(input.conversationId) ??
+      new Map<string, string>();
+    const isSlotBusyInCore = (slotId?: string): boolean => {
+      if (!slotId) return false;
+      const st = slotWorkMap.get(slotId);
+      return st === 'running' || st === 'starting' || st === 'queued';
+    };
+
+    const roles = resolveTeamRoles(
+      reconciledProj.participants,
+      reconciledProj.conversation.coordinatorParticipantId,
+    );
+
+    if (task.status === 'awaiting_review') {
+      const lastAttempt = task.attempts[task.attempts.length - 1];
+      if (!lastAttempt || lastAttempt.status !== 'delivered') {
+        throw new GatewayCapabilityError(
+          'VALIDATION_ERROR',
+          `A tarefa "${task.title}" não possui entrega pronta para auditoria.`,
+        );
+      }
+      const reviewer =
+        (task.reviewerParticipantId
+          ? reconciledProj.participants.find(
+            (p) => p.id === task.reviewerParticipantId && !p.archived,
+          )
+          : undefined) ??
+        roles.reviewer ??
+        roles.coordinator;
+      if (!reviewer?.sessionRef.externalSlotId) {
+        throw new GatewayCapabilityError(
+          'NOT_CONNECTED_LOCAL_CORE',
+          'Revisor/Auditor sem vínculo de slot no Core.',
+          true,
+        );
+      }
+      if (isSlotBusyInCore(reviewer.sessionRef.externalSlotId)) {
+        throw new GatewayCapabilityError(
+          'OPERATION_FAILED',
+          `${reviewer.displayName} já está executando um turno no Core; aguarde a conclusão antes de reenviar.`,
+          true,
+        );
+      }
+      if (reconciledProj.conversation.executionStatus === 'paused_queue') {
+        this.emitAndIngest(input.conversationId, {
+          id: this.nextId('evt'),
+          seq: this.nextLocalSeq(reconciledProj),
+          conversationId: input.conversationId,
+          timestamp: new Date().toISOString(),
+          origin: 'user',
+          originSource: 'aion_core',
+          type: 'execution_control_applied',
+          payload: {
+            control: 'resume_queue',
+            nextExecutionStatus: 'running',
+            generalSummary: `Auditoria de "${task.title}" solicitada manualmente no Core.`,
+          },
+        });
+      }
+      await this.dispatchReviewInCore(
+        input.conversationId,
+        task.id,
+        lastAttempt.id,
+        lastAttempt.deliverySummary ?? 'Entrega pronta para auditoria no Core.',
+        lastAttempt.evidenceNotes ?? [],
+      );
+      return;
+    }
+
+    const executor =
+      reconciledProj.participants.find(
+        (p) => p.id === task.assigneeParticipantId && !p.archived,
+      ) ?? roles.executor;
+    if (!executor?.sessionRef.externalSlotId) {
+      throw new GatewayCapabilityError(
+        'NOT_CONNECTED_LOCAL_CORE',
+        'Executor responsável sem vínculo de slot no Core.',
+        true,
+      );
+    }
+    if (
+      task.attempts.some((a) => a.status === 'running') ||
+      isSlotBusyInCore(executor.sessionRef.externalSlotId)
+    ) {
+      throw new GatewayCapabilityError(
+        'OPERATION_FAILED',
+        `${executor.displayName} ainda está em execução no Core para esta tarefa; aguarde ou desconecte antes de reenviar.`,
+        true,
+      );
+    }
+
+    if (reconciledProj.conversation.executionStatus === 'paused_queue') {
+      this.emitAndIngest(input.conversationId, {
+        id: this.nextId('evt'),
+        seq: this.nextLocalSeq(reconciledProj),
+        conversationId: input.conversationId,
+        timestamp: new Date().toISOString(),
+        origin: 'user',
+        originSource: 'aion_core',
+        type: 'execution_control_applied',
+        payload: {
+          control: 'resume_queue',
+          nextExecutionStatus: 'running',
+          generalSummary: `Despacho manual de "${task.title}" iniciado no Core.`,
+        },
+      });
+    }
+    await this.dispatchTaskAttemptInCore(input.conversationId, task.id);
+  }
+
   async controlExecution(input: {
     conversationId: string;
     action:
@@ -6309,15 +6811,27 @@ export class AionCoreAdapter
     | 'terminate_session';
     participantId?: string;
   }): Promise<void> {
-    const state = this.getStateSnapshot();
-    const proj = state.conversations[input.conversationId];
+    let state = this.getStateSnapshot();
+    let proj = state.conversations[input.conversationId];
     if (!proj) return;
+    if (
+      input.action === 'resume_queue' &&
+      proj.conversation.externalTeamId &&
+      getCoreTeamSyncStatus(proj).needsResync
+    ) {
+      await this.ensureCoreTeamSynchronized(input.conversationId);
+      state = this.getStateSnapshot();
+      proj = state.conversations[input.conversationId]!;
+    }
     const teamId = proj.conversation.externalTeamId;
 
     if (
       input.action === 'resume_queue' &&
       teamId &&
-      proj.conversation.executionStatus === 'paused_queue'
+      (proj.conversation.executionStatus === 'paused_queue' ||
+        proj.tasks.some(
+          (t) => t.status !== 'completed' && t.status !== 'cancelled',
+        ))
     ) {
       const reconcileResult = await this.reconcileConversation(
         input.conversationId,
@@ -7344,6 +7858,78 @@ export class AionCoreAdapter
       }
     }
 
+    // 6. Recover orphaned 'running' tasks if /run-state proved Core slot is idle
+    // (e.g., Core server restarted overnight and stopped background subagents).
+    if (runStateRes.status === 'fulfilled') {
+      const projBeforeOrphanCheck =
+        this.getStateSnapshot().conversations[conversationId];
+      if (projBeforeOrphanCheck) {
+        const rolesForOrphan = resolveTeamRoles(
+          projBeforeOrphanCheck.participants,
+          projBeforeOrphanCheck.conversation.coordinatorParticipantId,
+        );
+        for (const task of projBeforeOrphanCheck.tasks) {
+          if (task.status !== 'running') continue;
+          const runningAttempt = task.attempts.find(
+            (a) => a.status === 'running' && a.originSource === 'aion_core',
+          );
+          if (!runningAttempt) continue;
+          const executor =
+            projBeforeOrphanCheck.participants.find(
+              (p) => p.id === runningAttempt.executorParticipantId && !p.archived,
+            ) ?? rolesForOrphan.executor;
+          const slotId = executor?.sessionRef.externalSlotId;
+          const slotState = slotId ? slotWorkStateById.get(slotId) : undefined;
+          const slotBusy =
+            slotState === 'running' ||
+            slotState === 'queued' ||
+            slotState === 'starting';
+          const dispatchInFlight = slotId
+            ? this.inFlightSlotDispatches.has(`${conversationId}:${slotId}`)
+            : false;
+          const hasOpenStream = executor
+            ? Array.from(this.streamBuffers.values()).some(
+              (buf) =>
+                buf.conversationId === conversationId &&
+                buf.participantId === executor.id &&
+                !buf.finished,
+            )
+            : false;
+
+          if (!slotBusy && !dispatchInFlight && !hasOpenStream) {
+            const latestProjBeforeEmit =
+              this.getStateSnapshot().conversations[conversationId];
+            if (!latestProjBeforeEmit) continue;
+            const beforeLen = latestProjBeforeEmit.eventLog.length;
+            this.emitAndIngest(conversationId, {
+              id: this.nextId('evt_core_orphan'),
+              seq: this.nextLocalSeq(latestProjBeforeEmit),
+              conversationId,
+              timestamp: new Date().toISOString(),
+              origin: 'gateway',
+              originSource: 'aion_core',
+              externalEventName: 'catchup.run_state_idle',
+              participantId: executor?.id,
+              taskId: task.id,
+              attemptId: runningAttempt.id,
+              type: 'task_status_changed',
+              payload: {
+                taskId: task.id,
+                nextStatus: 'queued',
+                participantStatus: 'idle',
+                projectToGeneral: true,
+                generalSummary: `Execução anterior de "${task.title}" foi interrompida no Core (slot ocioso após reinício); tarefa recolocada na fila para retomada.`,
+              },
+            });
+            const afterProj = this.getStateSnapshot().conversations[conversationId];
+            if (afterProj && afterProj.eventLog.length > beforeLen) {
+              recoveredEvents.push(...afterProj.eventLog.slice(beforeLen));
+            }
+          }
+        }
+      }
+    }
+
     if (authExpiredDetected) {
       this.markCoreSessionExpired(
         'Sessão expirada no Core durante a reconciliação. Faça login novamente.',
@@ -7691,10 +8277,10 @@ export class AionCoreAdapter
       );
       const seenPaths = new Set<string>();
       for (const m of matches) {
-        if (seenPaths.has(m.path) || sourceExcerpts.length >= 3) break;
+        if (seenPaths.has(m.path) || sourceExcerpts.length >= 2) break;
         seenPaths.add(m.path);
-        const sliceStart = Math.max(1, m.lineNumber - 20);
-        const sliceEnd = sliceStart + 65;
+        const sliceStart = Math.max(1, m.lineNumber - 8);
+        const sliceEnd = sliceStart + 28;
         const slice = await readAssistantSourceFile(
           m.path,
           sliceStart,
@@ -7821,10 +8407,15 @@ export class AionCoreAdapter
           typeof d.enqueue_status === 'string',
       );
     } catch (err) {
-      const errMsg =
+      const rawErrMsg =
         err instanceof Error
           ? err.message
           : 'Falha ao enviar pergunta ao Assistente no Core.';
+      const isRuntimeStartFailure =
+        /TEAM_MEMBER_RUNTIME_FAILED|runtime failed to start|409/i.test(rawErrMsg);
+      const errMsg = isRuntimeStartFailure
+        ? `${rawErrMsg}. O CLI desse modelo (${cfg.modelDisplayName}) falhou ao iniciar no AionCore (ex.: CLI ausente no PATH). Clique na engrenagem (⚙) do Assistente e escolha outro agente disponível (ex.: Antigravity, Cursor ou Claude).`
+        : rawErrMsg;
       this.updateAssistantState((prev) => ({
         ...prev,
         status: 'error',
@@ -8222,16 +8813,30 @@ export class AionCoreAdapter
         buf.finished = true;
         const finalText = buf.text || '_(Resposta concluída sem conteúdo textual.)_';
         const targetId = buf.targetMessageId;
-        this.updateAssistantState((prev) => ({
-          ...prev,
-          status: 'idle',
-          lastError: undefined,
-          messages: prev.messages.map((m) =>
-            m.id === targetId
-              ? { ...m, contentMarkdown: finalText, status: 'completed' }
-              : m,
-          ),
-        }));
+        this.updateAssistantState((prev) => {
+          const exists = prev.messages.some((m) => m.id === targetId);
+          return {
+            ...prev,
+            status: 'idle',
+            lastError: undefined,
+            messages: exists
+              ? prev.messages.map((m) =>
+                  m.id === targetId
+                    ? { ...m, contentMarkdown: finalText, status: 'completed' }
+                    : m,
+                )
+              : [
+                  ...prev.messages,
+                  {
+                    id: targetId,
+                    role: 'assistant',
+                    contentMarkdown: finalText,
+                    timestamp: now,
+                    status: 'completed',
+                  },
+                ],
+          };
+        });
       }
       return;
     }

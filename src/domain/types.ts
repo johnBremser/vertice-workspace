@@ -474,6 +474,8 @@ export interface WorkspaceConversation {
   executionMode: ExecutionMode;
   teamPresetId?: string;
   externalTeamId?: string;
+  coreLeadParticipantId?: string;
+  coreTeamNeedsResync?: boolean;
   importedExternalTeamId?: string;
   status: 'active' | 'archived';
   executionStatus: ConversationExecutionStatus;

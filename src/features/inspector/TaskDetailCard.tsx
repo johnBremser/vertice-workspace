@@ -4,6 +4,7 @@ import {
   Circle,
   Clock,
   Pencil,
+  Play,
   XCircle,
 } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
@@ -38,6 +39,7 @@ interface TaskDetailCardProps {
     dependencyTaskIds: string[];
     acceptanceCriteria: string[];
   }) => Promise<void>;
+  onDispatchTask?: (taskId: string) => Promise<void>;
   onJumpToEvent: (participantId: string, eventId: string) => void;
 }
 
@@ -67,6 +69,7 @@ export function TaskDetailCard({
   selected,
   onRegisterReview,
   onUpdateTask,
+  onDispatchTask,
   onJumpToEvent,
 }: TaskDetailCardProps) {
   const [rejectNote, setRejectNote] = useState('');
@@ -416,6 +419,25 @@ export function TaskDetailCard({
               )}
             </div>
           )}
+
+          {onDispatchTask &&
+            task.status !== 'completed' &&
+            task.status !== 'cancelled' && (
+              <div className="mt-2.5 flex flex-wrap items-center gap-2 border-t border-[var(--border-hairline)] pt-2">
+                <button
+                  type="button"
+                  onClick={() => void onDispatchTask(task.id)}
+                  className="inline-flex items-center gap-1 rounded border border-[var(--border-strong)] bg-[var(--bg-surface)] px-2.5 py-1 text-xs font-medium text-[var(--accent)] hover:bg-[var(--bg-elevated)]"
+                >
+                  <Play className="h-3 w-3" aria-hidden="true" />
+                  <span>
+                    {task.status === 'awaiting_review'
+                      ? 'Solicitar auditoria no Core'
+                      : 'Despachar / Retomar no Core'}
+                  </span>
+                </button>
+              </div>
+            )}
 
           {task.status === 'awaiting_review' && latestAttempt && reviewer && (
             <div className="mt-2.5 border-t border-[var(--border-hairline)] pt-2">

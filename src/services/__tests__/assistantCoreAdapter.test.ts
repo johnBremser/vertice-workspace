@@ -417,4 +417,108 @@ describe('Vertice Floating Assistant in AionCoreAdapter (isolated session, WS ro
     expect(lastUserMsg?.attachments?.[0]?.name).toBe('escopo.md');
     expect(lastUserMsg?.attachments?.[1]?.name).toBe('tela-erro.png');
   });
+
+  it('inserts completed assistant reply on finish frame even if an earlier transient error marked the placeholder as error', async () => {
+    const sockets: MockSocket[] = [];
+    const adapter = new AionCoreAdapter(
+      new WorkspacePersistenceManager(new MemoryOnlyStorageDriver()),
+      {
+        baseUrl: 'http://127.0.0.1:25828',
+        fetchFn: async (input, init) => {
+          const url = String(input);
+          if (url.endsWith('/health')) return jsonResponse(REAL_CORE_HEALTH_V022);
+          if (url.endsWith('/api/auth/status')) {
+            return jsonResponse({ success: true, ...REAL_CORE_AUTH_STATUS_V022 });
+          }
+          if (url.endsWith('/api/ws-token')) {
+            return jsonResponse({ success: true, ws_token: 'ws_tok_2', expires_in: 300 });
+          }
+          if (url.endsWith('/api/agents/management')) {
+            return jsonResponse({ success: true, data: REAL_CORE_AGENTS_MANAGEMENT_V022 });
+          }
+          if (url.endsWith('/api/assistants')) {
+            return jsonResponse({ success: true, data: REAL_CORE_ASSISTANTS_V022 });
+          }
+          if (url.endsWith('/api/teams') && (init?.method ?? 'GET') === 'POST') {
+            return jsonResponse({
+              success: true,
+              data: {
+                id: 'team_ast_recover',
+                name: '__vertice_internal_assistant__',
+                lead_slot_id: 'slot_ast_rec',
+                assistants: [
+                  {
+                    slot_id: 'slot_ast_rec',
+                    conversation_id: 'conv_ast_rec',
+                    name: 'Assistente Vértice',
+                    role: 'lead',
+                    model: 'gemini-4-hydrogen-high',
+                  },
+                ],
+              },
+            });
+          }
+          if (url.includes('/messages') && init?.method === 'POST') {
+            return jsonResponse({
+              success: true,
+              data: { message_id: 'm_ast_1', enqueue_status: 'started' },
+            });
+          }
+          return jsonResponse({ success: true, data: [] });
+        },
+        wsFactory: (url, protocols) => {
+          const s = new MockSocket(url, protocols);
+          sockets.push(s);
+          return s;
+        },
+        readCookie: () => 'csrf_ast_rec',
+      },
+    );
+
+    await adapter.loadWorkspace();
+    await adapter.checkAuthStatus();
+    await adapter.refreshCoreCatalog();
+    await adapter.connectWebSocket();
+    await adapter.configureVerticeAssistant({
+      connectionId: adapter
+        .getStateSnapshot()
+        .connections.find((c) => c.backendId === 'antigravity' || c.coreAssistantId)!.id,
+      modelExternalId: 'gemini-4-hydrogen-high',
+      modelDisplayName: 'Gemini 4 Hydrogen (High)',
+    });
+    await adapter.sendVerticeAssistantMessage({ prompt: 'teste' });
+    await new Promise((r) => setTimeout(r, 15));
+
+    const ws = sockets[sockets.length - 1];
+    ws.emitMessage({
+      name: 'message.stream',
+      data: {
+        conversation_id: 'conv_ast_rec',
+        msg_id: 'msg_err_1',
+        turn_id: 'turn_1',
+        type: 'error',
+        data: { error: 'The upstream Agent failed while handling the request' },
+      },
+    });
+    ws.emitMessage({
+      name: 'message.stream',
+      data: {
+        conversation_id: 'conv_ast_rec',
+        msg_id: 'msg_ok_2',
+        turn_id: 'turn_2',
+        type: 'finish',
+        data: { content: 'Teste recebido — resposta recuperada com sucesso!' },
+      },
+    });
+
+    const msgs = adapter.getStateSnapshot().assistantState?.messages ?? [];
+    expect(
+      msgs.some(
+        (m) =>
+          m.status === 'completed' &&
+          m.contentMarkdown.includes('resposta recuperada com sucesso!'),
+      ),
+    ).toBe(true);
+    adapter.dispose();
+  });
 });

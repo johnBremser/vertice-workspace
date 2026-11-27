@@ -205,7 +205,7 @@ export function buildGroundedAssistantPrompt(input: {
   ]
     .filter(Boolean)
     .join('\n');
-  const kbHits = searchKnowledgeArticles(kbSearchSeed).slice(0, 3);
+  const kbHits = searchKnowledgeArticles(kbSearchSeed).slice(0, 2);
   const citedSet = new Set<string>();
 
   const sections: string[] = [
@@ -223,19 +223,24 @@ export function buildGroundedAssistantPrompt(input: {
   ];
 
   if (input.liveSnapshot) {
+    const compactSnap = {
+      ...input.liveSnapshot,
+      recentDiagnostics: input.liveSnapshot.recentDiagnostics.slice(0, 4),
+    };
+    const snapJson = JSON.stringify(compactSnap);
     sections.push(
-      `[Diagnóstico ao Vivo do Vértice (sanitizado, sem segredos)]\n\`\`\`json\n${JSON.stringify(
-        input.liveSnapshot,
-        null,
-        2,
-      )}\n\`\`\``,
+      `[Diagnóstico ao Vivo do Vértice (sanitizado, sem segredos)]\n\`\`\`json\n${snapJson.length > 1400 ? `${snapJson.slice(0, 1400)}...` : snapJson}\n\`\`\``,
     );
   }
 
   if (kbHits.length > 0) {
     const kbBlocks = kbHits.map(({ article }) => {
       citedSet.add(`kb:${article.id}`);
-      return `### [KB] ${article.title} (${article.id})\nArquivos relacionados: ${article.relatedFiles.join(', ')}\n${article.bodyMarkdown}`;
+      const body =
+        article.bodyMarkdown.length > 550
+          ? `${article.bodyMarkdown.slice(0, 550)}\n[...]`
+          : article.bodyMarkdown;
+      return `### [KB] ${article.title} (${article.id})\nArquivos relacionados: ${article.relatedFiles.join(', ')}\n${body}`;
     });
     sections.push(
       `[Base de Conhecimento Relevante do Vértice]\n${kbBlocks.join('\n\n')}`,
@@ -243,9 +248,13 @@ export function buildGroundedAssistantPrompt(input: {
   }
 
   if (input.sourceExcerpts && input.sourceExcerpts.length > 0) {
-    const sourceBlocks = input.sourceExcerpts.map((ex) => {
+    const sourceBlocks = input.sourceExcerpts.slice(0, 2).map((ex) => {
       citedSet.add(ex.path);
-      return `### [Fonte] ${ex.path} (linhas ${ex.startLine}-${ex.endLine})\n\`\`\`\n${ex.content}\n\`\`\``;
+      const excerpt =
+        ex.content.length > 850
+          ? `${ex.content.slice(0, 850)}\n[... trecho truncado para limite CLI]`
+          : ex.content;
+      return `### [Fonte] ${ex.path} (linhas ${ex.startLine}-${ex.endLine})\n\`\`\`\n${excerpt}\n\`\`\``;
     });
     sections.push(
       `[Trechos Lidos do Código-Fonte Local]\n${sourceBlocks.join('\n\n')}`,

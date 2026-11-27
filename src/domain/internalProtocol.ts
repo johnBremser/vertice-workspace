@@ -19,6 +19,8 @@ export interface StructuredPlanTaskInput {
   title: string;
   description: string;
   assigneeRole?: ParticipantRole;
+  assigneeName?: string;
+  reviewerName?: string;
   dependencies?: string[];
   acceptanceCriteria: string[];
 }
@@ -71,6 +73,7 @@ export function buildRoleInstructionPrompt(input: {
   participantName: string;
   customInstructions: string;
   expectedKind?: StructuredEnvelopeKind;
+  planOptional?: boolean;
   conversationId: string;
   taskId?: string;
   attemptId?: string;
@@ -83,12 +86,18 @@ export function buildRoleInstructionPrompt(input: {
     baseLines.push(`Instruções permanentes: ${input.customInstructions.trim()}`);
   }
   if (input.expectedKind) {
-    baseLines.push(
-      `Quando finalizar, inclua um bloco JSON delimitado por \`\`\`aion-desk-json ... \`\`\` com kind="${input.expectedKind}", protocol="${INTERNAL_PROTOCOL_VERSION}", conversationId="${input.conversationId}"${input.taskId ? `, taskId="${input.taskId}"` : ''}${input.attemptId ? `, attemptId="${input.attemptId}"` : ''}.`,
-    );
+    if (input.expectedKind === 'plan_proposal' && input.planOptional) {
+      baseLines.push(
+        `Se o pedido exigir criar ou delegar novas tarefas para a equipe, inclua um bloco JSON delimitado por \`\`\`aion-desk-json ... \`\`\` com kind="plan_proposal", protocol="${INTERNAL_PROTOCOL_VERSION}", conversationId="${input.conversationId}". Se for apenas uma pergunta ou esclarecimento sem novas tarefas, responda normalmente sem o bloco JSON.`,
+      );
+    } else {
+      baseLines.push(
+        `Quando finalizar, inclua um bloco JSON delimitado por \`\`\`aion-desk-json ... \`\`\` com kind="${input.expectedKind}", protocol="${INTERNAL_PROTOCOL_VERSION}", conversationId="${input.conversationId}"${input.taskId ? `, taskId="${input.taskId}"` : ''}${input.attemptId ? `, attemptId="${input.attemptId}"` : ''}.`,
+      );
+    }
     if (input.expectedKind === 'plan_proposal') {
       baseLines.push(
-        `Estrutura obrigatória do JSON plan_proposal: { "protocol": "${INTERNAL_PROTOCOL_VERSION}", "kind": "plan_proposal", "conversationId": "${input.conversationId}", "summary": "...", "tasks": [{ "title": "...", "description": "...", "assigneeRole": "executor", "dependencies": [], "acceptanceCriteria": ["..."] }] } (dependencies pode usar títulos exatos ou "task_1", "task_2"...).`,
+        `Estrutura obrigatória do JSON plan_proposal: { "protocol": "${INTERNAL_PROTOCOL_VERSION}", "kind": "plan_proposal", "conversationId": "${input.conversationId}", "summary": "...", "tasks": [{ "title": "...", "description": "...", "assigneeRole": "executor", "assigneeName": "<nome exato do participante na equipe (opcional; obrigatório para escolher entre múltiplos executores)>", "reviewerName": "<nome do auditor (opcional)>", "dependencies": [], "acceptanceCriteria": ["..."] }] } (dependencies pode usar títulos exatos ou "task_1", "task_2"...).`,
       );
     } else if (input.expectedKind === 'delivery_report') {
       baseLines.push(

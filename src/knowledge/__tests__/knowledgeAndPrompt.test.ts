@@ -107,4 +107,37 @@ describe('Vertice Knowledge Base & Grounded Assistant Prompt Builder', () => {
     expect(built.prompt).toContain('wireframe-tela.png');
     expect(built.prompt).toContain('ANEXOS, ESCOPOS E RECOMENDAÇÃO DE EQUIPE');
   });
+
+  it('keeps prompt compact under Windows CLI argv limits when many source excerpts and diagnostics are present', () => {
+    const state = createInitialWorkspaceState();
+    state.coreRuntimeStatus = 'reachable';
+    const bigLine = 'x'.repeat(120);
+    const largeDiagnostics = Array.from({ length: 12 }, (_, idx) => ({
+      timestamp: `2026-11-27T10:00:0${idx % 10}.000Z`,
+      operation: `op.${idx}`,
+      status: 'error' as const,
+      detail: `detalhe-${idx} ${bigLine}`,
+    }));
+    const snapshot = buildLiveRuntimeSnapshot(
+      state,
+      undefined,
+      undefined,
+      largeDiagnostics,
+    );
+    const largeExcerpts = [1, 2, 3].map((n) => ({
+      path: `src/file${n}.ts`,
+      startLine: 1,
+      endLine: 65,
+      content: `${n}: ${'code '.repeat(600)}`,
+    }));
+
+    const built = buildGroundedAssistantPrompt({
+      userQuestion: 'Erro csrf e autenticacao e retomada no Core',
+      liveSnapshot: snapshot,
+      sourceExcerpts: largeExcerpts,
+    });
+
+    expect(built.prompt.length).toBeLessThan(7000);
+    expect(built.sourcesCited.filter((s) => s.startsWith('src/'))).toHaveLength(2);
+  });
 });

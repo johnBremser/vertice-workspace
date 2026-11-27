@@ -45,7 +45,11 @@ foreach ($envFile in @(".env", ".env.local")) {
   }
 }
 
-# 2. Localizar Node.js compativel
+# 2. Localizar Node.js compativel e garantir binarios npm globais no PATH
+$NpmGlobalDir = Join-Path $env:APPDATA "npm"
+if ((Test-Path $NpmGlobalDir) -and -not (($env:PATH -split ';') -contains $NpmGlobalDir)) {
+  $env:PATH = "$NpmGlobalDir;$env:PATH"
+}
 $NodeCandidates = @(
   "$env:APPDATA\AionUi-Dev\aionui\runtime\node\node-v24*",
   "$env:APPDATA\AionUi\aionui\runtime\node\node-v24*",

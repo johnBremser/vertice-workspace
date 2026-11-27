@@ -226,6 +226,7 @@ interface WorkspaceContextValue {
       | 'terminate_session',
     participantId?: string,
   ) => Promise<void>;
+  dispatchTask: (taskId: string) => Promise<void>;
   respondPermission: (
     requestId: string,
     decision: 'approved' | 'denied',
@@ -630,13 +631,21 @@ export function WorkspaceProvider({
     if (!store || store.executionMode !== 'aion_core' || !store.coreSessionAuthenticated) {
       return [];
     }
-    return store.connections.filter(
+    const candidates = store.connections.filter(
       (c) =>
         c.mode === 'aion_core' &&
         Boolean(c.coreAssistantId) &&
         c.catalogLoaded &&
         c.availableModels.some((m) => m.confirmed),
     );
+    const executable = candidates.filter((c) => c.executableStatus !== 'missing');
+    const pool = executable.length > 0 ? executable : candidates;
+    return [...pool].sort((a, b) => {
+      const score = (c: ConnectionAdapterConfig) =>
+        (c.executableStatus === 'verified' ? 2 : 0) +
+        (c.coreAgentStatus === 'online' ? 1 : 0);
+      return score(b) - score(a);
+    });
   }, [store]);
 
   const openAssistantSourceFile = useCallback((relPath: string) => {
@@ -905,6 +914,21 @@ export function WorkspaceProvider({
           action,
           participantId,
         });
+      }),
+    dispatchTask: async (taskId) =>
+      runAction(async () => {
+        if (!activeConversationId) return;
+        const gw = gatewayRef.current!;
+        if (gw.dispatchTask) {
+          await gw.dispatchTask({
+            conversationId: activeConversationId,
+            taskId,
+          });
+          setActionBanner({
+            tone: 'success',
+            message: 'Tarefa reconciliada e despachada para execução no AionCore.',
+          });
+        }
       }),
     respondPermission: async (requestId, decision) =>
       runAction(async () => {

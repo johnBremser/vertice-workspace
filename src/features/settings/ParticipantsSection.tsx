@@ -3,6 +3,7 @@ import {
   ArrowDown,
   ArrowUp,
   Plus,
+  RefreshCw,
   Save,
   Trash2,
 } from 'lucide-react';
@@ -12,6 +13,7 @@ import {
   makePreferenceModelRef,
 } from '../../domain/presets';
 import {
+  getCoreTeamSyncStatus,
   getParticipantRoles,
   selectableConnectionsForMode,
   sortParticipantsByTabOrder,
@@ -56,6 +58,7 @@ function ParticipantEditorRow({
   total,
   connections,
   workspaceMode,
+  activeExternalTeamId,
   canRemove,
   transitionReason,
   onMove,
@@ -67,10 +70,12 @@ function ParticipantEditorRow({
   index: number;
   total: number;
   workspaceMode: 'demo' | 'aion_core';
+  activeExternalTeamId?: string;
   connections: {
     id: string;
     displayName: string;
     mode: 'demo' | 'aion_core';
+    executableStatus?: string;
     availableModels: {
       externalId: string;
       displayName: string;
@@ -196,8 +201,18 @@ function ParticipantEditorRow({
     <div className="space-y-3 py-4 first:pt-0 last:pb-0">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <div className="text-sm font-semibold text-[var(--text-primary)]">
-            {participant.displayName}
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-[var(--text-primary)]">
+              {participant.displayName}
+            </span>
+            {activeExternalTeamId &&
+              (!participant.sessionRef.externalSlotId ||
+                participant.sessionRef.externalTeamId !==
+                  activeExternalTeamId) && (
+                <span className="rounded bg-[var(--status-warning-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--status-warning)]">
+                  Aguardando sincronização no Core
+                </span>
+              )}
           </div>
           <div className="text-xs text-[var(--text-secondary)]">
             Estado: {PT_BR.participantStatusLabels[participant.status]} · Sessão{' '}
@@ -357,12 +372,20 @@ function ParticipantEditorRow({
             ).map((conn) => (
               <option key={conn.id} value={conn.id}>
                 {conn.displayName}
+                {conn.executableStatus === 'missing'
+                  ? ' (CLI não encontrado no PATH)'
+                  : ''}
               </option>
             ))}
           </select>
           {(!connectionId || !currentConnection) && (
             <span className="mt-1 block text-[11px] text-[var(--status-warning)]">
               O provedor esperado por este perfil não está disponível no catálogo do AionCore. Escolha explicitamente uma conexão acima antes de criar o time.
+            </span>
+          )}
+          {currentConnection?.executableStatus === 'missing' && (
+            <span className="mt-1 block text-[11px] text-[var(--status-warning)]">
+              O CLI deste adaptador não foi encontrado no PATH do AionCore. Selecione outro agente instalado acima ou instale o CLI antes de iniciar um turno.
             </span>
           )}
         </label>
@@ -521,6 +544,7 @@ export function ParticipantsSection() {
     removeParticipantFromConversation,
     reorderParticipantTabs,
     configureParticipant,
+    coreCreateTeamForActiveConversation,
   } = useWorkspace();
 
   const [transitionReason, setTransitionReason] = useState(
@@ -530,6 +554,7 @@ export function ParticipantsSection() {
     activeConversation?.conversation.teamPresetId ?? '',
   );
   const [presetNameToSave, setPresetNameToSave] = useState('');
+  const [syncingCoreTeam, setSyncingCoreTeam] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
   const [newProfileId, setNewProfileId] = useState('');
   const [newName, setNewName] = useState('');
@@ -572,8 +597,14 @@ export function ParticipantsSection() {
     activeConversation;
   const activeParticipants = sortParticipantsByTabOrder(participants);
   const validation = validateTeamConfiguration(participants, store.connections);
-  const hasExternalTeam = Boolean(activeConversation.conversation.externalTeamId);
+  const coreTeamSyncStatus = getCoreTeamSyncStatus(activeConversation);
+  const hasExternalTeam = coreTeamSyncStatus.hasExternalTeam;
+  const availableCoreConnections = store.connections.filter(
+    (c) => c.mode === 'aion_core' && c.executableStatus !== 'missing',
+  );
   const selectedAddConn =
+    availableCoreConnections.find((c) => c.id === newConnId) ??
+    availableCoreConnections[0] ??
     store.connections.find((c) => c.id === newConnId) ??
     store.connections.find((c) => c.mode === 'aion_core') ??
     store.connections[0];
@@ -608,7 +639,11 @@ export function ParticipantsSection() {
       });
     } else {
       if (!newName.trim()) return;
-      const targetConnId = newConnId || store.connections[0].id;
+      const targetConnId =
+        newConnId ||
+        availableCoreConnections[0]?.id ||
+        store.connections[0]?.id ||
+        '';
       const targetConn = store.connections.find((c) => c.id === targetConnId);
       const trimmedPref = newModelPref.trim();
       const matchedModel = targetConn?.availableModels.find(
@@ -698,9 +733,8 @@ export function ParticipantsSection() {
             Aplicar preset de equipe nesta conversa
             <select
               value={selectedPresetId}
-              disabled={hasExternalTeam}
               onChange={(e) => setSelectedPresetId(e.target.value)}
-              className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs text-[var(--text-primary)] disabled:opacity-60"
+              className="mt-1 w-full rounded-md border border-[var(--border-strong)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]"
             >
               <option value="">
                 Selecione um preset para carregar...
@@ -714,7 +748,7 @@ export function ParticipantsSection() {
           </label>
           <button
             type="button"
-            disabled={!selectedPresetId || hasExternalTeam}
+            disabled={!selectedPresetId}
             onClick={() => void applyTeamPreset(selectedPresetId)}
             className="rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50"
           >
@@ -723,10 +757,48 @@ export function ParticipantsSection() {
         </div>
         {hasExternalTeam && (
           <p className="text-[11px] leading-relaxed text-[var(--text-secondary)]">
-            Esta conversa já possui time criado no Core (<code>{activeConversation.conversation.externalTeamId}</code>). No AionCore, cada participante já recebeu um <code>slot_id</code> e sessão fixos — por isso não é possível trocar todo o preset após criar o time. Para usar outro preset (como os salvos por você), crie uma <strong>Nova conversa</strong> selecionando-o.
+            Esta conversa possui time vinculado no Core (<code>{activeConversation.conversation.externalTeamId}</code>). Alterações estruturais (novo participante, troca de conexão/CLI, troca de Coordenador, arquivamento ou novo preset) exigem recriar o time no AionCore preservando seu histórico local.
           </p>
         )}
       </div>
+
+      {hasExternalTeam && coreTeamSyncStatus.needsResync && (
+        <div
+          role="status"
+          className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-[var(--status-warning)]/40 bg-[var(--status-warning-soft)] p-3 text-xs"
+        >
+          <div className="space-y-1 text-[var(--status-warning)]">
+            <div className="flex items-center gap-1.5 font-semibold">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <span>Equipe alterada localmente — sincronização pendente no AionCore</span>
+            </div>
+            <p className="text-[11px] leading-relaxed text-[var(--text-primary)]">
+              {coreTeamSyncStatus.reasons.join(' ')}
+            </p>
+          </div>
+          <button
+            type="button"
+            disabled={!validation.valid || syncingCoreTeam}
+            onClick={() => {
+              setSyncingCoreTeam(true);
+              void coreCreateTeamForActiveConversation().finally(() =>
+                setSyncingCoreTeam(false),
+              );
+            }}
+            className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50"
+          >
+            <RefreshCw
+              className={`h-3.5 w-3.5 ${syncingCoreTeam ? 'animate-spin' : ''}`}
+              aria-hidden="true"
+            />
+            <span>
+              {syncingCoreTeam
+                ? 'Sincronizando no Core...'
+                : 'Sincronizar equipe no AionCore agora'}
+            </span>
+          </button>
+        </div>
+      )}
 
       {(validation.errors.length > 0 || validation.warnings.length > 0) && (
         <div
@@ -787,6 +859,7 @@ export function ParticipantsSection() {
                 total={activeParticipants.length}
                 connections={store.connections}
                 workspaceMode={activeConversation.conversation.executionMode}
+                activeExternalTeamId={activeConversation.conversation.externalTeamId}
                 canRemove={!isCurrentCoord}
                 transitionReason={transitionReason}
                 onMove={(dir) => handleMove(index, dir)}
@@ -849,9 +922,8 @@ export function ParticipantsSection() {
                     !prof.archived &&
                     (activeConversation.conversation.executionMode !==
                       'aion_core' ||
-                      store.connections.some(
-                        (c) =>
-                          c.id === prof.connectionId && c.mode === 'aion_core',
+                      availableCoreConnections.some(
+                        (c) => c.id === prof.connectionId,
                       )),
                 )
                 .map((prof) => (
@@ -878,19 +950,17 @@ export function ParticipantsSection() {
                 <label className="block text-[var(--text-secondary)]">
                   Conexão
                   <select
-                    value={newConnId}
+                    value={selectedAddConn?.id ?? newConnId}
                     onChange={(e) => setNewConnId(e.target.value)}
                     className="mt-1 w-full rounded border border-[var(--border-strong)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]"
                   >
-                    {store.connections
-                      .filter((c) => c.mode === 'aion_core')
-                      .map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.displayName}
-                        </option>
-                      ))}
+                    {availableCoreConnections.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.displayName}
+                      </option>
+                    ))}
                   </select>
-                  {!store.connections.some((c) => c.mode === 'aion_core') && (
+                  {availableCoreConnections.length === 0 && (
                       <span className="mt-1 block text-[11px] text-[var(--status-warning)]">
                         Nenhuma conexão real do Core disponível ainda: autentique a
                         sessão no painel "Conexão AionCore Local" acima e clique em

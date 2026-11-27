@@ -300,6 +300,10 @@ export interface AgentWorkspaceGateway {
     action: 'pause_queue' | 'resume_queue' | 'request_interrupt' | 'terminate_session';
     participantId?: string;
   }): Promise<void>;
+  dispatchTask?(input: {
+    conversationId: string;
+    taskId: string;
+  }): Promise<void>;
   respondPermission(input: {
     conversationId: string;
     requestId: string;

@@ -1,4 +1,4 @@
-import { ListTodo, Plus, ScrollText } from 'lucide-react';
+import { ListTodo, Play, Plus, ScrollText } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
 import { EmptyState } from '../../components/EmptyState';
 import { getLatestContextRevision } from '../../domain/selectors';
@@ -14,6 +14,8 @@ export function TasksPanel() {
     updateTask,
     publishPlanRevision,
     registerTaskReview,
+    controlExecution,
+    dispatchTask,
     navigateToOrigin,
   } = useWorkspace();
 
@@ -110,6 +112,21 @@ export function TasksPanel() {
           <ScrollText className="h-3.5 w-3.5" aria-hidden="true" />
           <span>Revisão de plano</span>
         </button>
+
+        {activeConversation.conversation.externalTeamId &&
+          tasks.some(
+            (t) => t.status !== 'completed' && t.status !== 'cancelled',
+          ) && (
+            <button
+              type="button"
+              onClick={() => void controlExecution('resume_queue')}
+              title="Reconcilia com o AionCore e retoma a próxima tarefa ou revisão pendente"
+              className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--border-strong)] bg-[var(--bg-surface)] px-2.5 text-xs font-medium text-[var(--accent)] hover:bg-[var(--bg-elevated)]"
+            >
+              <Play className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Retomar fila no Core</span>
+            </button>
+          )}
       </div>
 
       {showCreateForm && (
@@ -308,6 +325,11 @@ export function TasksPanel() {
               selected={selectedTaskId === task.id}
               onRegisterReview={registerTaskReview}
               onUpdateTask={updateTask}
+              onDispatchTask={
+                activeConversation.conversation.externalTeamId
+                  ? dispatchTask
+                  : undefined
+              }
               onJumpToEvent={(tabId, eventId) =>
                 navigateToOrigin({ tabId, eventId })
               }

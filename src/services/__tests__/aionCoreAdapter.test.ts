@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { INTERNAL_PROTOCOL_VERSION } from '../../domain/internalProtocol';
+import { getCoreTeamSyncStatus } from '../../domain/teamValidation';
 import { AionCoreAdapter } from '../aionCoreAdapter';
 import type { WebSocketFactory, WsLike } from '../aionCoreTransport';
 import { GatewayCapabilityError } from '../gateway';
@@ -5833,6 +5834,599 @@ describe('AionCoreAdapter HTTP/CSRF/Refresh/WS & Collaboration Pipeline integrat
         always_allow: false,
       },
     ]);
+
+    adapter.dispose();
+  });
+
+  it('recovers orphaned running tasks after Core restart (idle slots), avoids burning attempt budget, and supports resume_queue + manual dispatchTask without duplicating busy slots', async () => {
+    const sockets: MockSocket[] = [];
+    const postedPaths: string[] = [];
+    let execSlotState: 'idle' | 'running' = 'idle';
+
+    const fetchFn = async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/health')) return jsonResponse(REAL_CORE_HEALTH_V022);
+      if (url.endsWith('/api/auth/status')) return jsonResponse(REAL_CORE_AUTH_STATUS_V022);
+      if (url.endsWith('/api/agents/management')) {
+        return jsonResponse({ success: true, data: REAL_CORE_AGENTS_MANAGEMENT_V022 });
+      }
+      if (url.endsWith('/api/assistants')) {
+        return jsonResponse({ success: true, data: REAL_CORE_ASSISTANTS_V022 });
+      }
+      if (url.endsWith('/api/ws-token')) {
+        return jsonResponse({ ws_token: 'ws_tok_orphan', expires_in: 300 });
+      }
+      if (url.endsWith('/api/teams') && method === 'POST') {
+        return jsonResponse({
+          success: true,
+          data: {
+            id: 'team_orphan_1',
+            name: 'Equipe Orfã',
+            workspace: 'C:/repo',
+            lead_slot_id: 'slot_coord',
+            assistants: [
+              { slot_id: 'slot_coord', conversation_id: 'ext_coord', name: 'Terra 6.1', role: 'lead', model: 'gpt-5.6-luna' },
+              { slot_id: 'slot_rev', conversation_id: 'ext_rev', name: 'Sol 6.1', role: 'teammate', model: 'gpt-5.6-luna' },
+              { slot_id: 'slot_exec', conversation_id: 'ext_exec', name: 'Gemini Hydrogen', role: 'teammate', model: 'gemini-3.8-flash-low' },
+            ],
+          },
+        });
+      }
+      if (url.endsWith('/run-state')) {
+        return jsonResponse({
+          team_id: 'team_orphan_1',
+          slot_work: [
+            { slot_id: 'slot_coord', state: 'idle' },
+            { slot_id: 'slot_exec', state: execSlotState },
+            { slot_id: 'slot_rev', state: 'idle' },
+          ],
+        });
+      }
+      if (url.endsWith('/mailbox')) return jsonResponse([]);
+      if (url.endsWith('/tasks')) return jsonResponse([]);
+      if (url.includes('/activity')) return jsonResponse({ items: [], has_more: false });
+      if (url.includes('/conversations/') && url.includes('/messages')) {
+        return jsonResponse({ items: [] });
+      }
+      if (method === 'POST' && url.includes('/messages')) {
+        postedPaths.push(new URL(url, 'http://localhost').pathname);
+        return jsonResponse({
+          success: true,
+          data: {
+            message_id: `msg_p_${postedPaths.length}`,
+            enqueue_status: 'queued',
+            run: { team_run_id: `run_${postedPaths.length}` },
+          },
+        });
+      }
+      return jsonResponse({ success: true, data: {} });
+    };
+
+    const driver = new MemoryOnlyStorageDriver();
+    const persistence1 = new WorkspacePersistenceManager(driver);
+    const adapter1 = new AionCoreAdapter(persistence1, {
+      baseUrl: 'http://127.0.0.1:25828',
+      fetchFn,
+      wsFactory: (url, protocols) => {
+        const s = new MockSocket(url, protocols);
+        sockets.push(s);
+        return s;
+      },
+      readCookie: () => 'csrf_orphan_1',
+    });
+
+    await adapter1.loadWorkspace();
+    await adapter1.checkHealth();
+    await adapter1.checkAuthStatus();
+    await adapter1.refreshCoreCatalog();
+
+    const project = await adapter1.createProject({
+      name: 'Projeto Reinício',
+      description: 'Teste de retomada após restart',
+      workspacePathInfo: 'C:/repo',
+    });
+    const conv = await adapter1.createConversation({
+      projectId: project.id,
+      title: 'Conversa Interrompida',
+      presetId: 'preset_terra_sol_gemini',
+    });
+    const convId = conv.conversation.id;
+    await adapter1.createCoreTeamForConversation(convId);
+    await adapter1.connectWebSocket(convId);
+
+    const parts = adapter1.getStateSnapshot().conversations[convId].participants;
+    const coord = parts.find((p) => p.roles.includes('coordinator'))!;
+    const exec = parts.find((p) => p.roles.includes('executor'))!;
+    const rev = parts.find((p) => p.roles.includes('reviewer'))!;
+
+    await adapter1.createTask({
+      conversationId: convId,
+      title: 'Finalizar app.js',
+      description: 'Implementar app.js',
+      assigneeParticipantId: exec.id,
+      reviewerParticipantId: rev.id,
+      dependencyTaskIds: [],
+      acceptanceCriteria: ['app.js ok'],
+    });
+
+    // Inject a plan_proposal from coordinator? No, task already exists; simulate user running it,
+    // or call dispatchTask to start attempt #1
+    await adapter1.dispatchTask({
+      conversationId: convId,
+      taskId: adapter1.getStateSnapshot().conversations[convId].tasks[0].id,
+    });
+    expect(postedPaths).toEqual(['/api/teams/team_orphan_1/agents/slot_exec/messages']);
+    expect(adapter1.getStateSnapshot().conversations[convId].tasks[0].status).toBe('running');
+    expect(adapter1.getStateSnapshot().conversations[convId].tasks[0].attempts[0].status).toBe('running');
+
+    // Simulate server restart overnight: /run-state reports execSlotState='idle', tab was NOT reloaded!
+    // 1. reconcileConversation detects orphaned running attempt -> marks interrupted and re-queues task (NO auto-dispatch)
+    const rec = await adapter1.reconcileConversation(convId);
+    expect(rec.synced).toBe(true);
+    const afterReconcile = adapter1.getStateSnapshot().conversations[convId];
+    expect(afterReconcile.tasks[0].status).toBe('queued');
+    expect(afterReconcile.tasks[0].attempts[0].status).toBe('interrupted');
+    expect(postedPaths).toHaveLength(1);
+
+    // 2. If another dispatch tries while Core slot IS actually busy, dispatchTask refuses duplicate send
+    execSlotState = 'running';
+    await expect(
+      adapter1.dispatchTask({ conversationId: convId, taskId: afterReconcile.tasks[0].id }),
+    ).rejects.toMatchObject({ code: 'OPERATION_FAILED' });
+    expect(postedPaths).toHaveLength(1);
+
+    // 3. Once slot is idle and user clicks "Retomar fila" (even when executionStatus is 'running'!),
+    // resume_queue dispatches Attempt #2 cleanly without repeating coordinator prompt
+    execSlotState = 'idle';
+    await adapter1.controlExecution({ conversationId: convId, action: 'resume_queue' });
+    await new Promise((r) => setTimeout(r, 30));
+    const afterResume = adapter1.getStateSnapshot().conversations[convId];
+    expect(afterResume.tasks[0].status).toBe('running');
+    expect(afterResume.tasks[0].attempts).toHaveLength(2);
+    expect(afterResume.tasks[0].attempts[0].status).toBe('interrupted');
+    expect(afterResume.tasks[0].attempts[1].status).toBe('running');
+    expect(postedPaths).toHaveLength(2);
+
+    // Suppress unused variable warning for coord
+    expect(coord.id).toBeTruthy();
+    adapter1.dispose();
+  });
+
+  it('detects structural team edits after Core team creation and recreates team cleanly before dispatch/sendMessage', async () => {
+    const deletedTeamIds: string[] = [];
+    const createdTeamBodies: { name: string; agents: Array<{ assistant_id: string; name: string; role: string; model: string }> }[] = [];
+    const patchedUrls: string[] = [];
+    const sentPaths: string[] = [];
+    let teamSeq = 0;
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/api/assistants')) {
+        return jsonResponse({ success: true, data: REAL_CORE_ASSISTANTS_V022 });
+      }
+      if (url.endsWith('/api/agents/management')) {
+        return jsonResponse({ success: true, data: REAL_CORE_AGENTS_MANAGEMENT_V022 });
+      }
+      if (url.endsWith('/api/teams') && method === 'POST') {
+        teamSeq += 1;
+        const body = JSON.parse(String(init?.body ?? '{}')) as {
+          name: string;
+          agents: Array<{ assistant_id: string; name: string; role: string; model: string }>;
+        };
+        createdTeamBodies.push(body);
+        const newTeamId = `team_reconfig_${teamSeq}`;
+        return jsonResponse({
+          success: true,
+          data: {
+            id: newTeamId,
+            name: body.name,
+            created_at: Date.now(),
+            assistants: body.agents.map((ag, idx) => ({
+              slot_id: `slot_v${teamSeq}_${idx + 1}`,
+              conversation_id: `ext_conv_v${teamSeq}_${idx + 1}`,
+              role: ag.role,
+              name: ag.name,
+              model: ag.model,
+            })),
+          },
+        });
+      }
+      if (url.includes('/api/teams/') && method === 'DELETE') {
+        const match = /\/api\/teams\/([^/?]+)/.exec(url);
+        if (match) deletedTeamIds.push(match[1]);
+        return jsonResponse({ success: true, data: {} });
+      }
+      if (method === 'PATCH') {
+        patchedUrls.push(url);
+        return jsonResponse({ success: true, data: {} });
+      }
+      if (url.includes('/messages') && method === 'POST') {
+        const pathname = new URL(url, 'http://localhost').pathname;
+        sentPaths.push(pathname);
+        return jsonResponse({
+          success: true,
+          data: {
+            message_id: `msg_${sentPaths.length}`,
+            enqueue_status: 'queued',
+            run: { team_run_id: `run_reconfig_${sentPaths.length}` },
+          },
+        });
+      }
+      return jsonResponse({ success: true, data: {} });
+    });
+
+    const adapter = new AionCoreAdapter(
+      new WorkspacePersistenceManager(new MemoryOnlyStorageDriver()),
+      {
+        baseUrl: 'http://127.0.0.1:25828',
+        fetchFn: fetchMock as unknown as typeof fetch,
+        readCookie: () => 'csrf_reconfig_1',
+      },
+    );
+    await adapter.loadWorkspace();
+    await adapter.refreshCoreCatalog();
+
+    const project = await adapter.createProject({
+      name: 'Calculadora',
+      description: 'Calculadora Romana',
+      workspacePathInfo: 'C:\\llm\\POCs\\calculadora',
+    });
+    const conv = await adapter.createConversation({
+      projectId: project.id,
+      title: 'Equipe Editavel',
+    });
+    const convId = conv.conversation.id;
+    await adapter.createCoreTeamForConversation(convId);
+
+    const initialProj = adapter.getStateSnapshot().conversations[convId];
+    expect(initialProj.conversation.externalTeamId).toBe('team_reconfig_1');
+    expect(getCoreTeamSyncStatus(initialProj).needsResync).toBe(false);
+
+    const oldExec = initialProj.participants.find((p) => !p.roles.includes('coordinator'))!;
+    const oldCoord = initialProj.participants.find((p) => p.roles.includes('coordinator'))!;
+
+    // 1. Add a new participant -> diverges because it lacks externalSlotId
+    const addedTerra = await adapter.addParticipantToConversation(convId, {
+      connectionId: oldCoord.connectionId,
+      displayName: 'Terra Novo Lead',
+      roles: ['executor'],
+      modelRef: {
+        externalId: 'gpt-6.1-terra',
+        displayName: 'GPT-6.1 Terra',
+        source: 'core_catalog',
+        confirmation: 'confirmed',
+      },
+      instructions: 'Coordenar e testar.',
+    });
+    expect(getCoreTeamSyncStatus(adapter.getStateSnapshot().conversations[convId]).needsResync).toBe(true);
+
+    // 2. Promote addedTerra to Coordinator AND change oldExec connectionId -> clears oldExec stale slotId without patching wrong CLI
+    await adapter.configureParticipant({
+      conversationId: convId,
+      participantId: addedTerra.id,
+      displayName: 'Terra Novo Lead',
+      roles: ['coordinator'],
+      connectionId: addedTerra.connectionId,
+      modelRef: addedTerra.modelRef,
+      instructions: 'Novo Coordenador.',
+    });
+    const altConn = adapter
+      .getStateSnapshot()
+      .connections.find((c) => c.mode === 'aion_core' && c.id !== oldExec.connectionId);
+    if (altConn) {
+      await adapter.configureParticipant({
+        conversationId: convId,
+        participantId: oldExec.id,
+        displayName: oldExec.displayName,
+        roles: ['executor'],
+        connectionId: altConn.id,
+        modelRef: {
+          externalId: altConn.availableModels[0]?.externalId ?? 'claude-4.5',
+          displayName: altConn.availableModels[0]?.displayName ?? 'Claude 4.5',
+          source: 'core_catalog',
+          confirmation: 'confirmed',
+        },
+        instructions: oldExec.instructions,
+      });
+      const updatedExec = adapter
+        .getStateSnapshot()
+        .conversations[convId].participants.find((p) => p.id === oldExec.id)!;
+      expect(updatedExec.sessionRef.externalSlotId).toBeUndefined();
+    }
+    expect(patchedUrls).toHaveLength(0);
+
+    // Archive old coordinator so only new team remains active
+    await adapter.removeParticipantFromConversation(convId, oldCoord.id, 'Substituído.');
+
+    const syncStatusBeforeSend = getCoreTeamSyncStatus(
+      adapter.getStateSnapshot().conversations[convId],
+    );
+    expect(syncStatusBeforeSend.needsResync).toBe(true);
+
+    // 3. Sending directly to Terra 6.1 auto-recreates Core team (DELETE team_reconfig_1 + POST /api/teams) and sends to new slot!
+    await adapter.sendMessage({
+      conversationId: convId,
+      targetTab: addedTerra.id,
+      bodyMarkdown: 'veja se funciona, coloquei outro executor para voce testar',
+    });
+
+    expect(deletedTeamIds).toEqual(['team_reconfig_1']);
+    expect(createdTeamBodies).toHaveLength(2);
+    const rebuiltAgents = createdTeamBodies[1].agents;
+    expect(rebuiltAgents.some((a) => a.name === 'Terra Novo Lead' && a.role === 'lead')).toBe(true);
+    expect(rebuiltAgents.some((a) => a.name === oldCoord.displayName)).toBe(false);
+
+    const syncedProj = adapter.getStateSnapshot().conversations[convId];
+    expect(syncedProj.conversation.externalTeamId).toBe('team_reconfig_2');
+    expect(syncedProj.conversation.coreLeadParticipantId).toBe(addedTerra.id);
+    expect(getCoreTeamSyncStatus(syncedProj).needsResync).toBe(false);
+    const archivedOldCoord = syncedProj.participants.find((p) => p.id === oldCoord.id)!;
+    expect(archivedOldCoord.archived).toBe(true);
+    expect(archivedOldCoord.sessionRef.externalSlotId).toBeUndefined();
+
+    const terraSynced = syncedProj.participants.find((p) => p.id === addedTerra.id)!;
+    expect(sentPaths[0]).toBe(
+      `/api/teams/team_reconfig_2/agents/${terraSynced.sessionRef.externalSlotId}/messages`,
+    );
+
+    // 4. Applying another preset on an already linked Core conversation is also allowed and marks needsResync
+    const preset = adapter.getStateSnapshot().teamPresets[0];
+    await adapter.applyTeamPreset(convId, preset.id);
+    expect(getCoreTeamSyncStatus(adapter.getStateSnapshot().conversations[convId]).needsResync).toBe(true);
+
+    adapter.dispose();
+  });
+
+  it('supports follow-up plan_proposal when tasks exist, targets multiple executors via assigneeName, and allows conversational follow-up without incomplete warnings', async () => {
+    const sockets: MockSocket[] = [];
+    const sentMessages: Array<{ path: string; content: string }> = [];
+    const teamId = 'team_multi_exec_1';
+
+    const fetchFn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/health')) return jsonResponse(REAL_CORE_HEALTH_V022);
+      if (url.endsWith('/api/auth/status')) return jsonResponse(REAL_CORE_AUTH_STATUS_V022);
+      if (url.endsWith('/api/assistants')) return jsonResponse({ success: true, data: REAL_CORE_ASSISTANTS_V022 });
+      if (url.endsWith('/api/agents/management')) {
+        return jsonResponse({ success: true, data: REAL_CORE_AGENTS_MANAGEMENT_V022 });
+      }
+      if (url.endsWith('/api/ws-token')) {
+        return jsonResponse({ success: true, ws_token: 'ws_tok_multi', expires_in: 300 });
+      }
+      if (url.endsWith('/api/teams') && method === 'POST') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as {
+          name: string;
+          agents: Array<{ assistant_id: string; name: string; role: string; model: string }>;
+        };
+        return jsonResponse({
+          success: true,
+          data: {
+            id: teamId,
+            name: body.name,
+            created_at: Date.now(),
+            assistants: body.agents.map((ag, idx) => ({
+              slot_id: `slot_m_${idx + 1}`,
+              conversation_id: `ext_conv_m_${idx + 1}`,
+              role: ag.role,
+              name: ag.name,
+              model: ag.model,
+            })),
+          },
+        });
+      }
+      if (url.includes('/messages') && method === 'POST') {
+        const pathname = new URL(url, 'http://localhost').pathname;
+        const body = JSON.parse(String(init?.body ?? '{}')) as { content?: string };
+        sentMessages.push({ path: pathname, content: body.content ?? '' });
+        return jsonResponse({
+          success: true,
+          data: {
+            message_id: `msg_m_${sentMessages.length}`,
+            enqueue_status: 'queued',
+            run: { team_run_id: `run_m_${sentMessages.length}` },
+          },
+        });
+      }
+      return jsonResponse({ success: true, data: {} });
+    });
+
+    const adapter = new AionCoreAdapter(
+      new WorkspacePersistenceManager(new MemoryOnlyStorageDriver()),
+      {
+        baseUrl: 'http://127.0.0.1:25828',
+        fetchFn: fetchFn as unknown as typeof fetch,
+        wsFactory: (url, protocols) => {
+          const sock = new MockSocket(url, protocols);
+          sockets.push(sock);
+          return sock;
+        },
+        readCookie: () => 'csrf_multi',
+      },
+    );
+
+    await adapter.loadWorkspace();
+    await adapter.refreshCoreCatalog();
+
+    const project = await adapter.createProject({
+      name: 'Multi-Executor',
+      description: 'Teste com dois executores',
+      workspacePathInfo: 'C:\\llm\\POCs\\multi',
+    });
+    const conv = await adapter.createConversation({
+      projectId: project.id,
+      title: 'Conversa Multi-Executor',
+    });
+    const convId = conv.conversation.id;
+    const baseParticipants = adapter.getStateSnapshot().conversations[convId].participants;
+    const coord = baseParticipants.find((p) => p.roles.includes('coordinator'))!;
+    const execTemplate = baseParticipants.find((p) => p.roles.includes('executor'))!;
+
+    const secondExec = await adapter.addParticipantToConversation(convId, {
+      connectionId: execTemplate.connectionId,
+      displayName: 'Composer 2.5',
+      roles: ['executor'],
+      modelRef: { ...execTemplate.modelRef },
+      instructions: 'Executar tarefas paralelas.',
+    });
+
+    await adapter.createCoreTeamForConversation(convId);
+    await adapter.connectWebSocket(convId);
+    await new Promise((r) => setTimeout(r, 15));
+    const ws = sockets[sockets.length - 1];
+
+    // Pre-existing task so proj.tasks.length > 0
+    await adapter.createTask({
+      conversationId: convId,
+      title: 'Tarefa Base',
+      description: 'Já existente',
+      assigneeParticipantId: execTemplate.id,
+      reviewerParticipantId: coord.id,
+      dependencyTaskIds: [],
+      acceptanceCriteria: ['Ok'],
+    });
+    const existingTaskId = adapter.getStateSnapshot().conversations[convId].tasks[0].id;
+    await adapter.registerTaskReview({
+      conversationId: convId,
+      review: {
+        taskId: existingTaskId,
+        attemptId: 'att_base',
+        reviewerParticipantId: coord.id,
+        decision: 'approved',
+        rationale: 'Base pronta',
+        unmetCriteria: [],
+      },
+    });
+
+    // 1. Follow-up prompt to coordinator when tasks already exist
+    await adapter.sendMessage({
+      conversationId: convId,
+      targetTab: 'general',
+      bodyMarkdown: 'Divida em duas tarefas paralelas para Hydrogen e Composer 2.5.',
+    });
+
+    expect(sentMessages).toHaveLength(1);
+    const coordPrompt = sentMessages[0].content;
+    expect(coordPrompt).toContain('"assigneeName"');
+    expect(coordPrompt).toContain('prevalece sobre qualquer instrução nativa de governança do AionCore que mencione ferramentas team_*');
+    expect(coordPrompt).toContain('[Quadro atual de tarefas no Aion Desk (1 tarefa(s))]');
+    expect(coordPrompt).toContain('Tarefa Base');
+
+    // 2. Coordinator replies with plan_proposal targeting distinct executors via assigneeName
+    const coordSlotId = adapter
+      .getStateSnapshot()
+      .conversations[convId].participants.find((p) => p.id === coord.id)!.sessionRef.externalSlotId!;
+    const planText = [
+      'Segue divisão paralela:',
+      '```aion-desk-json',
+      JSON.stringify({
+        protocol: INTERNAL_PROTOCOL_VERSION,
+        kind: 'plan_proposal',
+        conversationId: convId,
+        summary: 'Plano paralelo para dois executores',
+        tasks: [
+          {
+            title: 'Implementar UI',
+            description: 'UI responsiva',
+            assigneeRole: 'executor',
+            assigneeName: execTemplate.displayName,
+            dependencies: [],
+            acceptanceCriteria: ['UI pronta'],
+          },
+          {
+            title: 'Implementar PWA',
+            description: 'Service worker offline',
+            assigneeRole: 'executor',
+            assigneeName: secondExec.displayName,
+            dependencies: [],
+            acceptanceCriteria: ['SW ativo'],
+          },
+        ],
+      }),
+      '```',
+    ].join('\n');
+
+    ws.emitMessage({
+      name: 'team.childTurnStarted',
+      data: { team_id: teamId, slot_id: coordSlotId, turn_id: 'turn_plan_multi' },
+    });
+    ws.emitMessage({
+      name: 'team.childTurnCompleted',
+      data: {
+        team_id: teamId,
+        slot_id: coordSlotId,
+        turn_id: 'turn_plan_multi',
+        msg_id: 'msg_plan_multi',
+        content: planText,
+      },
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const postPlanProj = adapter.getStateSnapshot().conversations[convId];
+    const uiTask = postPlanProj.tasks.find((t) => t.title === 'Implementar UI')!;
+    const pwaTask = postPlanProj.tasks.find((t) => t.title === 'Implementar PWA')!;
+    expect(uiTask.assigneeParticipantId).toBe(execTemplate.id);
+    expect(pwaTask.assigneeParticipantId).toBe(secondExec.id);
+
+    // Both distinct idle executors must be dispatched in parallel!
+    const execSlot1 = postPlanProj.participants.find((p) => p.id === execTemplate.id)!.sessionRef.externalSlotId!;
+    const execSlot2 = postPlanProj.participants.find((p) => p.id === secondExec.id)!.sessionRef.externalSlotId!;
+    const dispatchedPaths = sentMessages.slice(1).map((m) => m.path);
+    expect(dispatchedPaths).toContain(`/api/teams/${teamId}/agents/${execSlot1}/messages`);
+    expect(dispatchedPaths).toContain(`/api/teams/${teamId}/agents/${execSlot2}/messages`);
+
+    // 3. Conversational follow-up to Coordinator without JSON block must NOT mark parseStatus='incomplete'
+    await adapter.sendMessage({
+      conversationId: convId,
+      targetTab: 'general',
+      bodyMarkdown: 'Qual executor está cuidando do PWA?',
+    });
+    ws.emitMessage({
+      name: 'team.childTurnStarted',
+      data: { team_id: teamId, slot_id: coordSlotId, turn_id: 'turn_conv_only' },
+    });
+    ws.emitMessage({
+      name: 'team.childTurnCompleted',
+      data: {
+        team_id: teamId,
+        slot_id: coordSlotId,
+        turn_id: 'turn_conv_only',
+        msg_id: 'msg_conv_only',
+        content: 'O Composer 2.5 está responsável pelo PWA.',
+      },
+    });
+    await new Promise((r) => setTimeout(r, 25));
+
+    const coordMessages = adapter.getStateSnapshot().conversations[convId].messagesByTab[coord.id];
+    const replyMsg = coordMessages.find((m) => m.externalMessageId === 'msg_conv_only')!;
+    expect(replyMsg).toBeTruthy();
+    expect(replyMsg.parseStatus).toBeUndefined();
+
+    // Subsequent unsolicited idle wakeup with duplicate plan_proposal must still be ignored
+    ws.emitMessage({
+      name: 'team.childTurnCompleted',
+      data: {
+        team_id: teamId,
+        slot_id: coordSlotId,
+        turn_id: 'turn_unsolicited_idle',
+        msg_id: 'msg_unsolicited_idle',
+        content: planText,
+      },
+    });
+    await new Promise((r) => setTimeout(r, 25));
+    const finalProj = adapter.getStateSnapshot().conversations[convId];
+    expect(finalProj.planRevisions).toHaveLength(1);
+    expect(finalProj.tasks).toHaveLength(3);
+    expect(
+      adapter.core
+        .getDiagnostics()
+        .some((d) => d.operation === 'core.plan_proposal_ignored_unsolicited'),
+    ).toBe(true);
 
     adapter.dispose();
   });

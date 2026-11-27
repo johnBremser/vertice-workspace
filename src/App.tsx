@@ -10,6 +10,7 @@ import {
   useWorkspace,
 } from './features/workspace/WorkspaceContext';
 import { WorkspaceHeader } from './features/workspace/WorkspaceHeader';
+import { getCoreTeamSyncStatus } from './domain/teamValidation';
 import { PT_BR } from './i18n/ptBR';
 
 const LazyExportDialog = lazy(() =>
@@ -43,14 +44,38 @@ function WorkspaceShell() {
     reconcileConversation,
     controlExecution,
     importWorkspaceState,
+    coreCreateTeamForActiveConversation,
   } = useWorkspace();
 
   const [exportOpen, setExportOpen] = useState(false);
 
   const conv = activeConversation?.conversation;
+  const coreTeamSyncStatus = activeConversation
+    ? getCoreTeamSyncStatus(activeConversation)
+    : null;
+  const needsCoreTeamResync =
+    Boolean(conv?.externalTeamId) &&
+    Boolean(coreTeamSyncStatus?.needsResync) &&
+    mainSurface === 'conversation';
   const hasGap =
     conv?.syncState === 'gap_detected' || conv?.syncState === 'incomplete';
   const isPausedCoreQueue = conv?.executionStatus === 'paused_queue';
+  const hasStalledCoreWork =
+    Boolean(conv?.externalTeamId) &&
+    !isPausedCoreQueue &&
+    conv?.executionStatus === 'running' &&
+    Boolean(
+      activeConversation?.tasks.some(
+        (t) => t.status !== 'completed' && t.status !== 'cancelled',
+      ),
+    ) &&
+    Boolean(
+      activeConversation?.participants.every(
+        (p) => p.status !== 'running' && p.status !== 'preparing',
+      ),
+    ) &&
+    !activeConversation?.escalations.some((e) => e.status === 'suggested') &&
+    !activeConversation?.permissions.some((p) => p.status === 'pending');
   const needsCoreTeamSetup =
     Boolean(conv) && !conv?.externalTeamId && mainSurface === 'conversation';
 
@@ -108,6 +133,38 @@ function WorkspaceShell() {
           </div>
         )}
 
+        {/* Core Team Resync Banner when composition changed locally after team creation */}
+        {needsCoreTeamResync && coreTeamSyncStatus && (
+          <div
+            role="status"
+            className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-hairline)] bg-[var(--status-warning-soft)] px-4 py-2 text-xs text-[var(--status-warning)] sm:px-6"
+          >
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
+              <span>
+                Equipe alterada localmente ({coreTeamSyncStatus.reasons.join(' ')}). Sincronize para aplicar no AionCore.
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setMainSurface('settings')}
+                className="whitespace-nowrap rounded-md border border-current px-2.5 py-1 text-xs font-medium hover:opacity-85"
+              >
+                Configurar equipe
+              </button>
+              <button
+                type="button"
+                onClick={() => void coreCreateTeamForActiveConversation()}
+                className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
+              >
+                <RefreshCw className="h-3 w-3" aria-hidden="true" />
+                <span>Aplicar composição no Core</span>
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Gap / Reconciliation Notice */}
         {hasGap && (
           <div
@@ -131,13 +188,17 @@ function WorkspaceShell() {
           </div>
         )}
 
-        {/* Paused After Reload Banner (Core) */}
-        {isPausedCoreQueue && (
+          {/* Paused After Reload or Stalled Core Work Banner */ }
+        {(isPausedCoreQueue || hasStalledCoreWork) && (
           <div
             role="status"
             className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-hairline)] bg-[var(--bg-elevated)] px-4 py-2 text-xs text-[var(--text-primary)] sm:px-6"
           >
-            <span>{PT_BR.pausedCoreAfterReloadLabel}</span>
+            <span>
+              {isPausedCoreQueue
+                ? PT_BR.pausedCoreAfterReloadLabel
+                : 'Há tarefas pendentes sem nenhum agente ativo no momento (ex.: após reinício do servidor AionCore). Reconcilie e retome para continuar apenas das etapas restantes.'}
+            </span>
             <div className="flex flex-wrap items-center gap-2">
               {conv?.externalTeamId && (
                 <button
@@ -172,15 +233,14 @@ function WorkspaceShell() {
           <div
             role="status"
             aria-live="polite"
-            className={`flex items-center justify-between gap-3 border-b border-[var(--border-hairline)] px-4 py-2 text-xs sm:px-6 ${
-              actionBanner.tone === 'danger'
+            className={`flex items-center justify-between gap-3 border-b border-[var(--border-hairline)] px-4 py-2 text-xs sm:px-6 ${actionBanner.tone === 'danger'
                 ? 'bg-[var(--status-danger-soft)] text-[var(--status-danger)]'
                 : actionBanner.tone === 'warning'
                   ? 'bg-[var(--status-warning-soft)] text-[var(--status-warning)]'
                   : actionBanner.tone === 'success'
                     ? 'bg-[var(--status-success-soft)] text-[var(--status-success)]'
                     : 'bg-[var(--accent-soft)] text-[var(--text-primary)]'
-            }`}
+              }`}
           >
             <span>{actionBanner.message}</span>
             <button

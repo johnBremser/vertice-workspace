@@ -358,6 +358,10 @@ export function applyEventIncrementally(
       conversation = {
         ...conversation,
         coordinatorParticipantId: event.payload.nextParticipantId,
+        ...(conversation.externalTeamId &&
+        conversation.coreLeadParticipantId !== event.payload.nextParticipantId
+          ? { coreTeamNeedsResync: true }
+          : {}),
       };
       participants = participants.map((p) => {
         const currentRoles = getParticipantRoles(p);
@@ -424,6 +428,7 @@ export function applyEventIncrementally(
     case 'participant_configured': {
       const rec: ConfigChangeRecord = event.payload.changeRecord;
       configChanges = [...configChanges, rec];
+      let connectionChanged = false;
       participants = participants.map((p) => {
         if (p.id !== rec.participantId) return p;
         const nextRoles = event.payload.roles ?? getParticipantRoles(p);
@@ -431,6 +436,10 @@ export function applyEventIncrementally(
         const nextTier =
           event.payload.modelTier ?? nextModelRef.tier ?? p.modelTier;
         const nextConnId = event.payload.connectionId ?? p.connectionId;
+        const didChangeConn = nextConnId !== p.connectionId;
+        if (didChangeConn) {
+          connectionChanged = true;
+        }
         return {
           ...p,
           displayName: event.payload.displayName ?? p.displayName,
@@ -441,8 +450,26 @@ export function applyEventIncrementally(
           instructions: event.payload.instructions ?? p.instructions,
           connectionId: nextConnId,
           agentProfileId: nextConnId,
+          ...(didChangeConn
+            ? {
+                sessionRef: {
+                  ...p.sessionRef,
+                  connectionId: nextConnId,
+                  externalSlotId: undefined,
+                  externalConversationId: undefined,
+                  nativeSessionId: undefined,
+                  status: 'inactive' as const,
+                },
+              }
+            : {}),
         };
       });
+      if (connectionChanged && conversation.externalTeamId) {
+        conversation = {
+          ...conversation,
+          coreTeamNeedsResync: true,
+        };
+      }
       messagesByTab = appendSystemExecutionRecord(
         messagesByTab,
         event,
@@ -472,6 +499,12 @@ export function applyEventIncrementally(
       if (!messagesByTab[incoming.id]) {
         messagesByTab = { ...messagesByTab, [incoming.id]: [] };
       }
+      if (conversation.externalTeamId && !incoming.sessionRef?.externalSlotId) {
+        conversation = {
+          ...conversation,
+          coreTeamNeedsResync: true,
+        };
+      }
       if (
         !conversation.coordinatorParticipantId &&
         (incoming.roles?.includes('coordinator') || incoming.role === 'coordinator')
@@ -490,6 +523,12 @@ export function applyEventIncrementally(
           ? { ...p, archived: true, status: 'disconnected' }
           : p,
       );
+      if (conversation.externalTeamId) {
+        conversation = {
+          ...conversation,
+          coreTeamNeedsResync: true,
+        };
+      }
       messagesByTab = appendSystemExecutionRecord(
         messagesByTab,
         event,
@@ -620,7 +659,8 @@ export function applyEventIncrementally(
               status: event.payload.nextStatus,
               updatedAt: event.timestamp,
               attempts:
-                event.payload.nextStatus === 'cancelled'
+                event.payload.nextStatus === 'cancelled' ||
+                event.payload.nextStatus === 'queued'
                   ? task.attempts.map((a) =>
                       a.status === 'running'
                         ? {
@@ -642,7 +682,8 @@ export function applyEventIncrementally(
                 status: event.payload.participantStatus!,
                 currentTaskId:
                   event.payload.nextStatus === 'completed' ||
-                  event.payload.nextStatus === 'cancelled'
+                  event.payload.nextStatus === 'cancelled' ||
+                  event.payload.nextStatus === 'queued'
                     ? undefined
                     : event.payload.taskId,
               }
